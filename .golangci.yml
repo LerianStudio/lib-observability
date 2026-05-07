@@ -1,0 +1,171 @@
+version: "2"
+run:
+  tests: false
+linters:
+  enable:
+    # --- Existing linters ---
+    - bodyclose
+    - depguard
+    - dogsled
+    - dupword
+    - errchkjson
+    - gocognit
+    - gocyclo
+    - loggercheck
+    - misspell
+    - nakedret
+    - nilerr
+    - nolintlint
+    - prealloc
+    - predeclared
+    - reassign
+    - revive
+    - staticcheck
+    - unconvert
+    - unparam
+    - usestdlibvars
+    - wastedassign
+    - wsl_v5
+
+    # --- Tier 1: Safety & Correctness ---
+    - errorlint        # type assertions on errors, missing %w
+    - exhaustive       # non-exhaustive enum switches
+    - fatcontext       # context growing in loop
+    - forcetypeassert  # unchecked type assertions (sync.Map etc.)
+    - gosec            # security issues (math/rand for jitter etc.)
+    - nilnil           # return nil, nil ambiguity
+    - noctx            # net.Listen/exec.Command without context
+
+    # --- Tier 2: Code Quality & Modernization ---
+    - goconst          # repeated string literals
+    - gocritic         # if-else→switch, deprecated comments
+    - inamedparam      # unnamed interface params
+    - intrange         # integer range loops
+    - mirror           # allocation savings (bytes.Equal etc.)
+    - modernize        # Go modernization suggestions
+    - perfsprint       # fmt.Errorf→errors.New where applicable
+
+    # --- Tier 3: Zero-Issue Guards ---
+    - asasalint                  # variadic any argument passing
+    - copyloopvar                # loop variable capture prevention
+    - durationcheck              # time.Duration math bugs
+    - exptostd                   # x/exp to stdlib migration
+    - gocheckcompilerdirectives  # malformed //go: comments
+    - makezero                   # make with non-zero length passed to append
+    - musttag                    # struct tag validation for marshaling
+    - nilnesserr                 # subtle nil error patterns
+    - recvcheck                  # receiver consistency
+    - rowserrcheck               # SQL rows.Err() checks
+    - spancheck                  # OTEL span lifecycle
+    - sqlclosecheck              # SQL resource close
+    - testifylint                # testify assertion patterns
+
+  settings:
+    # --- New settings ---
+    exhaustive:
+      default-signifies-exhaustive: true
+
+    goconst:
+      min-len: 3
+      min-occurrences: 3
+      ignore-tests: true
+
+    # --- Existing settings (unchanged) ---
+    depguard:
+      rules:
+        main:
+          deny:
+            - pkg: io/ioutil
+              desc: The io/ioutil package has been deprecated, see https://go.dev/doc/go1.16#ioutil
+    gocyclo:
+      min-complexity: 16
+    govet:
+      enable:
+        - shadow
+      settings:
+        shadow:
+          strict: true
+    revive:
+      rules:
+        - name: import-shadowing
+          severity: warning
+          disabled: false
+        - name: empty-block
+          severity: warning
+          disabled: false
+        - name: empty-lines
+          severity: warning
+          disabled: false
+        - name: use-any
+          severity: warning
+          disabled: false
+    wsl_v5:
+      allow-first-in-block: true
+      allow-whole-block: false
+      branch-max-lines: 2
+
+  exclusions:
+    generated: lax
+    rules:
+      - linters:
+          - errcheck
+        text: Error return value of .((os\.)?std(out|err)\..*|.*Close|.*Flush|os\.Remove(All)?|.*print(f|ln)?|os\.(Un)?Setenv). is not checked
+      - linters:
+          - revive
+        text: func name will be used as test\.Test.* by other packages, and that stutters; consider calling this
+      - linters:
+          - gosec
+        text: Use of unsafe calls should be audited
+      - linters:
+          - gosec
+        text: Subprocess launch(ed with variable|ing should be audited)
+      - linters:
+          - gosec
+        text: G307
+      - linters:
+          - gosec
+        text: (Expect directory permissions to be 0750 or less|Expect file permissions to be 0600 or less)
+      - linters:
+          - gosec
+        text: Potential file inclusion via variable
+      - linters:
+          - gosec
+        text: G113
+      - linters:
+          - gosec
+        text: G104
+      - linters:
+          - gosec
+        text: 'G204: Subprocess launched with a potential tainted input or cmd arguments'
+      - linters:
+          - gosec
+        text: 'G306: Expect WriteFile permissions to be 0600 or less'
+      - linters:
+          - revive
+        text: 'package-comments: should have a package comment'
+      - linters:
+          - errcheck
+          - gosec
+        path: _test\.go
+      - linters:
+          - staticcheck
+        text: 'ST1000: at least one file in a package should have a package comment'
+      - linters:
+          - govet
+        text: '^shadow: declaration of "(err|ok)" shadows declaration'
+      - path: (.+)\.go$
+        text: parameter .* always receives
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+formatters:
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
