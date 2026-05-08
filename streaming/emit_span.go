@@ -7,17 +7,20 @@ import (
 	"github.com/LerianStudio/lib-observability/log"
 )
 
+//nolint:unused // TODO: used by Emit() method once kafka producer is migrated
 // tracerName is the instrumentation-library name used when the caller did
 // not supply a tracer via WithTracer. Matches the per-package convention
 // (see commons/rabbitmq/rabbitmq.go: otel.Tracer("rabbitmq")) so operators
 // can filter on this library in tracing backends.
 const tracerName = "streaming"
 
+//nolint:unused // TODO: used by Emit() method once kafka producer is migrated
 // emitSpanName is the OTEL span name for each Emit invocation. Stable; a
 // rename would break downstream trace filters and should be coordinated
 // with TRD §7.2 + every dashboard that keys off this name.
 const emitSpanName = "streaming.emit"
 
+//nolint:unused // TODO: called at Emit() span creation once kafka producer is migrated
 // setEmitSpanAttributes sets the TRD §7.2 attribute set on the streaming.emit
 // span. Called at span creation before any Execute branch runs so even error
 // paths carry the full diagnostic envelope.
