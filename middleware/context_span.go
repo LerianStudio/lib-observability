@@ -54,8 +54,10 @@ func SetExceptionSpanAttributes(span trace.Span, tenantID, exceptionID uuid.UUID
 		return
 	}
 
-	span.SetAttributes(attribute.String("tenant.id", tenantID.String()))
-	span.SetAttributes(attribute.String("exception.id", exceptionID.String()))
+	span.SetAttributes(
+		attribute.String("tenant.id", tenantID.String()),
+		attribute.String("exception.id", exceptionID.String()),
+	)
 }
 
 // SetDisputeSpanAttributes adds tenant_id and dispute_id attributes to a trace span.
@@ -64,6 +66,8 @@ func SetDisputeSpanAttributes(span trace.Span, tenantID, disputeID uuid.UUID) {
 		return
 	}
 
-	span.SetAttributes(attribute.String("tenant.id", tenantID.String()))
-	span.SetAttributes(attribute.String("dispute.id", disputeID.String()))
+	span.SetAttributes(
+		attribute.String("tenant.id", tenantID.String()),
+		attribute.String("dispute.id", disputeID.String()),
+	)
 }
