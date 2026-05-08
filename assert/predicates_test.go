@@ -206,8 +206,8 @@ func TestDateNotInFuture(t *testing.T) {
 	}{
 		{"past date valid", now.Add(-24 * time.Hour), true},
 		{"recent past valid", now.Add(-time.Second), true},
-		{"one second ago valid", now.Add(-time.Second), true},
-		{"one second future invalid", now.Add(time.Second), false},
+		{"one minute ago valid", now.Add(-time.Minute), true},
+		{"one minute future invalid", now.Add(time.Minute), false},
 		{"one hour future invalid", now.Add(time.Hour), false},
 		{"far future invalid", now.Add(365 * 24 * time.Hour), false},
 		{"zero time valid", time.Time{}, true},

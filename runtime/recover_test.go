@@ -140,9 +140,11 @@ func TestRecoverWithPolicyAndContext_NilCtx(t *testing.T) {
 
 	logger := newTestLogger()
 
+	var nilCtx context.Context
+
 	require.NotPanics(t, func() {
 		func() {
-			defer RecoverWithPolicyAndContext(context.Background(), logger, "test", "test", KeepRunning)
+			defer RecoverWithPolicyAndContext(nilCtx, logger, "test", "test", KeepRunning)
 			panic("test")
 		}()
 	})
@@ -175,12 +177,11 @@ func TestToPanicError_ErrorValue(t *testing.T) {
 	t.Parallel()
 
 	// Test via production mode - production mode returns error type, not message
-	err := toPanicError(errOriginalPanicRecover, false)
-	require.NotNil(t, err)
-	assert.Contains(t, err.Error(), errOriginalPanicRecover.Error())
+	errNonProd := toPanicError(errOriginalPanicRecover, false)
+	require.NotNil(t, errNonProd)
+	assert.Contains(t, errNonProd.Error(), errOriginalPanicRecover.Error())
 
 	errProd := toPanicError(errOriginalPanicRecover, true)
 	require.NotNil(t, errProd)
-	// In production mode, error message is sanitized
-	assert.NotNil(t, errProd)
+	assert.NotEqual(t, errNonProd.Error(), errProd.Error(), "production mode should sanitize panic details")
 }

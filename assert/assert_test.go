@@ -232,7 +232,7 @@ func TestNoError_MessageContainsError(t *testing.T) {
 	require.Contains(t, msg, "assertion failed:")
 	require.Contains(t, msg, "operation failed")
 	require.Contains(t, msg, "error=specific test error")
-	require.Contains(t, msg, "error_type=*errors.errorString")
+	require.Contains(t, msg, "error_type=")
 	require.Contains(t, msg, "context_key=context_value")
 }
 

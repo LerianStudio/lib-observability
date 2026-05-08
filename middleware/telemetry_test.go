@@ -28,13 +28,19 @@ import (
 )
 
 // setupTestTracer sets up a test tracer provider and returns it along with a span recorder.
-func setupTestTracer() (*sdktrace.TracerProvider, *tracetest.SpanRecorder) {
+func setupTestTracer(t *testing.T) (*sdktrace.TracerProvider, *tracetest.SpanRecorder) {
+	t.Helper()
+
 	spanRecorder := tracetest.NewSpanRecorder()
 	tracerProvider := sdktrace.NewTracerProvider(
 		sdktrace.WithSpanProcessor(spanRecorder),
 	)
 
+	oldPropagator := otel.GetTextMapPropagator()
 	otel.SetTextMapPropagator(propagation.TraceContext{})
+	t.Cleanup(func() {
+		otel.SetTextMapPropagator(oldPropagator)
+	})
 
 	return tracerProvider, spanRecorder
 }
@@ -109,7 +115,7 @@ func TestWithTelemetry(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
 
-			tp, spanRecorder := setupTestTracer()
+			tp, spanRecorder := setupTestTracer(t)
 			defer func() {
 				_ = tp.Shutdown(ctx)
 			}()
@@ -181,9 +187,7 @@ func TestWithTelemetry(t *testing.T) {
 				}
 				assert.True(t, spanFound, "Expected span with name %s not found", tt.method+" "+expectedPath)
 			} else if tt.swaggerPath || tt.nilTelemetry {
-				for _, span := range spans {
-					assert.NotEqual(t, tt.method+" "+tt.path, span.Name(), "Should not have created a span for swagger path or nil telemetry")
-				}
+				assert.Empty(t, spans, "Expected no spans for swagger path or nil telemetry")
 			}
 		})
 	}
@@ -239,7 +243,7 @@ func TestWithTelemetryExcludedRoutes(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
 
-			tp, spanRecorder := setupTestTracer()
+			tp, spanRecorder := setupTestTracer(t)
 			defer func() {
 				_ = tp.Shutdown(ctx)
 			}()
@@ -289,10 +293,7 @@ func TestWithTelemetryExcludedRoutes(t *testing.T) {
 				}
 				assert.True(t, spanFound, "Expected span with name %s not found", expectedSpanName)
 			} else {
-				expectedSpanName := tt.method + " " + replaceUUIDWithPlaceholder(tt.path)
-				for _, span := range spans {
-					assert.NotEqual(t, expectedSpanName, span.Name(), "Should not have created a span for excluded route")
-				}
+				assert.Empty(t, spans, "Expected no spans for excluded routes")
 			}
 		})
 	}
@@ -417,7 +418,7 @@ func TestEndTracingSpans_CallsNextWithoutInitialContext(t *testing.T) {
 func TestEndTracingSpans_EndsFinalContextSpan(t *testing.T) {
 	t.Parallel()
 
-	tp, spanRecorder := setupTestTracer()
+	tp, spanRecorder := setupTestTracer(t)
 	defer func() { _ = tp.Shutdown(context.Background()) }()
 
 	app := fiber.New()
@@ -560,7 +561,7 @@ func TestStopMetricsCollector_AllowsRestart(t *testing.T) {
 func TestExtractHTTPContext(t *testing.T) {
 	ctx := context.Background()
 
-	tp, _ := setupTestTracer()
+	tp, _ := setupTestTracer(t)
 	defer func() {
 		_ = tp.Shutdown(ctx)
 	}()
@@ -643,7 +644,7 @@ func TestWithTelemetryConditionalTracePropagation(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
 
-			tp, spanRecorder := setupTestTracer()
+			tp, spanRecorder := setupTestTracer(t)
 			defer func() {
 				_ = tp.Shutdown(ctx)
 			}()
@@ -694,10 +695,9 @@ func TestWithTelemetryConditionalTracePropagation(t *testing.T) {
 				assert.Equal(t, "4bf92f3577b34da6a3ce929d0e0e4736", capturedSpanContext.TraceID().String(),
 					"Trace ID should match the traceparent header for internal services")
 			} else {
-				if capturedSpanContext.IsValid() {
-					assert.NotEqual(t, "4bf92f3577b34da6a3ce929d0e0e4736", capturedSpanContext.TraceID().String(),
-						"Trace ID should be different from traceparent header for external services")
-				}
+				require.True(t, capturedSpanContext.IsValid(), "Expected middleware to attach a valid span context")
+				assert.NotEqual(t, "4bf92f3577b34da6a3ce929d0e0e4736", capturedSpanContext.TraceID().String(),
+					"Trace ID should be different from traceparent header for external services")
 			}
 		})
 	}
@@ -842,7 +842,7 @@ func TestWithTelemetryInterceptorConditionalTracePropagation(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
 
-			tp, spanRecorder := setupTestTracer()
+			tp, spanRecorder := setupTestTracer(t)
 			defer func() {
 				_ = tp.Shutdown(ctx)
 			}()
@@ -892,10 +892,9 @@ func TestWithTelemetryInterceptorConditionalTracePropagation(t *testing.T) {
 				assert.Equal(t, "4bf92f3577b34da6a3ce929d0e0e4736", capturedSpanContext.TraceID().String(),
 					"Trace ID should match the traceparent for internal gRPC services")
 			} else {
-				if capturedSpanContext.IsValid() {
-					assert.NotEqual(t, "4bf92f3577b34da6a3ce929d0e0e4736", capturedSpanContext.TraceID().String(),
-						"Trace ID should be different from traceparent for external services")
-				}
+				require.True(t, capturedSpanContext.IsValid(), "Expected middleware to attach a valid span context")
+				assert.NotEqual(t, "4bf92f3577b34da6a3ce929d0e0e4736", capturedSpanContext.TraceID().String(),
+					"Trace ID should be different from traceparent for external services")
 			}
 		})
 	}

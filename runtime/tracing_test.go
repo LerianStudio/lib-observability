@@ -325,17 +325,21 @@ func TestRecordPanicToSpan_NonRecordingSpan(t *testing.T) {
 func TestRecordPanicToSpan_NilContext(t *testing.T) {
 	t.Parallel()
 
+	var nilCtx context.Context
+
 	require.NotPanics(t, func() {
-		RecordPanicToSpan(context.TODO(), "panic value", []byte("stack"), "goroutine")
+		RecordPanicToSpan(nilCtx, "panic value", []byte("stack"), "goroutine")
 	})
 }
 
 func TestRecordPanicToSpanWithComponent_NilContext(t *testing.T) {
 	t.Parallel()
 
+	var nilCtx context.Context
+
 	require.NotPanics(t, func() {
 		RecordPanicToSpanWithComponent(
-			context.TODO(),
+			nilCtx,
 			"panic value",
 			[]byte("stack"),
 			"component",

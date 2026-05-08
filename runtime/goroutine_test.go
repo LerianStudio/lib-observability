@@ -384,11 +384,12 @@ func TestPanicMetrics_NilFactory(t *testing.T) {
 
 // TestErrorReporter_NilReporter tests that nil reporter doesn't cause panic.
 func TestErrorReporter_NilReporter(t *testing.T) {
-	t.Parallel()
+	//nolint:paralleltest // modifies global errorReporterInstance
 
 	ctx := context.Background()
 
 	SetErrorReporter(nil)
+	t.Cleanup(func() { SetErrorReporter(nil) })
 
 	reportPanicToErrorService(ctx, "test panic", nil, "test", "test")
 
