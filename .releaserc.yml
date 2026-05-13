@@ -40,5 +40,7 @@ plugins:
 
 branches:
   - name: main
+  - name: release-candidate
+    prerelease: rc
   - name: develop
     prerelease: beta
