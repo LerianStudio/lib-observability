@@ -22,7 +22,7 @@ jobs:
     name: Go Analysis
     uses: LerianStudio/github-actions-shared-workflows/.github/workflows/go-pr-analysis.yml@v1.28.12
     with:
-      go_version: "1.25"
+      go_version: "1.25.9"
       golangci_lint_version: "v2.11.2"
       fail_on_coverage_threshold: true
       go_private_modules: "github.com/LerianStudio/*"
