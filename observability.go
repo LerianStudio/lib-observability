@@ -270,3 +270,16 @@ func AttributesFromContext(ctx context.Context) []attribute.KeyValue {
 
 	return nil
 }
+
+// ReplaceAttributes resets the current AttrBag with a new set of request-wide span attributes.
+func ReplaceAttributes(ctx context.Context, kv ...attribute.KeyValue) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	values := cloneContextValues(ctx)
+
+	values.AttrBag = append([]attribute.KeyValue(nil), kv...)
+
+	return context.WithValue(ctx, ContextKey, values)
+}
