@@ -16,8 +16,6 @@ import (
 )
 
 func TestWithTelemetry_UnmatchedRouteDoesNotPanic(t *testing.T) {
-	t.Parallel()
-
 	tp, spanRecorder := setupTestTracer(t)
 	defer func() { _ = tp.Shutdown(context.Background()) }()
 

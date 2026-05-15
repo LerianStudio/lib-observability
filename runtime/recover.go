@@ -50,7 +50,7 @@ func RecoverAndLog(logger Logger, name string) {
 func RecoverAndLogWithContext(ctx context.Context, logger Logger, component, name string) {
 	if r := recover(); r != nil {
 		stack := debug.Stack()
-		logPanicWithStack(logger, name, r, stack)
+		logPanicWithStack(ctx, logger, name, r, stack)
 		recordPanicObservability(ctx, r, stack, component, name)
 	}
 }
@@ -83,7 +83,7 @@ func RecoverAndCrash(logger Logger, name string) {
 func RecoverAndCrashWithContext(ctx context.Context, logger Logger, component, name string) {
 	if r := recover(); r != nil {
 		stack := debug.Stack()
-		logPanicWithStack(logger, name, r, stack)
+		logPanicWithStack(ctx, logger, name, r, stack)
 		recordPanicObservability(ctx, r, stack, component, name)
 		panic(r)
 	}
@@ -136,7 +136,7 @@ func RecoverWithPolicyAndContext(
 ) {
 	if recovered := recover(); recovered != nil {
 		stack := debug.Stack()
-		logPanicWithStack(logger, name, recovered, stack)
+		logPanicWithStack(ctx, logger, name, recovered, stack)
 		recordPanicObservability(ctx, recovered, stack, component, name)
 
 		if policy == CrashProcess {
@@ -149,19 +149,23 @@ func RecoverWithPolicyAndContext(
 // This is the legacy function that captures stack internally.
 func logPanic(logger Logger, name string, panicValue any) {
 	stack := debug.Stack()
-	logPanicWithStack(logger, name, panicValue, stack)
+	logPanicWithStack(context.Background(), logger, name, panicValue, stack)
 }
 
 // logPanicWithStack logs the panic with a pre-captured stack trace.
 // In production mode, panic values are redacted to prevent leaking sensitive data.
-func logPanicWithStack(logger Logger, name string, panicValue any, stack []byte) {
+func logPanicWithStack(ctx context.Context, logger Logger, name string, panicValue any, stack []byte) {
 	if logger == nil {
 		// Last resort fallback - should never happen in production
 		return
 	}
 
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	if IsProductionMode() {
-		logger.Log(context.Background(), log.LevelError,
+		logger.Log(ctx, log.LevelError,
 			"panic recovered",
 			log.String("source", name),
 			log.String("value", redactedPanicMsg),
@@ -170,7 +174,7 @@ func logPanicWithStack(logger Logger, name string, panicValue any, stack []byte)
 		return
 	}
 
-	logger.Log(context.Background(), log.LevelError,
+	logger.Log(ctx, log.LevelError,
 		"panic recovered",
 		log.String("source", name),
 		log.Any("value", panicValue),
@@ -224,6 +228,6 @@ func HandlePanicValue(ctx context.Context, logger Logger, panicValue any, compon
 	}
 
 	stack := debug.Stack()
-	logPanicWithStack(logger, name, panicValue, stack)
+	logPanicWithStack(ctx, logger, name, panicValue, stack)
 	recordPanicObservability(ctx, panicValue, stack, component, name)
 }

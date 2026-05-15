@@ -4,6 +4,7 @@ package runtime
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -27,13 +28,15 @@ func newTestLogger() *testLogger {
 	}
 }
 
-func (logger *testLogger) Log(_ context.Context, _ log.Level, msg string, _ ...log.Field) {
+func (logger *testLogger) Log(_ context.Context, lvl log.Level, msg string, _ ...log.Field) {
 	logger.mu.Lock()
 	defer logger.mu.Unlock()
 
 	logger.errorCalls = append(logger.errorCalls, msg)
 	logger.lastMessage = msg
-	logger.panicLogged.Store(true)
+	if lvl == log.LevelError && strings.Contains(strings.ToLower(msg), "panic") {
+		logger.panicLogged.Store(true)
+	}
 
 	// Signal that logging occurred (non-blocking)
 	select {

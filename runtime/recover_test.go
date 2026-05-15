@@ -21,7 +21,7 @@ func TestLogPanicWithStack_NilLogger(t *testing.T) {
 	t.Parallel()
 
 	require.NotPanics(t, func() {
-		logPanicWithStack(nil, "test", "panic value", []byte("stack trace"))
+		logPanicWithStack(context.Background(), nil, "test", "panic value", []byte("stack trace"))
 	})
 }
 
@@ -32,7 +32,7 @@ func TestLogPanicWithStack_ValidLogger(t *testing.T) {
 	logger := newTestLogger()
 	stack := []byte("goroutine 1 [running]:\nmain.main()\n\t/path/to/file.go:10")
 
-	logPanicWithStack(logger, "test-handler", "test panic", stack)
+	logPanicWithStack(context.Background(), logger, "test-handler", "test panic", stack)
 
 	assert.True(t, logger.wasPanicLogged())
 	assert.NotEmpty(t, logger.errorCalls)
@@ -87,7 +87,7 @@ func TestLogPanicWithStack_DifferentPanicTypes(t *testing.T) {
 
 			logger := newTestLogger()
 			require.NotPanics(t, func() {
-				logPanicWithStack(logger, "test-handler", tt.panicValue, []byte("stack"))
+				logPanicWithStack(context.Background(), logger, "test-handler", tt.panicValue, []byte("stack"))
 			})
 		})
 	}

@@ -3,7 +3,7 @@
 ## What this repo is
 
 `github.com/LerianStudio/lib-observability` — standalone Go library for observability/telemetry,
-extracted from `lib-commons` (`../lib-commons`). Go 1.25.9.
+extracted from `lib-commons` (`../lib-commons`). Go 1.25.10.
 
 ## Architecture decisions (non-negotiable)
 
@@ -14,8 +14,8 @@ extracted from `lib-commons` (`../lib-commons`). Go 1.25.9.
 | Context carriers | Root `package observability` (`observability.go`) | Shared by all packages; not a tracing concern |
 | Sensitive fields | `redaction/` package | Named by purpose; `IsSensitiveField(name string, extra ...string) bool` variadic |
 | HTTP middleware | `middleware/` package | Separate from core tracing |
-| Streaming telemetry | `streaming/` package | Pure OTEL — no franz-go/kafka dep |
-| lib-commons dependency | **NEVER import lib-commons** | lib-commons will depend on lib-observability — circular |
+| Streaming telemetry | Stays in `lib-commons` | Streaming has domain/transport coupling outside this library |
+| lib-commons dependency | Avoid imports except compatibility-only streaming references | lib-commons will depend on lib-observability for shared observability |
 
 ## Source of truth for migration
 

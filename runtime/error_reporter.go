@@ -129,7 +129,13 @@ func reportPanicToErrorService(
 		tags["stack_trace"] = stackStr
 	}
 
-	reporter.CaptureException(ctx, err, tags)
+	func() {
+		defer func() {
+			_ = recover()
+		}()
+
+		reporter.CaptureException(ctx, err, tags)
+	}()
 }
 
 // panicError wraps a panic value as an error for reporting.

@@ -296,7 +296,7 @@ func WithGrpcLogging(opts ...LogMiddlewareOption) grpc.UnaryServerInterceptor {
 func handleJSONBody(bodyBytes []byte) string {
 	var bodyData any
 	if err := json.Unmarshal(bodyBytes, &bodyData); err != nil {
-		return string(bodyBytes)
+		return redactedBody
 	}
 
 	switch v := bodyData.(type) {
@@ -305,12 +305,12 @@ func handleJSONBody(bodyBytes []byte) string {
 	case []any:
 		obfuscateSliceRecursively(v, 0)
 	default:
-		return string(bodyBytes)
+		return redactedBody
 	}
 
 	updatedBody, err := json.Marshal(bodyData)
 	if err != nil {
-		return string(bodyBytes)
+		return redactedBody
 	}
 
 	return string(updatedBody)

@@ -18,6 +18,7 @@ func GetCPUUsage(ctx context.Context, factory *metrics.MetricsFactory) {
 	out, err := cpu.Percent(100*time.Millisecond, false)
 	if err != nil {
 		logger.Log(ctx, log.LevelWarn, "error getting CPU usage", log.Err(err))
+		return
 	}
 
 	var percentageCPU int64 = 0
@@ -40,14 +41,13 @@ func GetCPUUsage(ctx context.Context, factory *metrics.MetricsFactory) {
 func GetMemUsage(ctx context.Context, factory *metrics.MetricsFactory) {
 	logger := NewLoggerFromContext(ctx)
 
-	var percentageMem int64 = 0
-
 	out, err := mem.VirtualMemory()
 	if err != nil {
 		logger.Log(ctx, log.LevelWarn, "error getting memory info", log.Err(err))
-	} else {
-		percentageMem = int64(out.UsedPercent)
+		return
 	}
+
+	percentageMem := int64(out.UsedPercent)
 
 	if factory == nil {
 		logger.Log(ctx, log.LevelWarn, "metrics factory is nil, skipping memory usage recording")

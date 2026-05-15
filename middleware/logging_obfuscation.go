@@ -9,6 +9,8 @@ import (
 	"github.com/gofiber/fiber/v2"
 )
 
+const redactedBody = "[REDACTED]"
+
 func getBodyObfuscatedString(c *fiber.Ctx, bodyBytes []byte) string {
 	contentType := strings.ToLower(c.Get(headerContentType))
 
@@ -20,7 +22,7 @@ func getBodyObfuscatedString(c *fiber.Ctx, bodyBytes []byte) string {
 	case strings.Contains(contentType, "multipart/form-data"):
 		return handleMultipartBody(c)
 	default:
-		return string(bodyBytes)
+		return redactedBody
 	}
 }
 
@@ -62,7 +64,7 @@ func obfuscateSliceRecursively(data []any, depth int) {
 func handleURLEncodedBody(bodyBytes []byte) string {
 	formData, err := url.ParseQuery(string(bodyBytes))
 	if err != nil {
-		return string(bodyBytes)
+		return redactedBody
 	}
 
 	updatedBody := url.Values{}

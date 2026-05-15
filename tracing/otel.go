@@ -100,7 +100,6 @@ func NewTelemetry(cfg TelemetryConfig) (*Telemetry, error) {
 	}
 
 	normalizeEndpoint(&cfg)
-	normalizeEndpointEnvVars()
 
 	if cfg.EnableTelemetry && strings.TrimSpace(cfg.CollectorExporterEndpoint) == "" {
 		return handleEmptyEndpoint(cfg)
@@ -151,27 +150,7 @@ func normalizeEndpoint(cfg *TelemetryConfig) {
 	case strings.HasPrefix(ep, "https://"):
 		cfg.CollectorExporterEndpoint = strings.TrimPrefix(ep, "https://")
 	default:
-		// No scheme — assume insecure (common in k8s internal comms).
-		cfg.InsecureExporter = true
-	}
-}
-
-// normalizeEndpointEnvVars ensures OTEL exporter endpoint environment variables
-// contain a URL scheme. The OTEL SDK's envconfig reads these via url.Parse(),
-// which fails on bare "host:port" values. Adding "http://" prevents noisy
-// "parse url" errors from the SDK's internal logger.
-func normalizeEndpointEnvVars() {
-	for _, key := range []string{
-		"OTEL_EXPORTER_OTLP_ENDPOINT",
-		"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
-		"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
-	} {
-		v := strings.TrimSpace(os.Getenv(key))
-		if v == "" || strings.HasPrefix(v, "http://") || strings.HasPrefix(v, "https://") {
-			continue
-		}
-
-		_ = os.Setenv(key, "http://"+v)
+		cfg.CollectorExporterEndpoint = ep
 	}
 }
 
@@ -562,11 +541,11 @@ func HandleSpanError(span trace.Span, message string, err error) {
 	// Build status message: avoid malformed ": <err>" when message is empty
 	statusMsg := sanitizeSpanMessage(err.Error())
 	if message != "" {
-		statusMsg = message + ": " + statusMsg
+		statusMsg = sanitizeSpanMessage(message + ": " + statusMsg)
 	}
 
 	span.SetStatus(codes.Error, statusMsg)
-	span.RecordError(err)
+	span.RecordError(errors.New(statusMsg))
 }
 
 // SetSpanAttributesFromValue flattens a value and sets resulting attributes on a span.

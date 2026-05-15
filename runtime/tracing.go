@@ -101,6 +101,10 @@ func recordPanicToSpanInternal(
 	stack []byte,
 	component, goroutineName string,
 ) {
+	if ctx == nil {
+		return
+	}
+
 	span := trace.SpanFromContext(ctx)
 	if !span.IsRecording() {
 		return
