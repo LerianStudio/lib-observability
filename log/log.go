@@ -37,6 +37,11 @@ type Level uint8
 //	LevelInfo  (2) -- errors + warnings + info
 //	LevelDebug (3) -- everything
 const (
+	levelDebugString = "debug"
+	levelInfoString  = "info"
+	levelWarnString  = "warn"
+	levelErrorString = "error"
+
 	LevelError Level = iota
 	LevelWarn
 	LevelInfo
@@ -51,13 +56,13 @@ const LevelUnknown Level = 255
 func (level Level) String() string {
 	switch level {
 	case LevelDebug:
-		return "debug"
+		return levelDebugString
 	case LevelInfo:
-		return "info"
+		return levelInfoString
 	case LevelWarn:
-		return "warn"
+		return levelWarnString
 	case LevelError:
-		return "error"
+		return levelErrorString
 	default:
 		return "unknown"
 	}
@@ -67,13 +72,13 @@ func (level Level) String() string {
 // Leading and trailing whitespace is trimmed before matching.
 func ParseLevel(lvl string) (Level, error) {
 	switch strings.ToLower(strings.TrimSpace(lvl)) {
-	case "debug":
+	case levelDebugString:
 		return LevelDebug, nil
-	case "info":
+	case levelInfoString:
 		return LevelInfo, nil
-	case "warn", "warning":
+	case levelWarnString, "warning":
 		return LevelWarn, nil
-	case "error":
+	case levelErrorString:
 		return LevelError, nil
 	}
 
@@ -112,5 +117,5 @@ func Bool(key string, value bool) Field {
 
 // Err creates the conventional `error` field.
 func Err(err error) Field {
-	return Field{Key: "error", Value: err}
+	return Field{Key: levelErrorString, Value: err}
 }
