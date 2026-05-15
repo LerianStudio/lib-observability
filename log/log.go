@@ -42,6 +42,8 @@ const (
 	levelWarnString  = "warn"
 	levelErrorString = "error"
 
+	errorFieldKey = "error"
+
 	LevelError Level = iota
 	LevelWarn
 	LevelInfo
@@ -117,5 +119,5 @@ func Bool(key string, value bool) Field {
 
 // Err creates the conventional `error` field.
 func Err(err error) Field {
-	return Field{Key: levelErrorString, Value: err}
+	return Field{Key: errorFieldKey, Value: err}
 }
