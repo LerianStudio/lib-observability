@@ -106,7 +106,7 @@ func (l *Logger) WithGroup(name string) logpkg.Logger {
 		return &Logger{logger: zap.NewNop()}
 	}
 
-	if name == "" {
+	if strings.TrimSpace(name) == "" {
 		return l
 	}
 
@@ -174,22 +174,22 @@ func (l *Logger) WithZapFields(fields ...Field) *Logger {
 
 // Debug logs a message with debug severity.
 func (l *Logger) Debug(message string, fields ...Field) {
-	l.must().Debug(message, fields...)
+	l.must().Debug(l.sanitizeConsoleMsg(message), fields...)
 }
 
 // Info logs a message with info severity.
 func (l *Logger) Info(message string, fields ...Field) {
-	l.must().Info(message, fields...)
+	l.must().Info(l.sanitizeConsoleMsg(message), fields...)
 }
 
 // Warn logs a message with warn severity.
 func (l *Logger) Warn(message string, fields ...Field) {
-	l.must().Warn(message, fields...)
+	l.must().Warn(l.sanitizeConsoleMsg(message), fields...)
 }
 
 // Error logs a message with error severity.
 func (l *Logger) Error(message string, fields ...Field) {
-	l.must().Error(message, fields...)
+	l.must().Error(l.sanitizeConsoleMsg(message), fields...)
 }
 
 // Raw returns the underlying zap logger.

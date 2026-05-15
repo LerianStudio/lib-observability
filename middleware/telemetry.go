@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"sync"
 
 	observability "github.com/LerianStudio/lib-observability"
 	"github.com/LerianStudio/lib-observability/tracing"
@@ -33,6 +34,43 @@ const (
 
 // ErrContextNotFound is returned when a required Fiber context is nil.
 var ErrContextNotFound = errors.New("fiber context not found")
+
+type spanEndStateKey struct{}
+
+type spanEndState struct {
+	span trace.Span
+	once sync.Once
+}
+
+func newSpanEndState(span trace.Span) *spanEndState {
+	return &spanEndState{span: span}
+}
+
+func (s *spanEndState) End() {
+	if s == nil || s.span == nil {
+		return
+	}
+
+	s.once.Do(func() { s.span.End() })
+}
+
+func contextWithSpanEndState(ctx context.Context, state *spanEndState) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	return context.WithValue(ctx, spanEndStateKey{}, state)
+}
+
+func spanEndStateFromContext(ctx context.Context) *spanEndState {
+	if ctx == nil {
+		return nil
+	}
+
+	state, _ := ctx.Value(spanEndStateKey{}).(*spanEndState)
+
+	return state
+}
 
 // TelemetryMiddleware wraps HTTP and gRPC handlers with tracing and metrics setup.
 type TelemetryMiddleware struct {
@@ -96,10 +134,13 @@ func (tm *TelemetryMiddleware) WithTelemetry(tl *tracing.Telemetry, excludedRout
 		}
 
 		ctx, span := tracer.Start(traceCtx, routePathWithMethod, trace.WithSpanKind(trace.SpanKindServer))
-		defer span.End()
+		endState := newSpanEndState(span)
+
+		defer endState.End()
 
 		ctx = observability.ContextWithTracer(ctx, tracer)
 		ctx = observability.ContextWithMetricFactory(ctx, effectiveTelemetry.MetricsFactory)
+		ctx = contextWithSpanEndState(ctx, endState)
 		c.SetUserContext(ctx)
 
 		err := tm.collectMetrics(ctx)
@@ -142,6 +183,11 @@ func (tm *TelemetryMiddleware) EndTracingSpans(c *fiber.Ctx) error {
 	endCtx := c.UserContext()
 	if endCtx == nil {
 		endCtx = originalCtx
+	}
+
+	if state := spanEndStateFromContext(endCtx); state != nil {
+		state.End()
+		return err
 	}
 
 	if endCtx != nil {
@@ -199,10 +245,13 @@ func (tm *TelemetryMiddleware) WithTelemetryInterceptor(tl *tracing.Telemetry) g
 		}
 
 		ctx, span := tracer.Start(traceCtx, methodName, trace.WithSpanKind(trace.SpanKindServer))
-		defer span.End()
+		endState := newSpanEndState(span)
+
+		defer endState.End()
 
 		ctx = observability.ContextWithTracer(ctx, tracer)
 		ctx = observability.ContextWithMetricFactory(ctx, effectiveTelemetry.MetricsFactory)
+		ctx = contextWithSpanEndState(ctx, endState)
 
 		err := tm.collectMetrics(ctx)
 		if err != nil {
@@ -234,6 +283,11 @@ func (tm *TelemetryMiddleware) EndTracingSpansInterceptor() grpc.UnaryServerInte
 		handler grpc.UnaryHandler,
 	) (any, error) {
 		resp, err := handler(ctx, req)
+		if state := spanEndStateFromContext(ctx); state != nil {
+			state.End()
+			return resp, err
+		}
+
 		trace.SpanFromContext(ctx).End()
 
 		return resp, err
