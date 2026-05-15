@@ -67,7 +67,13 @@ GOLANGCI_LINT_VERSION ?= v2.1.6
 
 TEST_REPORTS_DIR ?= ./reports
 GOTESTSUM = $(shell command -v gotestsum 2>/dev/null)
-GOSEC = $(shell command -v gosec 2>/dev/null || printf "%s/bin/gosec" "$$(go env GOPATH)")
+GOSEC = $(shell command -v gosec 2>/dev/null || \
+	GOBIN="$$(go env GOBIN)"; \
+	if [ -n "$$GOBIN" ]; then \
+		printf "%s/gosec" "$$GOBIN"; \
+	else \
+		printf "%s/bin/gosec" "$$(go env GOPATH)"; \
+	fi)
 RETRY_ON_FAIL ?= 0
 
 .PHONY: tools tools-gotestsum
