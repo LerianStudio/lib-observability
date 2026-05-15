@@ -84,7 +84,7 @@ func TestNewRequestInfoSanitizesRequestData(t *testing.T) {
 	})
 
 	req := httptest.NewRequest(http.MethodPost, "/charge?name=alice&password=secret", strings.NewReader("{\"password\":\"secret\",\"nested\":{\"secret\":\"value\"}}"))
-	req.Header.Set(headerContentType, "application/json")
+	req.Header.Set(headerContentType, "Application/JSON")
 	req.Header.Set(headerReferer, "https://user:pass@example.com/path?token=secret#fragment")
 	req.Header.Set(headerUserAgent, "agent")
 
@@ -138,6 +138,27 @@ func TestWithHTTPLoggingIgnoresTypedNilLogger(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { require.NoError(t, resp.Body.Close()) }()
 	assert.Equal(t, http.StatusNoContent, resp.StatusCode)
+}
+
+func TestWithHTTPLoggingLogsErrorStatus(t *testing.T) {
+	logger := &captureLogger{}
+	app := fiber.New()
+	app.Use(WithHTTPLogging(WithCustomLogger(logger)))
+	app.Get("/fail", func(*fiber.Ctx) error {
+		return errors.New("handler failed")
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/fail", nil)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, resp.Body.Close()) }()
+
+	assert.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+
+	messages, _ := logger.snapshot()
+	require.Len(t, messages, 1)
+	assert.Contains(t, messages[0], "GET /fail")
+	assert.Contains(t, messages[0], " 500 ")
 }
 
 func TestWithGrpcLoggingUsesBodyRequestIDAndLogsResult(t *testing.T) {

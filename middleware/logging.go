@@ -3,6 +3,7 @@ package middleware
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/url"
 	"os"
 	"reflect"
@@ -123,9 +124,9 @@ func NewRequestInfo(c *fiber.Ctx, obfuscationDisabled bool) *RequestInfo {
 	}
 
 	body := ""
+	bodyBytes := c.Body()
 
-	if c.Request().Header.ContentLength() > 0 {
-		bodyBytes := c.Body()
+	if len(bodyBytes) > 0 {
 		if !obfuscationDisabled {
 			body = getBodyObfuscatedString(c, bodyBytes)
 		} else {
@@ -203,10 +204,11 @@ func WithHTTPLogging(opts ...LogMiddlewareOption) fiber.Handler {
 		c.SetUserContext(ctx)
 
 		err := c.Next()
+		statusCode := httpStatusCode(c, err)
 
 		rw := ResponseMetricsWrapper{
 			Context:    c,
-			StatusCode: c.Response().StatusCode(),
+			StatusCode: statusCode,
 			Size:       len(c.Response().Body()),
 		}
 
@@ -215,6 +217,24 @@ func WithHTTPLogging(opts ...LogMiddlewareOption) fiber.Handler {
 
 		return err
 	}
+}
+
+func httpStatusCode(c *fiber.Ctx, err error) int {
+	statusCode := c.Response().StatusCode()
+	if err == nil {
+		return statusCode
+	}
+
+	var fiberErr *fiber.Error
+	if errors.As(err, &fiberErr) {
+		return fiberErr.Code
+	}
+
+	if statusCode < fiber.StatusBadRequest {
+		return fiber.StatusInternalServerError
+	}
+
+	return statusCode
 }
 
 // WithGrpcLogging logs gRPC unary requests and attaches a request-scoped logger to context.

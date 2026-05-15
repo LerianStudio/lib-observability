@@ -10,7 +10,7 @@ import (
 )
 
 func getBodyObfuscatedString(c *fiber.Ctx, bodyBytes []byte) string {
-	contentType := c.Get(headerContentType)
+	contentType := strings.ToLower(c.Get(headerContentType))
 
 	switch {
 	case strings.Contains(contentType, "application/json"):
