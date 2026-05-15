@@ -67,6 +67,13 @@ GOLANGCI_LINT_VERSION ?= v2.1.6
 
 TEST_REPORTS_DIR ?= ./reports
 GOTESTSUM = $(shell command -v gotestsum 2>/dev/null)
+GOSEC = $(shell command -v gosec 2>/dev/null || \
+	GOBIN="$$(go env GOBIN)"; \
+	if [ -n "$$GOBIN" ]; then \
+		printf "%s/gosec" "$$GOBIN"; \
+	else \
+		printf "%s/bin/gosec" "$$(go env GOPATH)"; \
+	fi)
 RETRY_ON_FAIL ?= 0
 
 .PHONY: tools tools-gotestsum
@@ -578,7 +585,7 @@ sec:
 		echo "Running security checks on all packages..."; \
 		if [ "$(SARIF)" = "1" ]; then \
 			echo "Generating SARIF output: gosec-report.sarif"; \
-			if gosec -fmt sarif -out gosec-report.sarif ./...; then \
+			if "$(GOSEC)" -fmt sarif -out gosec-report.sarif ./...; then \
 				echo "$(GREEN)$(BOLD)[ok]$(NC) SARIF report generated: gosec-report.sarif$(GREEN) ✔️$(NC)"; \
 			else \
 				printf "\n%s%sSecurity issues found by gosec. Please address them before proceeding.%s\n\n" "$(BOLD)" "$(RED)" "$(NC)"; \
@@ -586,7 +593,7 @@ sec:
 				exit 1; \
 			fi; \
 		else \
-			if gosec ./...; then \
+			if "$(GOSEC)" ./...; then \
 				echo "$(GREEN)$(BOLD)[ok]$(NC) Security checks completed$(GREEN) ✔️$(NC)"; \
 			else \
 				printf "\n%s%sSecurity issues found by gosec. Please address them before proceeding.%s\n\n" "$(BOLD)" "$(RED)" "$(NC)"; \

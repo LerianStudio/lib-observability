@@ -300,7 +300,7 @@ func getValidBodyRequestID(req any) (string, bool) {
 
 	// Check for typed-nil interface.
 	v := reflect.ValueOf(req)
-	if (v.Kind() == reflect.Ptr || v.Kind() == reflect.Interface) && v.IsNil() {
+	if (v.Kind() == reflect.Pointer || v.Kind() == reflect.Interface) && v.IsNil() {
 		return "", false
 	}
 

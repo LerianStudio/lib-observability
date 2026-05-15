@@ -20,10 +20,19 @@ permissions:
 jobs:
   go-analysis:
     name: Go Analysis
-    uses: LerianStudio/github-actions-shared-workflows/.github/workflows/go-pr-analysis.yml@v1.28.12
+    uses: LerianStudio/github-actions-shared-workflows/.github/workflows/go-pr-analysis.yml@v1.30.0
     with:
+      runner_type: "blacksmith-4vcpu-ubuntu-2404"
+      app_name_prefix: "lib-observability"
       go_version: "1.25.9"
       golangci_lint_version: "v2.11.2"
+      golangci_lint_args: "--timeout=5m"
+      coverage_threshold: 80
       fail_on_coverage_threshold: true
+      enable_lint: true
+      enable_security: true
+      enable_tests: true
+      enable_coverage: true
+      enable_build: true
       go_private_modules: "github.com/LerianStudio/*"
     secrets: inherit
