@@ -1,0 +1,99 @@
+# Pull Request Labeler configuration
+#
+# Labels are aligned with the pr_title_scopes in pr-validation.yml.
+
+# Assertion helpers
+assert:
+  - changed-files:
+      - any-glob-to-any-file: 'assert/**/*'
+
+# Shared constants
+constants:
+  - changed-files:
+      - any-glob-to-any-file: 'constants/**/*'
+
+# Structured logging primitives
+log:
+  - changed-files:
+      - any-glob-to-any-file: 'log/**/*'
+
+# Metrics instrumentation
+metrics:
+  - changed-files:
+      - any-glob-to-any-file: 'metrics/**/*'
+
+# HTTP/gRPC observability middleware
+middleware:
+  - changed-files:
+      - any-glob-to-any-file: 'middleware/**/*'
+
+# Log/data redaction utilities
+redaction:
+  - changed-files:
+      - any-glob-to-any-file: 'redaction/**/*'
+
+# Runtime introspection
+runtime:
+  - changed-files:
+      - any-glob-to-any-file: 'runtime/**/*'
+
+# Distributed tracing
+tracing:
+  - changed-files:
+      - any-glob-to-any-file: 'tracing/**/*'
+
+# Zap logger integration
+zap:
+  - changed-files:
+      - any-glob-to-any-file: 'zap/**/*'
+
+# Top-level public API (observability.go, system.go, context_helpers.go)
+core:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'observability.go'
+          - 'system.go'
+          - 'context_helpers.go'
+
+# Build and tooling scripts
+scripts:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'scripts/**/*'
+          - 'Makefile'
+
+# Application and tooling configuration
+config:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '.golangci.yml'
+          - '.releaserc.yml'
+          - '.goreleaser.yml'
+          - '.ignorecoverunit'
+
+# Continuous integration pipelines and shared workflows
+ci:
+  - changed-files:
+      - any-glob-to-any-file: '.github/workflows/**/*'
+
+# Markdown docs and llms.txt context files
+docs:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '**/*.md'
+          - 'docs/**/*'
+          - 'llms.txt'
+
+# Unit, integration and end-to-end tests
+tests:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '**/*_test.go'
+          - 'tests/**/*'
+
+# Go module dependencies
+deps:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'go.mod'
+          - 'go.sum'

@@ -1,0 +1,19 @@
+name: Release
+
+on:
+  push:
+    branches: [main, release-candidate, develop]
+
+permissions:
+  id-token: write
+  contents: write
+  issues: write
+  pull-requests: write
+  packages: read
+
+jobs:
+  release:
+    uses: LerianStudio/github-actions-shared-workflows/.github/workflows/release.yml@v1.30.0
+    with:
+      enable_changelog: ${{ github.ref == 'refs/heads/main' }}
+    secrets: inherit
