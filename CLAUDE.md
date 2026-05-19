@@ -3,7 +3,7 @@
 ## What this repo is
 
 `github.com/LerianStudio/lib-observability` — standalone Go library for observability/telemetry,
-extracted from `lib-commons` (`../lib-commons`). Go 1.25.10.
+extracted from `lib-commons` (`../lib-commons`). Go 1.26.3.
 
 ## Architecture decisions (non-negotiable)
 

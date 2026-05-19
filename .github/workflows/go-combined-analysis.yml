@@ -24,8 +24,8 @@ jobs:
     with:
       runner_type: "blacksmith-4vcpu-ubuntu-2404"
       app_name_prefix: "lib-observability"
-      go_version: "1.25.10"
-      golangci_lint_version: "v2.11.2"
+      go_version: "1.26.3"
+      golangci_lint_version: "v2.12.2"
       golangci_lint_args: "--timeout=5m"
       coverage_threshold: 80
       fail_on_coverage_threshold: true
