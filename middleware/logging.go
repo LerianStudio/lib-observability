@@ -52,12 +52,13 @@ type ResponseMetricsWrapper struct {
 	Size       int
 }
 
-// defaultLogExcludedRoutes is the canonical set of probe paths that are
-// suppressed from access logging by default. Readiness probes fire every
-// few seconds per pod and would otherwise dominate the access log.
-// Failures still surface through the per-route observability emitted by
-// the handler itself (e.g. the "readyz_unhealthy" Warn entry on 503).
-var defaultLogExcludedRoutes = []string{"/health", "/readyz"}
+// defaultLogExcludedRoutes is the canonical set of probe and scrape paths
+// that are suppressed from access logging by default. Readiness probes and
+// Prometheus scrapes fire every few seconds per pod and would otherwise
+// dominate the access log. Failures still surface through the per-route
+// observability emitted by the handler itself (e.g. the "readyz_unhealthy"
+// Warn entry on 503).
+var defaultLogExcludedRoutes = []string{"/health", "/readyz", "/metrics"}
 
 type logMiddleware struct {
 	Logger              obslog.Logger
@@ -206,9 +207,10 @@ func (r *RequestInfo) FinishRequestInfo(rw *ResponseMetricsWrapper) {
 
 // WithHTTPLogging logs Fiber HTTP access requests.
 //
-// By default the probe paths /health and /readyz, along with Swagger
-// asset routes, are skipped. Use WithExcludedRoutes to suppress
-// additional paths (e.g. /metrics) without losing the defaults.
+// By default the probe paths /health and /readyz, the Prometheus scrape
+// path /metrics, and Swagger asset routes are skipped. Use
+// WithExcludedRoutes to suppress additional paths without losing the
+// defaults.
 func WithHTTPLogging(opts ...LogMiddlewareOption) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		mid := buildOpts(opts...)

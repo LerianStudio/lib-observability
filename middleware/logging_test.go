@@ -141,7 +141,7 @@ func TestWithHTTPLoggingIgnoresTypedNilLogger(t *testing.T) {
 }
 
 func TestWithHTTPLoggingSkipsDefaultProbePaths(t *testing.T) {
-	probePaths := []string{"/health", "/readyz"}
+	probePaths := []string{"/health", "/readyz", "/metrics"}
 
 	for _, path := range probePaths {
 		t.Run(path, func(t *testing.T) {
@@ -170,13 +170,13 @@ func TestWithHTTPLoggingExcludedRoutesOptionSuppressesLogs(t *testing.T) {
 	app := fiber.New()
 	app.Use(WithHTTPLogging(
 		WithCustomLogger(logger),
-		WithExcludedRoutes("/metrics"),
+		WithExcludedRoutes("/internal"),
 	))
-	app.Get("/metrics/cpu", func(c *fiber.Ctx) error {
+	app.Get("/internal/diag", func(c *fiber.Ctx) error {
 		return c.SendString("ok")
 	})
 
-	req := httptest.NewRequest(http.MethodGet, "/metrics/cpu", nil)
+	req := httptest.NewRequest(http.MethodGet, "/internal/diag", nil)
 	resp, err := app.Test(req)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, resp.Body.Close()) }()
