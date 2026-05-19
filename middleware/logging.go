@@ -52,9 +52,18 @@ type ResponseMetricsWrapper struct {
 	Size       int
 }
 
+// defaultLogExcludedRoutes is the canonical set of probe and scrape paths
+// that are suppressed from access logging by default. Readiness probes and
+// Prometheus scrapes fire every few seconds per pod and would otherwise
+// dominate the access log. Failures still surface through the per-route
+// observability emitted by the handler itself (e.g. the "readyz_unhealthy"
+// Warn entry on 503).
+var defaultLogExcludedRoutes = []string{"/health", "/readyz", "/metrics"}
+
 type logMiddleware struct {
 	Logger              obslog.Logger
 	ObfuscationDisabled bool
+	ExcludedRoutes      []string
 }
 
 // LogMiddlewareOption configures HTTP and gRPC logging middleware.
@@ -76,10 +85,27 @@ func WithObfuscationDisabled(disabled bool) LogMiddlewareOption {
 	}
 }
 
+// WithExcludedRoutes suppresses access logs for any request whose path is
+// prefixed by one of the supplied routes. Matches the prefix semantics used
+// by TelemetryMiddleware.WithTelemetry so a single env-driven list can be
+// threaded through both middlewares. Repeated calls append.
+func WithExcludedRoutes(routes ...string) LogMiddlewareOption {
+	return func(l *logMiddleware) {
+		for _, r := range routes {
+			if r == "" {
+				continue
+			}
+
+			l.ExcludedRoutes = append(l.ExcludedRoutes, r)
+		}
+	}
+}
+
 func buildOpts(opts ...LogMiddlewareOption) *logMiddleware {
 	mid := &logMiddleware{
 		Logger:              &obslog.GoLogger{},
 		ObfuscationDisabled: logObfuscationDisabled,
+		ExcludedRoutes:      append([]string(nil), defaultLogExcludedRoutes...),
 	}
 
 	for _, opt := range opts {
@@ -180,9 +206,16 @@ func (r *RequestInfo) FinishRequestInfo(rw *ResponseMetricsWrapper) {
 }
 
 // WithHTTPLogging logs Fiber HTTP access requests.
+//
+// By default the probe paths /health and /readyz, the Prometheus scrape
+// path /metrics, and Swagger asset routes are skipped. Use
+// WithExcludedRoutes to suppress additional paths without losing the
+// defaults.
 func WithHTTPLogging(opts ...LogMiddlewareOption) fiber.Handler {
 	return func(c *fiber.Ctx) error {
-		if c.Path() == "/health" {
+		mid := buildOpts(opts...)
+
+		if isRouteExcludedFromList(c, mid.ExcludedRoutes) {
 			return c.Next()
 		}
 
@@ -192,7 +225,6 @@ func WithHTTPLogging(opts ...LogMiddlewareOption) fiber.Handler {
 
 		setRequestHeaderID(c)
 
-		mid := buildOpts(opts...)
 		info := NewRequestInfo(c, mid.ObfuscationDisabled)
 
 		requestID := c.Get(headerID)

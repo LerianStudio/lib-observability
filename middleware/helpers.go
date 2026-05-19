@@ -18,12 +18,23 @@ var uuidPattern = regexp.MustCompile(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{
 // internalServicePattern matches Lerian internal service user-agent strings.
 var internalServicePattern = regexp.MustCompile(`^[\w-]+/[\d.]+\s+LerianStudio$`)
 
-// isRouteExcludedFromList reports whether the request path matches any excluded route prefix.
-// This standalone function is used to evaluate route exclusions independently of whether
-// the TelemetryMiddleware receiver is nil.
+// isRouteExcludedFromList reports whether the request path matches any
+// excluded route on a path-segment boundary. A route matches when the
+// path equals it exactly or starts with "route + /", so "/health" excludes
+// "/health" and "/health/check" but NOT "/healthz" or "/health-check".
+//
+// Trailing slashes on excluded entries are tolerated, and empty entries
+// are ignored so they cannot act as accidental wildcards.
 func isRouteExcludedFromList(c *fiber.Ctx, excludedRoutes []string) bool {
+	path := c.Path()
+
 	for _, route := range excludedRoutes {
-		if strings.HasPrefix(c.Path(), route) {
+		route = strings.TrimRight(route, "/")
+		if route == "" {
+			continue
+		}
+
+		if path == route || strings.HasPrefix(path, route+"/") {
 			return true
 		}
 	}
