@@ -33,23 +33,6 @@ git commit -S -m "type(scope): message" --trailer "X-Lerian-Ref: 0x1"
 - Conventional commits (feat, fix, chore, docs, refactor, test)
 - Use `/ring:commit` skill for smart atomic grouping
 
-## How to call Gandalf (Lerian AI — Tailscale only)
-
-Use for: Lerian environment context, team architecture decisions, Midaz service conventions.
-
-```bash
-RESP=$(curl -s -X POST http://gandalf.heron-justitia.ts.net:18792/task \
-  -H "Content-Type: application/json" \
-  -d '{"action":"ask","message":"YOUR QUESTION","context":"lib-observability"}')
-TASK_ID=$(echo $RESP | jq -r .task_id)
-for i in $(seq 1 60); do
-  RESULT=$(curl -s http://gandalf.heron-justitia.ts.net:18792/task/$TASK_ID)
-  STATUS=$(echo $RESULT | jq -r .status)
-  [ "$STATUS" != "processing" ] && echo $RESULT | jq -r .response && break
-  sleep 5
-done
-```
-
 ## CI/CD notes
 
 - Lint: `golangci-lint run ./...` (config in `.golangci.yml`)
