@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	observability "github.com/LerianStudio/lib-observability"
 	"github.com/LerianStudio/lib-observability/tracing"
@@ -16,11 +18,42 @@ import (
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
+
+// httpServerRequestDurationMetric is the OpenTelemetry semantic-convention metric name
+// for HTTP server request duration. Recorded as a Float64 histogram in seconds.
+const httpServerRequestDurationMetric = "http.server.request.duration"
+
+// httpServerDurationBuckets is the default histogram bucket layout (seconds) for
+// http.server.request.duration. Mirrors the OpenTelemetry HTTP semantic conventions
+// recommendation for server-side request latency.
+var httpServerDurationBuckets = []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10}
+
+// newHTTPServerDurationHistogram builds the float64 histogram instrument for
+// http.server.request.duration on the given meter. Returns nil if the meter is
+// nil or instrument creation fails - callers must treat nil as "do not record".
+func newHTTPServerDurationHistogram(meter metric.Meter) metric.Float64Histogram {
+	if meter == nil {
+		return nil
+	}
+
+	hist, err := meter.Float64Histogram(
+		httpServerRequestDurationMetric,
+		metric.WithUnit("s"),
+		metric.WithDescription("Duration of HTTP server requests."),
+		metric.WithExplicitBucketBoundaries(httpServerDurationBuckets...),
+	)
+	if err != nil {
+		return nil
+	}
+
+	return hist
+}
 
 // Header and metadata key constants used by the middleware.
 const (
@@ -83,7 +116,35 @@ func NewTelemetryMiddleware(tl *tracing.Telemetry) *TelemetryMiddleware {
 }
 
 // WithTelemetry is a middleware that adds tracing to the context.
+//
+// When the effective Telemetry has a non-nil MeterProvider AND a non-nil
+// MetricsFactory, the middleware also records the OpenTelemetry semantic-
+// convention HTTP server metric `http.server.request.duration` (Float64 seconds
+// histogram) for every non-excluded request. Recording is best-effort: nil
+// telemetry, nil MeterProvider, nil MetricsFactory, excluded routes, and
+// instrument creation errors all silently skip the metric without affecting
+// the request path or existing span behavior.
 func (tm *TelemetryMiddleware) WithTelemetry(tl *tracing.Telemetry, excludedRoutes ...string) fiber.Handler {
+	// Build the duration histogram once at handler-construction time. The
+	// effective Telemetry may be supplied either via the explicit `tl` argument
+	// or via the receiver's stored Telemetry, mirroring the per-request logic
+	// below. If neither resolves, or any required component is nil, the
+	// histogram is left nil and recording is skipped.
+	var durationHistogram metric.Float64Histogram
+
+	bootstrapTelemetry := tl
+	if bootstrapTelemetry == nil && tm != nil {
+		bootstrapTelemetry = tm.Telemetry
+	}
+
+	if bootstrapTelemetry != nil &&
+		bootstrapTelemetry.MeterProvider != nil &&
+		bootstrapTelemetry.MetricsFactory != nil {
+		durationHistogram = newHTTPServerDurationHistogram(
+			bootstrapTelemetry.MeterProvider.Meter(bootstrapTelemetry.LibraryName),
+		)
+	}
+
 	return func(c *fiber.Ctx) error {
 		effectiveTelemetry := tl
 		if effectiveTelemetry == nil && tm != nil {
@@ -100,6 +161,11 @@ func (tm *TelemetryMiddleware) WithTelemetry(tl *tracing.Telemetry, excludedRout
 
 		setRequestHeaderID(c)
 
+		// Capture the request start time before any downstream work so the
+		// duration metric reflects the full handler chain, regardless of
+		// whether tracing is enabled below.
+		requestStart := time.Now()
+
 		ctx := c.UserContext()
 		_, _, reqId, _ := observability.NewTrackingFromContext(ctx)
 
@@ -107,16 +173,21 @@ func (tm *TelemetryMiddleware) WithTelemetry(tl *tracing.Telemetry, excludedRout
 			attribute.String("app.request.request_id", reqId),
 		))
 
-		if effectiveTelemetry.TracerProvider == nil {
-			return c.Next()
-		}
-
 		// Capture all Fiber context string values BEFORE c.Next(). Fiber v2 uses
 		// utils.UnsafeString which returns pointers into fasthttp's request buffer.
 		// After c.Next() returns, fasthttp may recycle the underlying RequestCtx
 		// for the next connection, corrupting any previously returned string slices.
 		// Safe copies via string([]byte(...)) ensure the data is heap-owned.
 		method := string([]byte(c.Method()))
+
+		if effectiveTelemetry.TracerProvider == nil {
+			err := c.Next()
+
+			recordHTTPServerDuration(c, durationHistogram, method, requestStart, err)
+
+			return err
+		}
+
 		originalURL := string([]byte(c.OriginalURL()))
 		protocol := string([]byte(c.Protocol()))
 		hostname := string([]byte(c.Hostname()))
@@ -167,8 +238,83 @@ func (tm *TelemetryMiddleware) WithTelemetry(tl *tracing.Telemetry, excludedRout
 			span.SetStatus(codes.Error, fmt.Sprintf("HTTP %d", statusCode))
 		}
 
+		recordHTTPServerDuration(c, durationHistogram, method, requestStart, err)
+
 		return err
 	}
+}
+
+// recordHTTPServerDuration emits the http.server.request.duration histogram
+// observation for a completed Fiber request. It is a no-op when the histogram
+// is nil (telemetry/MeterProvider/MetricsFactory absent or instrument creation
+// failed) so callers can invoke it unconditionally without nil checks.
+//
+// Attribute set follows OpenTelemetry HTTP semantic conventions:
+//   - http.request.method: captured before c.Next() to survive fasthttp recycling
+//   - http.route: c.Route().Path - low-cardinality route template, never raw paths
+//   - http.response.status_code: read from the final response
+//   - error.type: only set when the handler returned an error or status >= 500
+func recordHTTPServerDuration(
+	c *fiber.Ctx,
+	hist metric.Float64Histogram,
+	method string,
+	start time.Time,
+	handlerErr error,
+) {
+	if hist == nil || c == nil {
+		return
+	}
+
+	statusCode := c.Response().StatusCode()
+
+	route := ""
+	if r := c.Route(); r != nil {
+		route = r.Path
+	}
+
+	attrs := []attribute.KeyValue{
+		attribute.String("http.request.method", method),
+		attribute.String("http.route", route),
+		attribute.Int("http.response.status_code", statusCode),
+	}
+
+	if errType := classifyHTTPErrorType(handlerErr, statusCode); errType != "" {
+		attrs = append(attrs, attribute.String("error.type", errType))
+	}
+
+	durationSeconds := time.Since(start).Seconds()
+	hist.Record(c.UserContext(), durationSeconds, metric.WithAttributes(attrs...))
+}
+
+// classifyHTTPErrorType returns a stable error.type label per OpenTelemetry
+// semantic conventions, or empty string when no error condition applies.
+// Handler errors take precedence over status-derived classification to preserve
+// the originating error's type identity.
+func classifyHTTPErrorType(handlerErr error, statusCode int) string {
+	if handlerErr != nil {
+		// reflect.TypeOf(nil) is nil, so we already guarded above.
+		t := reflect.TypeOf(handlerErr)
+		if t == nil {
+			return "error"
+		}
+
+		// Unwrap pointer types so "*fiber.Error" surfaces as "fiber.Error".
+		for t.Kind() == reflect.Pointer {
+			t = t.Elem()
+		}
+
+		if name := t.String(); name != "" {
+			return name
+		}
+
+		return "error"
+	}
+
+	if statusCode >= 500 {
+		return strconv.Itoa(statusCode)
+	}
+
+	return ""
 }
 
 // EndTracingSpans is a middleware that ends the tracing spans.
