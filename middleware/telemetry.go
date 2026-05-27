@@ -252,8 +252,13 @@ func (tm *TelemetryMiddleware) WithTelemetry(tl *tracing.Telemetry, excludedRout
 // Attribute set follows OpenTelemetry HTTP semantic conventions:
 //   - http.request.method: captured before c.Next() to survive fasthttp recycling
 //   - http.route: c.Route().Path - low-cardinality route template, never raw paths
-//   - http.response.status_code: read from the final response
-//   - error.type: only set when the handler returned an error or status >= 500
+//   - http.response.status_code: the effective status the client will observe;
+//     derived from the handler error (*fiber.Error.Code, or 500 for generic
+//     errors) when Fiber's error handler has not yet rewritten the response,
+//     otherwise read directly from the response. This matches httpStatusCode
+//     used by the logging middleware and avoids reporting 200 for failures.
+//   - error.type: only set when the handler returned an error or effective
+//     status >= 500.
 func recordHTTPServerDuration(
 	c *fiber.Ctx,
 	hist metric.Float64Histogram,
@@ -265,7 +270,7 @@ func recordHTTPServerDuration(
 		return
 	}
 
-	statusCode := c.Response().StatusCode()
+	statusCode := httpStatusCode(c, handlerErr)
 
 	route := ""
 	if r := c.Route(); r != nil {

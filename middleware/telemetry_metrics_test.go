@@ -219,6 +219,141 @@ func TestWithTelemetry_RecordsDurationOnHandlerError(t *testing.T) {
 		"handler error type must surface the originating Go type name")
 }
 
+// TestWithTelemetry_RecordsDurationOnFiberError4xx verifies that a handler
+// returning fiber.NewError(4xx) records the effective HTTP status from the
+// error (not the unwritten default response status), and surfaces the
+// originating *fiber.Error type as error.type. The duration metric must
+// reflect what an end-user actually observes after Fiber's error handler runs.
+func TestWithTelemetry_RecordsDurationOnFiberError4xx(t *testing.T) {
+	tel, reader := newMetricsHarness(t)
+
+	app := fiber.New()
+	mid := NewTelemetryMiddleware(tel)
+	app.Use(mid.WithTelemetry(tel))
+
+	app.Get("/api/items/:id", func(c *fiber.Ctx) error {
+		return fiber.NewError(http.StatusNotFound, "not found")
+	})
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/items/missing", nil))
+	require.NoError(t, err)
+	defer func() { require.NoError(t, resp.Body.Close()) }()
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode,
+		"client must observe the 404 from Fiber's default error handler")
+
+	dp := findDurationHistogram(t, reader)
+	require.NotNil(t, dp)
+	assert.EqualValues(t, 1, dp.Count)
+
+	statusVal, ok := dp.Attributes.Value(attribute.Key("http.response.status_code"))
+	require.True(t, ok)
+	assert.EqualValues(t, http.StatusNotFound, statusVal.AsInt64(),
+		"status_code must reflect the *fiber.Error code, not the unwritten default")
+
+	errType, ok := attrValue(dp.Attributes, "error.type")
+	require.True(t, ok, "handler-returned *fiber.Error must set error.type")
+	assert.Equal(t, "fiber.Error", errType)
+}
+
+// TestWithTelemetry_RecordsDurationOnFiberError400 verifies the same contract
+// for 4xx bad-request errors raised via fiber.NewError, asserted independently
+// from the 404 case to catch regressions for either code path.
+func TestWithTelemetry_RecordsDurationOnFiberError400(t *testing.T) {
+	tel, reader := newMetricsHarness(t)
+
+	app := fiber.New()
+	mid := NewTelemetryMiddleware(tel)
+	app.Use(mid.WithTelemetry(tel))
+
+	app.Post("/api/validate", func(c *fiber.Ctx) error {
+		return fiber.NewError(http.StatusBadRequest, "invalid payload")
+	})
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodPost, "/api/validate", nil))
+	require.NoError(t, err)
+	defer func() { require.NoError(t, resp.Body.Close()) }()
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+
+	dp := findDurationHistogram(t, reader)
+	require.NotNil(t, dp)
+
+	statusVal, ok := dp.Attributes.Value(attribute.Key("http.response.status_code"))
+	require.True(t, ok)
+	assert.EqualValues(t, http.StatusBadRequest, statusVal.AsInt64(),
+		"status_code must reflect fiber.NewError(400)")
+
+	errType, ok := attrValue(dp.Attributes, "error.type")
+	require.True(t, ok)
+	assert.Equal(t, "fiber.Error", errType)
+}
+
+// TestWithTelemetry_RecordsDurationOnFiberError5xx verifies that a 5xx
+// fiber.NewError is also reflected in status_code on the duration metric.
+func TestWithTelemetry_RecordsDurationOnFiberError5xx(t *testing.T) {
+	tel, reader := newMetricsHarness(t)
+
+	app := fiber.New()
+	mid := NewTelemetryMiddleware(tel)
+	app.Use(mid.WithTelemetry(tel))
+
+	app.Get("/api/down", func(c *fiber.Ctx) error {
+		return fiber.NewError(http.StatusBadGateway, "upstream gone")
+	})
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/down", nil))
+	require.NoError(t, err)
+	defer func() { require.NoError(t, resp.Body.Close()) }()
+	assert.Equal(t, http.StatusBadGateway, resp.StatusCode)
+
+	dp := findDurationHistogram(t, reader)
+	require.NotNil(t, dp)
+
+	statusVal, ok := dp.Attributes.Value(attribute.Key("http.response.status_code"))
+	require.True(t, ok)
+	assert.EqualValues(t, http.StatusBadGateway, statusVal.AsInt64())
+
+	errType, ok := attrValue(dp.Attributes, "error.type")
+	require.True(t, ok)
+	assert.Equal(t, "fiber.Error", errType)
+}
+
+// TestWithTelemetry_GenericHandlerErrorStatusCodeIs500 verifies that when a
+// handler returns a non-fiber error and no custom ErrorHandler has rewritten
+// the status code by the time the metric is recorded, the metric still
+// reports 500, matching what Fiber's default error handler will write to
+// the client.
+func TestWithTelemetry_GenericHandlerErrorStatusCodeIs500(t *testing.T) {
+	tel, reader := newMetricsHarness(t)
+
+	// Use Fiber's default ErrorHandler (no override) so the response status
+	// is materialized AFTER the WithTelemetry middleware unwinds.
+	app := fiber.New()
+	mid := NewTelemetryMiddleware(tel)
+	app.Use(mid.WithTelemetry(tel))
+
+	app.Get("/api/explode", func(c *fiber.Ctx) error {
+		return errors.New("boom")
+	})
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/explode", nil))
+	require.NoError(t, err)
+	defer func() { require.NoError(t, resp.Body.Close()) }()
+	assert.Equal(t, http.StatusInternalServerError, resp.StatusCode,
+		"Fiber's default error handler maps unknown errors to 500")
+
+	dp := findDurationHistogram(t, reader)
+	require.NotNil(t, dp)
+
+	statusVal, ok := dp.Attributes.Value(attribute.Key("http.response.status_code"))
+	require.True(t, ok)
+	assert.EqualValues(t, http.StatusInternalServerError, statusVal.AsInt64(),
+		"generic handler error must record status_code=500 to match client view")
+
+	errType, ok := attrValue(dp.Attributes, "error.type")
+	require.True(t, ok)
+	assert.Equal(t, "errors.errorString", errType)
+}
+
 // TestWithTelemetry_DoesNotRecordForExcludedRoute verifies that excluded
 // routes bypass duration recording entirely.
 func TestWithTelemetry_DoesNotRecordForExcludedRoute(t *testing.T) {
