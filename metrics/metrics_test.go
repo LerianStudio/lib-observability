@@ -31,9 +31,11 @@ type cacheTestMeter struct {
 	histogram *cacheTestHistogram
 }
 
-type cacheTestCounter struct{ metric.Int64Counter }
-type cacheTestGauge struct{ metric.Int64Gauge }
-type cacheTestHistogram struct{ metric.Int64Histogram }
+type (
+	cacheTestCounter   struct{ metric.Int64Counter }
+	cacheTestGauge     struct{ metric.Int64Gauge }
+	cacheTestHistogram struct{ metric.Int64Histogram }
+)
 
 func newCacheTestFactory(t *testing.T) *MetricsFactory {
 	t.Helper()

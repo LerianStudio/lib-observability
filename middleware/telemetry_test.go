@@ -155,8 +155,7 @@ func TestWithTelemetry(t *testing.T) {
 				return tt.setupHandler(c)
 			})
 
-			req, err := http.NewRequest(tt.method, tt.path, nil)
-			require.NoError(t, err)
+			req := httptest.NewRequest(tt.method, tt.path, nil)
 
 			if tt.traceparent != "" {
 				req.Header.Set("traceparent", tt.traceparent)
@@ -269,8 +268,7 @@ func TestWithTelemetryExcludedRoutes(t *testing.T) {
 				return c.SendStatus(http.StatusOK)
 			})
 
-			req, err := http.NewRequest(tt.method, tt.path, nil)
-			require.NoError(t, err)
+			req := httptest.NewRequest(tt.method, tt.path, nil)
 
 			resp, err := app.Test(req)
 			require.NoError(t, err)
@@ -590,8 +588,7 @@ func TestExtractHTTPContext(t *testing.T) {
 		return c.SendStatus(http.StatusOK)
 	})
 
-	req1, err := http.NewRequest("GET", "/test", nil)
-	require.NoError(t, err)
+	req1 := httptest.NewRequest("GET", "/test", nil)
 	req1.Header.Set("traceparent", traceparent)
 
 	resp1, err := app.Test(req1)
@@ -599,8 +596,7 @@ func TestExtractHTTPContext(t *testing.T) {
 	defer func() { require.NoError(t, resp1.Body.Close()) }()
 	assert.Equal(t, http.StatusOK, resp1.StatusCode)
 
-	req2, err := http.NewRequest("GET", "/test", nil)
-	require.NoError(t, err)
+	req2 := httptest.NewRequest("GET", "/test", nil)
 
 	resp2, err := app.Test(req2)
 	require.NoError(t, err)
@@ -672,8 +668,7 @@ func TestWithTelemetryConditionalTracePropagation(t *testing.T) {
 				return c.SendStatus(http.StatusOK)
 			})
 
-			req, err := http.NewRequest("GET", "/test", nil)
-			require.NoError(t, err)
+			req := httptest.NewRequest("GET", "/test", nil)
 
 			if tt.userAgent != "" {
 				req.Header.Set("User-Agent", tt.userAgent)

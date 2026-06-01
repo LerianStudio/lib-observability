@@ -69,18 +69,36 @@ func routeAttribute(c *fiber.Ctx, effectiveStatus int) (string, bool) {
 // client/library/version identifiers in practice.
 const maxUserAgentAttrLen = 256
 
-// truncateUserAgent caps the user-agent string at maxUserAgentAttrLen bytes.
+// truncateUserAgent caps the user-agent string at maxUserAgentAttrLen bytes,
+// truncating at a rune boundary so the returned string is always valid UTF-8.
+// Compliant user-agents are ASCII, but defensive callers may receive
+// multi-byte sequences; a byte-level slice could leave a partial rune in the
+// span attribute.
 func truncateUserAgent(ua string) string {
 	if len(ua) <= maxUserAgentAttrLen {
 		return ua
 	}
 
-	return ua[:maxUserAgentAttrLen]
+	// for i := range ua iterates over rune boundaries; i is the byte index
+	// at the start of each rune. We track the last boundary that still fits
+	// within the cap and return up to it, so the result never exceeds
+	// maxUserAgentAttrLen bytes and never splits a rune.
+	lastFit := 0
+
+	for i := range ua {
+		if i > maxUserAgentAttrLen {
+			return ua[:lastFit]
+		}
+
+		lastFit = i
+	}
+
+	return ua[:lastFit]
 }
 
 // errorTypeOriginal returns the originating Go type name of handlerErr,
 // suitable as a high-cardinality debugging attribute on spans. Returns
-// "" if handlerErr is nil. Unwraps a single pointer level so "*fiber.Error"
+// "" if handlerErr is nil. Unwraps all pointer levels so "***fiber.Error"
 // surfaces as "fiber.Error". Falls back to "error" when reflect cannot
 // resolve a meaningful name.
 func errorTypeOriginal(handlerErr error) string {
@@ -104,12 +122,23 @@ func errorTypeOriginal(handlerErr error) string {
 	return "error"
 }
 
-// isRouteExcludedFromList reports whether the request path matches any excluded route prefix.
-// This standalone function is used to evaluate route exclusions independently of whether
-// the TelemetryMiddleware receiver is nil.
+// isRouteExcludedFromList reports whether the request path matches any
+// excluded route on a path-segment boundary. A route matches when the
+// path equals it exactly or starts with "route + /", so "/health" excludes
+// "/health" and "/health/check" but NOT "/healthz" or "/health-check".
+//
+// Trailing slashes on excluded entries are tolerated, and empty entries
+// are ignored so they cannot act as accidental wildcards.
 func isRouteExcludedFromList(c *fiber.Ctx, excludedRoutes []string) bool {
+	path := c.Path()
+
 	for _, route := range excludedRoutes {
-		if strings.HasPrefix(c.Path(), route) {
+		route = strings.TrimRight(route, "/")
+		if route == "" {
+			continue
+		}
+
+		if path == route || strings.HasPrefix(path, route+"/") {
 			return true
 		}
 	}

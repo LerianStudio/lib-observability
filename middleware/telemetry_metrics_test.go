@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/LerianStudio/lib-observability/metrics"
 	"github.com/LerianStudio/lib-observability/tracing"
@@ -808,4 +809,39 @@ func TestWithTelemetry_TruncatesLongUserAgent(t *testing.T) {
 	ua := getSpanAttr(spans[0], "user_agent.original")
 	assert.Len(t, ua, maxUserAgentAttrLen)
 	assert.Equal(t, strings.Repeat("a", maxUserAgentAttrLen), ua)
+}
+
+// TestWithTelemetry_TruncatesUserAgentAtRuneBoundary verifies that a multi-byte
+// UTF-8 user-agent is truncated at a rune boundary, never mid-codepoint, so
+// the resulting span attribute is always valid UTF-8 and never exceeds the
+// byte cap. Uses a 3-byte rune ("€" = 0xE2 0x82 0xAC) repeated so the byte
+// cap (256) falls strictly inside a codepoint; a naive byte slice would
+// produce invalid UTF-8 at the boundary.
+func TestWithTelemetry_TruncatesUserAgentAtRuneBoundary(t *testing.T) {
+	tel, _, spanExp := newTelemetryHarness(t)
+
+	app := fiber.New()
+	mid := NewTelemetryMiddleware(tel)
+	app.Use(mid.WithTelemetry(tel))
+	app.Get("/x", func(c *fiber.Ctx) error { return c.SendStatus(http.StatusOK) })
+
+	longUA := strings.Repeat("€", 1000) // 3000 bytes
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	req.Header.Set("User-Agent", longUA)
+
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, resp.Body.Close()) }()
+
+	spans := spanExp.GetSpans()
+	require.NotEmpty(t, spans)
+
+	ua := getSpanAttr(spans[0], "user_agent.original")
+	assert.LessOrEqual(t, len(ua), maxUserAgentAttrLen,
+		"truncated user-agent must not exceed the byte cap")
+	assert.True(t, utf8.ValidString(ua),
+		"truncated user-agent must remain valid UTF-8 (never split a codepoint)")
+	// 256 / 3 = 85 complete "€" runes (255 bytes), which is the largest
+	// rune-aligned prefix that fits within the cap.
+	assert.Equal(t, strings.Repeat("€", 85), ua)
 }

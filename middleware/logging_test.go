@@ -140,6 +140,95 @@ func TestWithHTTPLoggingIgnoresTypedNilLogger(t *testing.T) {
 	assert.Equal(t, http.StatusNoContent, resp.StatusCode)
 }
 
+func TestWithHTTPLoggingSkipsDefaultProbePaths(t *testing.T) {
+	probePaths := []string{"/health", "/readyz", "/metrics"}
+
+	for _, path := range probePaths {
+		t.Run(path, func(t *testing.T) {
+			logger := &captureLogger{}
+			app := fiber.New()
+			app.Use(WithHTTPLogging(WithCustomLogger(logger)))
+			app.Get(path, func(c *fiber.Ctx) error {
+				return c.SendStatus(http.StatusOK)
+			})
+
+			req := httptest.NewRequest(http.MethodGet, path, nil)
+			resp, err := app.Test(req)
+			require.NoError(t, err)
+			defer func() { require.NoError(t, resp.Body.Close()) }()
+
+			assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+			messages, _ := logger.snapshot()
+			assert.Empty(t, messages, "no access log expected for default probe path %s", path)
+		})
+	}
+}
+
+func TestWithHTTPLoggingExcludedRoutesOptionSuppressesLogs(t *testing.T) {
+	logger := &captureLogger{}
+	app := fiber.New()
+	app.Use(WithHTTPLogging(
+		WithCustomLogger(logger),
+		WithExcludedRoutes("/internal"),
+	))
+	app.Get("/internal/diag", func(c *fiber.Ctx) error {
+		return c.SendString("ok")
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/internal/diag", nil)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, resp.Body.Close()) }()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	messages, _ := logger.snapshot()
+	assert.Empty(t, messages, "prefix-excluded path should not produce an access log")
+}
+
+func TestWithHTTPLoggingExcludedRoutesOptionPreservesDefaults(t *testing.T) {
+	logger := &captureLogger{}
+	app := fiber.New()
+	app.Use(WithHTTPLogging(
+		WithCustomLogger(logger),
+		WithExcludedRoutes("/metrics"),
+	))
+	app.Get("/readyz", func(c *fiber.Ctx) error {
+		return c.SendStatus(http.StatusOK)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, resp.Body.Close()) }()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	messages, _ := logger.snapshot()
+	assert.Empty(t, messages, "supplying custom excluded routes must not remove the default probe skip set")
+}
+
+func TestWithHTTPLoggingExcludedRoutesIgnoresEmptyStrings(t *testing.T) {
+	logger := &captureLogger{}
+	app := fiber.New()
+	app.Use(WithHTTPLogging(
+		WithCustomLogger(logger),
+		WithExcludedRoutes("", "/skip"),
+	))
+	app.Get("/ok", func(c *fiber.Ctx) error {
+		return c.SendString("ok")
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/ok", nil)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, resp.Body.Close()) }()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	messages, _ := logger.snapshot()
+	require.Len(t, messages, 1, "empty exclusion entries must not swallow every request")
+	assert.Contains(t, messages[0], "GET /ok")
+}
+
 func TestWithHTTPLoggingLogsErrorStatus(t *testing.T) {
 	logger := &captureLogger{}
 	app := fiber.New()
