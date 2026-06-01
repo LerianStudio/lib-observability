@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/LerianStudio/lib-observability/metrics"
@@ -780,4 +781,31 @@ func TestWithTelemetry_KnownMethodHasNoOriginal(t *testing.T) {
 	require.NotEmpty(t, spans)
 	assert.Equal(t, "GET", getSpanAttr(spans[0], "http.request.method"))
 	assert.Empty(t, getSpanAttr(spans[0], "http.request.method_original"))
+}
+
+// TestWithTelemetry_TruncatesLongUserAgent verifies the user_agent.original
+// span attribute is capped at maxUserAgentAttrLen bytes regardless of input
+// length, protecting trace storage from pathological clients.
+func TestWithTelemetry_TruncatesLongUserAgent(t *testing.T) {
+	tel, _, spanExp := newTelemetryHarness(t)
+
+	app := fiber.New()
+	mid := NewTelemetryMiddleware(tel)
+	app.Use(mid.WithTelemetry(tel))
+	app.Get("/x", func(c *fiber.Ctx) error { return c.SendStatus(http.StatusOK) })
+
+	longUA := strings.Repeat("a", 4000)
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	req.Header.Set("User-Agent", longUA)
+
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, resp.Body.Close()) }()
+
+	spans := spanExp.GetSpans()
+	require.NotEmpty(t, spans)
+
+	ua := getSpanAttr(spans[0], "user_agent.original")
+	assert.Len(t, ua, maxUserAgentAttrLen)
+	assert.Equal(t, strings.Repeat("a", maxUserAgentAttrLen), ua)
 }

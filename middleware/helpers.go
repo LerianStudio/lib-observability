@@ -64,6 +64,20 @@ func routeAttribute(c *fiber.Ctx, effectiveStatus int) (string, bool) {
 	return r.Path, true
 }
 
+// maxUserAgentAttrLen caps the user_agent.original span attribute to avoid
+// inflating trace storage/index cost. 256 bytes is sufficient for canonical
+// client/library/version identifiers in practice.
+const maxUserAgentAttrLen = 256
+
+// truncateUserAgent caps the user-agent string at maxUserAgentAttrLen bytes.
+func truncateUserAgent(ua string) string {
+	if len(ua) <= maxUserAgentAttrLen {
+		return ua
+	}
+
+	return ua[:maxUserAgentAttrLen]
+}
+
 // errorTypeOriginal returns the originating Go type name of handlerErr,
 // suitable as a high-cardinality debugging attribute on spans. Returns
 // "" if handlerErr is nil. Unwraps a single pointer level so "*fiber.Error"

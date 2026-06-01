@@ -242,7 +242,7 @@ func (tm *TelemetryMiddleware) WithTelemetry(tl *tracing.Telemetry, excludedRout
 			attribute.String("url.path", sanitizeURL(originalURL)),
 			attribute.String("url.scheme", protocol),
 			attribute.String("server.address", hostname),
-			attribute.String("user_agent.original", userAgent),
+			attribute.String("user_agent.original", truncateUserAgent(userAgent)),
 			attribute.Int("http.response.status_code", statusCode),
 		}
 		if routePath, present := routeAttribute(c, statusCode); present {
