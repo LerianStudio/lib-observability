@@ -237,41 +237,81 @@ func (tm *TelemetryMiddleware) WithTelemetry(tl *tracing.Telemetry, excludedRout
 		// error.type_original stay consistent with the duration metric.
 		statusCode := httpStatusCode(c, err)
 
-		spanAttrs := []attribute.KeyValue{
-			attribute.String("http.request.method", method),
-			attribute.String("url.path", sanitizeURL(originalURL)),
-			attribute.String("url.scheme", protocol),
-			attribute.String("server.address", hostname),
-			attribute.String("user_agent.original", truncateUserAgent(userAgent)),
-			attribute.Int("http.response.status_code", statusCode),
-		}
-		if routePath, present := routeAttribute(c, statusCode); present {
-			spanAttrs = append(spanAttrs, attribute.String("http.route", routePath))
-		}
-
-		span.SetAttributes(spanAttrs...)
-
-		if methodReplaced {
-			span.SetAttributes(attribute.String("http.request.method_original", methodOriginal))
-		}
-
-		if errType := classifyHTTPErrorType(statusCode); errType != "" {
-			span.SetAttributes(attribute.String("error.type", errType))
-		}
-
-		if origType := errorTypeOriginal(err); origType != "" {
-			span.SetAttributes(attribute.String("error.type_original", origType))
-		}
-
-		if err != nil {
-			tracing.HandleSpanError(span, "handler error", err)
-		} else if statusCode >= 500 {
-			span.SetStatus(codes.Error, fmt.Sprintf("HTTP %d", statusCode))
-		}
+		applyTelemetrySpanAttributes(span, c, statusCode, telemetryRequestAttrs{
+			method:         method,
+			methodOriginal: methodOriginal,
+			methodReplaced: methodReplaced,
+			originalURL:    originalURL,
+			protocol:       protocol,
+			hostname:       hostname,
+			userAgent:      userAgent,
+			handlerErr:     err,
+		})
 
 		recordHTTPServerDuration(c, durationHistogram, method, requestStart, err)
 
 		return err
+	}
+}
+
+// telemetryRequestAttrs groups the per-request fields needed to apply OTel
+// span attributes after c.Next() returns. Kept package-private; only
+// applyTelemetrySpanAttributes consumes it.
+type telemetryRequestAttrs struct {
+	method         string
+	methodOriginal string
+	methodReplaced bool
+	originalURL    string
+	protocol       string
+	hostname       string
+	userAgent      string
+	handlerErr     error
+}
+
+// applyTelemetrySpanAttributes sets the OTel HTTP semantic-convention
+// attributes on the request span and finalizes its status. Extracted from
+// WithTelemetry to keep that function's cyclomatic complexity within the
+// repo's lint budget; the behavior is identical to setting the attributes
+// inline.
+func applyTelemetrySpanAttributes(
+	span trace.Span,
+	c *fiber.Ctx,
+	statusCode int,
+	req telemetryRequestAttrs,
+) {
+	spanAttrs := []attribute.KeyValue{
+		attribute.String("http.request.method", req.method),
+		attribute.String("url.path", sanitizeURL(req.originalURL)),
+		attribute.String("url.scheme", req.protocol),
+		attribute.String("server.address", req.hostname),
+		attribute.String("user_agent.original", truncateUserAgent(req.userAgent)),
+		attribute.Int("http.response.status_code", statusCode),
+	}
+	if routePath, present := routeAttribute(c, statusCode); present {
+		spanAttrs = append(spanAttrs, attribute.String("http.route", routePath))
+	}
+
+	if req.methodReplaced {
+		spanAttrs = append(spanAttrs, attribute.String("http.request.method_original", req.methodOriginal))
+	}
+
+	if errType := classifyHTTPErrorType(statusCode); errType != "" {
+		spanAttrs = append(spanAttrs, attribute.String("error.type", errType))
+	}
+
+	if origType := errorTypeOriginal(req.handlerErr); origType != "" {
+		spanAttrs = append(spanAttrs, attribute.String("error.type_original", origType))
+	}
+
+	span.SetAttributes(spanAttrs...)
+
+	if req.handlerErr != nil {
+		tracing.HandleSpanError(span, "handler error", req.handlerErr)
+		return
+	}
+
+	if statusCode >= 500 {
+		span.SetStatus(codes.Error, fmt.Sprintf("HTTP %d", statusCode))
 	}
 }
 
