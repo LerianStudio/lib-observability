@@ -3,6 +3,7 @@ package middleware
 import (
 	"context"
 	"net/url"
+	"reflect"
 	"regexp"
 	"strings"
 
@@ -36,6 +37,32 @@ func normalizeHTTPMethod(raw string) (normalized, original string, replaced bool
 	}
 
 	return "_OTHER", raw, true
+}
+
+// errorTypeOriginal returns the originating Go type name of handlerErr,
+// suitable as a high-cardinality debugging attribute on spans. Returns
+// "" if handlerErr is nil. Unwraps a single pointer level so "*fiber.Error"
+// surfaces as "fiber.Error". Falls back to "error" when reflect cannot
+// resolve a meaningful name.
+func errorTypeOriginal(handlerErr error) string {
+	if handlerErr == nil {
+		return ""
+	}
+
+	t := reflect.TypeOf(handlerErr)
+	if t == nil {
+		return "error"
+	}
+
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+
+	if name := t.String(); name != "" {
+		return name
+	}
+
+	return "error"
 }
 
 // isRouteExcludedFromList reports whether the request path matches any excluded route prefix.

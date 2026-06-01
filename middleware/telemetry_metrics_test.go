@@ -215,13 +215,24 @@ func TestWithTelemetry_RecordsDurationOn5xxStatus(t *testing.T) {
 	errType, ok := attrValue(dp.Attributes, "error.type")
 	require.True(t, ok, "5xx without handler error must still set error.type")
 	assert.Equal(t, "503", errType)
+
+	// SendStatus(503) carries no handler error, so error.type_original must
+	// be absent everywhere (regression guard against re-introducing the
+	// Go-type label on the metric).
+	_, hasOrigOnMetric := dp.Attributes.Value(attribute.Key("error.type_original"))
+	assert.False(t, hasOrigOnMetric,
+		"error.type_original must NEVER appear on the metric")
 }
 
-// TestWithTelemetry_RecordsDurationOnHandlerError verifies that a handler-
-// returned error sets error.type to the Go type name (rather than a status
-// classification), preserving the originating error identity.
+// TestWithTelemetry_RecordsDurationOnHandlerError verifies the Opção C
+// hybrid for a generic handler-returned error reconciled to 500:
+//   - Metric error.type is the status code string ("500"), never the Go type
+//     name (which would balloon cardinality across application error types).
+//   - Metric does NOT carry error.type_original.
+//   - Span carries the same numeric error.type plus error.type_original with
+//     the originating Go type name for debugging.
 func TestWithTelemetry_RecordsDurationOnHandlerError(t *testing.T) {
-	tel, reader := newMetricsHarness(t)
+	tel, reader, spanExp := newTelemetryHarness(t)
 
 	app := fiber.New(fiber.Config{
 		ErrorHandler: func(c *fiber.Ctx, err error) error {
@@ -241,23 +252,35 @@ func TestWithTelemetry_RecordsDurationOnHandlerError(t *testing.T) {
 	defer func() { require.NoError(t, resp.Body.Close()) }()
 	assert.Equal(t, http.StatusInternalServerError, resp.StatusCode)
 
+	// Metric: numeric error.type, no error.type_original.
 	dp := findDurationHistogram(t, reader)
 	require.NotNil(t, dp)
 
 	errType, ok := attrValue(dp.Attributes, "error.type")
-	require.True(t, ok, "handler error must set error.type")
-	// errors.errorString is the concrete type used by errors.New.
-	assert.Equal(t, "errors.errorString", errType,
-		"handler error type must surface the originating Go type name")
+	require.True(t, ok)
+	assert.Equal(t, "500", errType,
+		"metric error.type must be status-driven for low cardinality")
+
+	_, hasOrigOnMetric := dp.Attributes.Value(attribute.Key("error.type_original"))
+	assert.False(t, hasOrigOnMetric,
+		"error.type_original must NEVER appear on the metric")
+
+	// Span: same numeric error.type + originating Go type name.
+	spans := spanExp.GetSpans()
+	require.NotEmpty(t, spans)
+	assert.Equal(t, "500", getSpanAttr(spans[0], "error.type"))
+	assert.Equal(t, "errors.errorString",
+		getSpanAttr(spans[0], "error.type_original"),
+		"span must surface the originating Go type name for debugging")
 }
 
-// TestWithTelemetry_RecordsDurationOnFiberError4xx verifies that a handler
-// returning fiber.NewError(4xx) records the effective HTTP status from the
-// error (not the unwritten default response status), and surfaces the
-// originating *fiber.Error type as error.type. The duration metric must
-// reflect what an end-user actually observes after Fiber's error handler runs.
-func TestWithTelemetry_RecordsDurationOnFiberError4xx(t *testing.T) {
-	tel, reader := newMetricsHarness(t)
+// TestWithTelemetry_FiberError4xxOmitsErrorTypeOnMetric verifies that a
+// handler returning fiber.NewError(4xx) records the effective HTTP status
+// from the error but does NOT set error.type on the metric (4xx is not
+// classified as an error per the status-driven contract). The originating
+// *fiber.Error type is preserved on the span as error.type_original.
+func TestWithTelemetry_FiberError4xxOmitsErrorTypeOnMetric(t *testing.T) {
+	tel, reader, spanExp := newTelemetryHarness(t)
 
 	app := fiber.New()
 	mid := NewTelemetryMiddleware(tel)
@@ -282,16 +305,29 @@ func TestWithTelemetry_RecordsDurationOnFiberError4xx(t *testing.T) {
 	assert.EqualValues(t, http.StatusNotFound, statusVal.AsInt64(),
 		"status_code must reflect the *fiber.Error code, not the unwritten default")
 
-	errType, ok := attrValue(dp.Attributes, "error.type")
-	require.True(t, ok, "handler-returned *fiber.Error must set error.type")
-	assert.Equal(t, "fiber.Error", errType)
+	// Metric MUST omit error.type and error.type_original for 4xx.
+	_, hasErrTypeOnMetric := dp.Attributes.Value(attribute.Key("error.type"))
+	assert.False(t, hasErrTypeOnMetric,
+		"4xx must not set error.type on the metric per status-driven classification")
+	_, hasOrigOnMetric := dp.Attributes.Value(attribute.Key("error.type_original"))
+	assert.False(t, hasOrigOnMetric,
+		"error.type_original must NEVER appear on the metric")
+
+	// Span MUST also omit error.type but carry error.type_original.
+	spans := spanExp.GetSpans()
+	require.NotEmpty(t, spans)
+	assert.Empty(t, getSpanAttr(spans[0], "error.type"),
+		"span error.type follows the same status-driven rule")
+	assert.Equal(t, "fiber.Error",
+		getSpanAttr(spans[0], "error.type_original"),
+		"span must preserve the originating *fiber.Error type")
 }
 
-// TestWithTelemetry_RecordsDurationOnFiberError400 verifies the same contract
-// for 4xx bad-request errors raised via fiber.NewError, asserted independently
+// TestWithTelemetry_FiberError400OmitsErrorTypeOnMetric asserts the same
+// contract for 4xx bad-request errors raised via fiber.NewError, independently
 // from the 404 case to catch regressions for either code path.
-func TestWithTelemetry_RecordsDurationOnFiberError400(t *testing.T) {
-	tel, reader := newMetricsHarness(t)
+func TestWithTelemetry_FiberError400OmitsErrorTypeOnMetric(t *testing.T) {
+	tel, reader, spanExp := newTelemetryHarness(t)
 
 	app := fiber.New()
 	mid := NewTelemetryMiddleware(tel)
@@ -314,15 +350,25 @@ func TestWithTelemetry_RecordsDurationOnFiberError400(t *testing.T) {
 	assert.EqualValues(t, http.StatusBadRequest, statusVal.AsInt64(),
 		"status_code must reflect fiber.NewError(400)")
 
-	errType, ok := attrValue(dp.Attributes, "error.type")
-	require.True(t, ok)
-	assert.Equal(t, "fiber.Error", errType)
+	_, hasErrTypeOnMetric := dp.Attributes.Value(attribute.Key("error.type"))
+	assert.False(t, hasErrTypeOnMetric,
+		"400 must not set error.type on the metric")
+	_, hasOrigOnMetric := dp.Attributes.Value(attribute.Key("error.type_original"))
+	assert.False(t, hasOrigOnMetric)
+
+	spans := spanExp.GetSpans()
+	require.NotEmpty(t, spans)
+	assert.Empty(t, getSpanAttr(spans[0], "error.type"))
+	assert.Equal(t, "fiber.Error",
+		getSpanAttr(spans[0], "error.type_original"))
 }
 
 // TestWithTelemetry_RecordsDurationOnFiberError5xx verifies that a 5xx
-// fiber.NewError is also reflected in status_code on the duration metric.
+// fiber.NewError is reflected in status_code AND error.type on the duration
+// metric using the status-driven numeric label, with the originating Go type
+// preserved on the span as error.type_original (never on the metric).
 func TestWithTelemetry_RecordsDurationOnFiberError5xx(t *testing.T) {
-	tel, reader := newMetricsHarness(t)
+	tel, reader, spanExp := newTelemetryHarness(t)
 
 	app := fiber.New()
 	mid := NewTelemetryMiddleware(tel)
@@ -346,16 +392,95 @@ func TestWithTelemetry_RecordsDurationOnFiberError5xx(t *testing.T) {
 
 	errType, ok := attrValue(dp.Attributes, "error.type")
 	require.True(t, ok)
-	assert.Equal(t, "fiber.Error", errType)
+	assert.Equal(t, "502", errType,
+		"metric error.type must be status-driven for low cardinality")
+
+	_, hasOrigOnMetric := dp.Attributes.Value(attribute.Key("error.type_original"))
+	assert.False(t, hasOrigOnMetric,
+		"error.type_original must NEVER appear on the metric")
+
+	spans := spanExp.GetSpans()
+	require.NotEmpty(t, spans)
+	assert.Equal(t, "502", getSpanAttr(spans[0], "error.type"))
+	assert.Equal(t, "fiber.Error", getSpanAttr(spans[0], "error.type_original"))
+}
+
+// TestWithTelemetry_FiberErrorAndSendStatusAreConsistent verifies the core
+// motivation of the status-driven contract: a 503 raised via
+// fiber.NewError(503) and a 503 written via c.SendStatus(503) MUST produce
+// the same metric time series so alert rules of the form error_type=~"5.."
+// aggregate reliably across both code paths.
+func TestWithTelemetry_FiberErrorAndSendStatusAreConsistent(t *testing.T) {
+	tel, reader := newMetricsHarness(t)
+
+	app := fiber.New()
+	mid := NewTelemetryMiddleware(tel)
+	app.Use(mid.WithTelemetry(tel))
+
+	app.Get("/api/raise", func(c *fiber.Ctx) error {
+		return fiber.NewError(http.StatusServiceUnavailable, "down")
+	})
+	app.Get("/api/send", func(c *fiber.Ctx) error {
+		return c.SendStatus(http.StatusServiceUnavailable)
+	})
+
+	r1, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/raise", nil))
+	require.NoError(t, err)
+	defer func() { require.NoError(t, r1.Body.Close()) }()
+	require.Equal(t, http.StatusServiceUnavailable, r1.StatusCode)
+
+	r2, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/send", nil))
+	require.NoError(t, err)
+	defer func() { require.NoError(t, r2.Body.Close()) }()
+	require.Equal(t, http.StatusServiceUnavailable, r2.StatusCode)
+
+	// Both requests share method+status+error.type but have different
+	// http.route values, so they remain two distinct time series, each with
+	// Count==1. Both MUST carry error.type="503" (status-driven) and no
+	// error.type_original on the metric.
+	rm := &metricdata.ResourceMetrics{}
+	require.NoError(t, reader.Collect(context.Background(), rm))
+
+	var points []metricdata.HistogramDataPoint[float64]
+
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != httpServerRequestDurationMetric {
+				continue
+			}
+
+			h, ok := m.Data.(metricdata.Histogram[float64])
+			require.True(t, ok)
+			points = append(points, h.DataPoints...)
+		}
+	}
+
+	require.Len(t, points, 2,
+		"each route is a distinct series; both must record exactly one point")
+
+	for _, dp := range points {
+		errType, ok := attrValue(dp.Attributes, "error.type")
+		require.True(t, ok,
+			"both fiber.NewError and SendStatus 5xx paths MUST set error.type")
+		assert.Equal(t, "503", errType,
+			"both paths MUST produce the same status-driven error.type label")
+
+		_, hasOrig := dp.Attributes.Value(attribute.Key("error.type_original"))
+		assert.False(t, hasOrig,
+			"error.type_original must NEVER appear on the metric")
+
+		assert.EqualValues(t, 1, dp.Count)
+	}
 }
 
 // TestWithTelemetry_GenericHandlerErrorStatusCodeIs500 verifies that when a
 // handler returns a non-fiber error and no custom ErrorHandler has rewritten
-// the status code by the time the metric is recorded, the metric still
-// reports 500, matching what Fiber's default error handler will write to
-// the client.
+// the status code by the time the metric is recorded, the metric reports
+// status_code=500 with the status-driven error.type="500" (not the Go type
+// name). The originating Go type identity is preserved on the span via
+// error.type_original.
 func TestWithTelemetry_GenericHandlerErrorStatusCodeIs500(t *testing.T) {
-	tel, reader := newMetricsHarness(t)
+	tel, reader, spanExp := newTelemetryHarness(t)
 
 	// Use Fiber's default ErrorHandler (no override) so the response status
 	// is materialized AFTER the WithTelemetry middleware unwinds.
@@ -383,7 +508,16 @@ func TestWithTelemetry_GenericHandlerErrorStatusCodeIs500(t *testing.T) {
 
 	errType, ok := attrValue(dp.Attributes, "error.type")
 	require.True(t, ok)
-	assert.Equal(t, "errors.errorString", errType)
+	assert.Equal(t, "500", errType)
+
+	_, hasOrigOnMetric := dp.Attributes.Value(attribute.Key("error.type_original"))
+	assert.False(t, hasOrigOnMetric)
+
+	spans := spanExp.GetSpans()
+	require.NotEmpty(t, spans)
+	assert.Equal(t, "500", getSpanAttr(spans[0], "error.type"))
+	assert.Equal(t, "errors.errorString",
+		getSpanAttr(spans[0], "error.type_original"))
 }
 
 // TestWithTelemetry_DoesNotRecordForExcludedRoute verifies that excluded

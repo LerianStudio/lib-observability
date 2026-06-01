@@ -222,7 +222,10 @@ func (tm *TelemetryMiddleware) WithTelemetry(tl *tracing.Telemetry, excludedRout
 
 		err = c.Next()
 
-		statusCode := c.Response().StatusCode()
+		// Reconcile the effective status the client will observe (same helper
+		// the metric uses) so the span's status code, error.type, and
+		// error.type_original stay consistent with the duration metric.
+		statusCode := httpStatusCode(c, err)
 		span.SetAttributes(
 			attribute.String("http.request.method", method),
 			attribute.String("url.path", sanitizeURL(originalURL)),
@@ -235,6 +238,14 @@ func (tm *TelemetryMiddleware) WithTelemetry(tl *tracing.Telemetry, excludedRout
 
 		if methodReplaced {
 			span.SetAttributes(attribute.String("http.request.method_original", methodOriginal))
+		}
+
+		if errType := classifyHTTPErrorType(statusCode); errType != "" {
+			span.SetAttributes(attribute.String("error.type", errType))
+		}
+
+		if origType := errorTypeOriginal(err); origType != "" {
+			span.SetAttributes(attribute.String("error.type_original", origType))
 		}
 
 		if err != nil {
@@ -288,7 +299,7 @@ func recordHTTPServerDuration(
 		attribute.Int("http.response.status_code", statusCode),
 	}
 
-	if errType := classifyHTTPErrorType(handlerErr, statusCode); errType != "" {
+	if errType := classifyHTTPErrorType(statusCode); errType != "" {
 		attrs = append(attrs, attribute.String("error.type", errType))
 	}
 
@@ -296,30 +307,14 @@ func recordHTTPServerDuration(
 	hist.Record(c.UserContext(), durationSeconds, metric.WithAttributes(attrs...))
 }
 
-// classifyHTTPErrorType returns a stable error.type label per OpenTelemetry
-// semantic conventions, or empty string when no error condition applies.
-// Handler errors take precedence over status-derived classification to preserve
-// the originating error's type identity.
-func classifyHTTPErrorType(handlerErr error, statusCode int) string {
-	if handlerErr != nil {
-		// reflect.TypeOf(nil) is nil, so we already guarded above.
-		t := reflect.TypeOf(handlerErr)
-		if t == nil {
-			return "error"
-		}
-
-		// Unwrap pointer types so "*fiber.Error" surfaces as "fiber.Error".
-		for t.Kind() == reflect.Pointer {
-			t = t.Elem()
-		}
-
-		if name := t.String(); name != "" {
-			return name
-		}
-
-		return "error"
-	}
-
+// classifyHTTPErrorType returns the stable, low-cardinality error.type
+// label for the http.server.request.duration metric per OpenTelemetry HTTP
+// semantic conventions. Status-driven by design: a 503 surfaced via
+// fiber.NewError(503) and a 503 surfaced via c.SendStatus(503) MUST produce
+// the same time series so alert rules of the form error_type=~"5.."
+// aggregate reliably. The originating Go type identity, when useful for
+// debugging, is published separately on the span via errorTypeOriginal.
+func classifyHTTPErrorType(statusCode int) string {
 	if statusCode >= 500 {
 		return strconv.Itoa(statusCode)
 	}
