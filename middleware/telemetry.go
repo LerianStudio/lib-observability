@@ -29,10 +29,14 @@ import (
 // for HTTP server request duration. Recorded as a Float64 histogram in seconds.
 const httpServerRequestDurationMetric = "http.server.request.duration"
 
-// httpServerDurationBuckets is the default histogram bucket layout (seconds) for
-// http.server.request.duration. Mirrors the OpenTelemetry HTTP semantic conventions
-// recommendation for server-side request latency.
-var httpServerDurationBuckets = []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10}
+// httpServerDurationBuckets follows the current OpenTelemetry HTTP semantic
+// conventions advisory layout for http.server.request.duration. Update only
+// in lockstep with the spec.
+var httpServerDurationBuckets = []float64{
+	0.005, 0.01, 0.025, 0.05, 0.075,
+	0.1, 0.25, 0.5, 0.75,
+	1, 2.5, 5, 7.5, 10,
+}
 
 // newHTTPServerDurationHistogram builds the float64 histogram instrument for
 // http.server.request.duration on the given meter. Returns nil if the meter is

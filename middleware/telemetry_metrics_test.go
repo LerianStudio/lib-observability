@@ -119,6 +119,19 @@ func getSpanAttr(span tracetest.SpanStub, key string) string {
 	return ""
 }
 
+// TestHTTPServerDurationBuckets_MatchOTelAdvisory locks the bucket layout
+// against the current OTel HTTP semconv advisory. Any change to this slice
+// is observable from dashboards, so it MUST be a deliberate spec-tracking
+// update — never an accidental edit.
+func TestHTTPServerDurationBuckets_MatchOTelAdvisory(t *testing.T) {
+	expected := []float64{
+		0.005, 0.01, 0.025, 0.05, 0.075,
+		0.1, 0.25, 0.5, 0.75,
+		1, 2.5, 5, 7.5, 10,
+	}
+	assert.Equal(t, expected, httpServerDurationBuckets)
+}
+
 // TestWithTelemetry_RecordsDurationOnSuccess verifies that a successful 200
 // request emits the duration histogram with the route template (not the raw
 // path) and no error.type attribute.
