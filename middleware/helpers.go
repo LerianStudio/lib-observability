@@ -39,6 +39,31 @@ func normalizeHTTPMethod(raw string) (normalized, original string, replaced bool
 	return "_OTHER", raw, true
 }
 
+// routeAttribute returns the route template suitable for the http.route
+// telemetry attribute, plus a present flag. Fiber v2 exposes Route().Path
+// == "/" for unmatched requests (its default catch-all), which would
+// conflate scanner/404 traffic with the actual root handler in dashboards.
+// We detect this case (effective status == 404 AND route == "/" AND the
+// request path is NOT "/") and report the attribute as absent so callers
+// can omit it entirely, matching OTel guidance that http.route SHOULD be
+// absent when no route matched.
+func routeAttribute(c *fiber.Ctx, effectiveStatus int) (string, bool) {
+	if c == nil {
+		return "", false
+	}
+
+	r := c.Route()
+	if r == nil {
+		return "", false
+	}
+
+	if effectiveStatus == fiber.StatusNotFound && r.Path == "/" && c.Path() != "/" {
+		return "", false
+	}
+
+	return r.Path, true
+}
+
 // errorTypeOriginal returns the originating Go type name of handlerErr,
 // suitable as a high-cardinality debugging attribute on spans. Returns
 // "" if handlerErr is nil. Unwraps a single pointer level so "*fiber.Error"

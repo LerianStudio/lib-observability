@@ -649,6 +649,66 @@ func TestWithTelemetry_NilMetricsFactoryDoesNotRecord(t *testing.T) {
 		"nil MetricsFactory must not record duration")
 }
 
+// TestWithTelemetry_UnmatchedRouteOmitsHTTPRoute verifies the catch-all 404
+// guard: Fiber v2's default unmatched-path handler exposes Route().Path=="/",
+// which would conflate scanner/404 traffic with the actual root handler in
+// dashboards. The middleware MUST omit http.route entirely from both the span
+// and the metric in that case, while still recording http.route="/" for a
+// legitimately-registered root handler.
+func TestWithTelemetry_UnmatchedRouteOmitsHTTPRoute(t *testing.T) {
+	t.Run("unmatched 404 omits http.route", func(t *testing.T) {
+		tel, reader, spanExp := newTelemetryHarness(t)
+
+		app := fiber.New()
+		mid := NewTelemetryMiddleware(tel)
+		app.Use(mid.WithTelemetry(tel))
+		// No routes registered: any request hits Fiber's catch-all 404.
+
+		resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/not-registered", nil))
+		require.NoError(t, err)
+		defer func() { require.NoError(t, resp.Body.Close()) }()
+		assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+
+		dp := findDurationHistogram(t, reader)
+		require.NotNil(t, dp, "duration must still be recorded for the 404")
+		assert.EqualValues(t, 1, dp.Count)
+
+		_, hasRoute := dp.Attributes.Value(attribute.Key("http.route"))
+		assert.False(t, hasRoute,
+			"http.route must be absent on the metric for unmatched 404")
+
+		spans := spanExp.GetSpans()
+		require.NotEmpty(t, spans)
+		assert.Empty(t, getSpanAttr(spans[0], "http.route"),
+			"http.route must be absent on the span for unmatched 404")
+	})
+
+	t.Run("registered root handler retains http.route", func(t *testing.T) {
+		tel, reader, spanExp := newTelemetryHarness(t)
+
+		app := fiber.New()
+		mid := NewTelemetryMiddleware(tel)
+		app.Use(mid.WithTelemetry(tel))
+		app.Get("/", func(c *fiber.Ctx) error { return c.SendStatus(http.StatusOK) })
+
+		resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/", nil))
+		require.NoError(t, err)
+		defer func() { require.NoError(t, resp.Body.Close()) }()
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+		dp := findDurationHistogram(t, reader)
+		require.NotNil(t, dp)
+		route, ok := attrValue(dp.Attributes, "http.route")
+		require.True(t, ok,
+			"http.route must be present for a legitimately-registered root handler")
+		assert.Equal(t, "/", route)
+
+		spans := spanExp.GetSpans()
+		require.NotEmpty(t, spans)
+		assert.Equal(t, "/", getSpanAttr(spans[0], "http.route"))
+	})
+}
+
 // TestWithTelemetry_NormalizesUnknownMethodOnSpan verifies that an unknown
 // HTTP verb is normalized to "_OTHER" on both the metric and the span, with
 // the original verb preserved exclusively on the span's

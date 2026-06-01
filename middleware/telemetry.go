@@ -230,15 +230,20 @@ func (tm *TelemetryMiddleware) WithTelemetry(tl *tracing.Telemetry, excludedRout
 		// the metric uses) so the span's status code, error.type, and
 		// error.type_original stay consistent with the duration metric.
 		statusCode := httpStatusCode(c, err)
-		span.SetAttributes(
+
+		spanAttrs := []attribute.KeyValue{
 			attribute.String("http.request.method", method),
 			attribute.String("url.path", sanitizeURL(originalURL)),
-			attribute.String("http.route", c.Route().Path),
 			attribute.String("url.scheme", protocol),
 			attribute.String("server.address", hostname),
 			attribute.String("user_agent.original", userAgent),
 			attribute.Int("http.response.status_code", statusCode),
-		)
+		}
+		if routePath, present := routeAttribute(c, statusCode); present {
+			spanAttrs = append(spanAttrs, attribute.String("http.route", routePath))
+		}
+
+		span.SetAttributes(spanAttrs...)
 
 		if methodReplaced {
 			span.SetAttributes(attribute.String("http.request.method_original", methodOriginal))
@@ -271,14 +276,16 @@ func (tm *TelemetryMiddleware) WithTelemetry(tl *tracing.Telemetry, excludedRout
 //
 // Attribute set follows OpenTelemetry HTTP semantic conventions:
 //   - http.request.method: captured before c.Next() to survive fasthttp recycling
-//   - http.route: c.Route().Path - low-cardinality route template, never raw paths
+//   - http.route: c.Route().Path - low-cardinality route template, never raw paths;
+//     omitted entirely when no route matched (Fiber's catch-all 404), so scanner/
+//     unmatched traffic does not pollute the root-route series.
 //   - http.response.status_code: the effective status the client will observe;
 //     derived from the handler error (*fiber.Error.Code, or 500 for generic
 //     errors) when Fiber's error handler has not yet rewritten the response,
 //     otherwise read directly from the response. This matches httpStatusCode
 //     used by the logging middleware and avoids reporting 200 for failures.
-//   - error.type: only set when the handler returned an error or effective
-//     status >= 500.
+//   - error.type: only set when effective status >= 500, using the numeric
+//     status code as a stable, low-cardinality label.
 func recordHTTPServerDuration(
 	c *fiber.Ctx,
 	hist metric.Float64Histogram,
@@ -292,15 +299,12 @@ func recordHTTPServerDuration(
 
 	statusCode := httpStatusCode(c, handlerErr)
 
-	route := ""
-	if r := c.Route(); r != nil {
-		route = r.Path
-	}
-
 	attrs := []attribute.KeyValue{
 		attribute.String("http.request.method", method),
-		attribute.String("http.route", route),
 		attribute.Int("http.response.status_code", statusCode),
+	}
+	if routePath, present := routeAttribute(c, statusCode); present {
+		attrs = append(attrs, attribute.String("http.route", routePath))
 	}
 
 	if errType := classifyHTTPErrorType(statusCode); errType != "" {
