@@ -141,6 +141,12 @@ func (tm *TelemetryMiddleware) WithTelemetry(tl *tracing.Telemetry, excludedRout
 		bootstrapTelemetry = tm.Telemetry
 	}
 
+	// MetricsFactory presence is used here as the canonical "metrics subsystem
+	// enabled" signal across this library, even though the histogram itself is
+	// built directly from MeterProvider below. Keeping this gate aligned with
+	// the rest of the metrics package (see metrics/doc.go) ensures callers that
+	// disable metrics by nil-ing MetricsFactory also stop receiving the duration
+	// histogram, without us needing a separate enablement flag.
 	if bootstrapTelemetry != nil &&
 		bootstrapTelemetry.MeterProvider != nil &&
 		bootstrapTelemetry.MetricsFactory != nil {
