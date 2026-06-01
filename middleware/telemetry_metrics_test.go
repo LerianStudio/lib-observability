@@ -98,10 +98,7 @@ func TestWithTelemetry_RecordsDurationOnSuccess(t *testing.T) {
 		return c.SendStatus(http.StatusOK)
 	})
 
-	req, err := http.NewRequest(http.MethodGet, "/api/users/42", nil)
-	require.NoError(t, err)
-
-	resp, err := app.Test(req)
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/users/42", nil))
 	require.NoError(t, err)
 	defer func() { require.NoError(t, resp.Body.Close()) }()
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
