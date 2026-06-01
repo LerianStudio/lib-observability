@@ -178,7 +178,8 @@ func (tm *TelemetryMiddleware) WithTelemetry(tl *tracing.Telemetry, excludedRout
 		// After c.Next() returns, fasthttp may recycle the underlying RequestCtx
 		// for the next connection, corrupting any previously returned string slices.
 		// Safe copies via string([]byte(...)) ensure the data is heap-owned.
-		method := string([]byte(c.Method()))
+		rawMethod := string([]byte(c.Method()))
+		method, methodOriginal, methodReplaced := normalizeHTTPMethod(rawMethod)
 
 		if effectiveTelemetry.TracerProvider == nil {
 			err := c.Next()
@@ -231,6 +232,10 @@ func (tm *TelemetryMiddleware) WithTelemetry(tl *tracing.Telemetry, excludedRout
 			attribute.String("user_agent.original", userAgent),
 			attribute.Int("http.response.status_code", statusCode),
 		)
+
+		if methodReplaced {
+			span.SetAttributes(attribute.String("http.request.method_original", methodOriginal))
+		}
 
 		if err != nil {
 			tracing.HandleSpanError(span, "handler error", err)

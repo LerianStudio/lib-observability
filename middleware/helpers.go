@@ -18,6 +18,26 @@ var uuidPattern = regexp.MustCompile(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{
 // internalServicePattern matches Lerian internal service user-agent strings.
 var internalServicePattern = regexp.MustCompile(`^[\w-]+/[\d.]+\s+LerianStudio$`)
 
+// knownHTTPMethods is the canonical case-sensitive set per OpenTelemetry
+// HTTP semantic conventions; methods outside this set are reported as
+// "_OTHER" on telemetry to keep label cardinality bounded.
+var knownHTTPMethods = map[string]struct{}{
+	"GET": {}, "HEAD": {}, "POST": {}, "PUT": {}, "DELETE": {},
+	"CONNECT": {}, "OPTIONS": {}, "TRACE": {}, "PATCH": {},
+}
+
+// normalizeHTTPMethod returns the canonical method label and, if a
+// substitution happened, the original verb. Comparison is intentionally
+// case-sensitive: compliant clients send uppercase, and lowercase variants
+// genuinely belong in "_OTHER".
+func normalizeHTTPMethod(raw string) (normalized, original string, replaced bool) {
+	if _, ok := knownHTTPMethods[raw]; ok {
+		return raw, "", false
+	}
+
+	return "_OTHER", raw, true
+}
+
 // isRouteExcludedFromList reports whether the request path matches any excluded route prefix.
 // This standalone function is used to evaluate route exclusions independently of whether
 // the TelemetryMiddleware receiver is nil.

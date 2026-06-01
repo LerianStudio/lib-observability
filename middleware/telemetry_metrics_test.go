@@ -17,6 +17,8 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 // newMetricsHarness wires a real OTel SDK ManualReader so tests can assert on
@@ -82,6 +84,39 @@ func attrValue(set attribute.Set, key string) (string, bool) {
 	}
 
 	return v.AsString(), true
+}
+
+// newTelemetryHarness extends newMetricsHarness with a real TracerProvider
+// backed by an InMemoryExporter so tests can assert on both the
+// http.server.request.duration histogram and the span attributes produced
+// by WithTelemetry in a single fixture.
+func newTelemetryHarness(
+	t *testing.T,
+) (*tracing.Telemetry, *sdkmetric.ManualReader, *tracetest.InMemoryExporter) {
+	t.Helper()
+
+	tel, reader := newMetricsHarness(t)
+
+	spanExp := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(spanExp))
+	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
+
+	tel.TracerProvider = tp
+
+	return tel, reader, spanExp
+}
+
+// getSpanAttr returns the string value for the named attribute on the given
+// stub span, or "" if absent. Non-string attribute values are also returned
+// stringified to keep call-site assertions uniform.
+func getSpanAttr(span tracetest.SpanStub, key string) string {
+	for _, kv := range span.Attributes {
+		if string(kv.Key) == key {
+			return kv.Value.Emit()
+		}
+	}
+
+	return ""
 }
 
 // TestWithTelemetry_RecordsDurationOnSuccess verifies that a successful 200
@@ -465,4 +500,77 @@ func TestWithTelemetry_NilMetricsFactoryDoesNotRecord(t *testing.T) {
 
 	assert.Nil(t, findDurationHistogram(t, reader),
 		"nil MetricsFactory must not record duration")
+}
+
+// TestWithTelemetry_NormalizesUnknownMethodOnSpan verifies that an unknown
+// HTTP verb is normalized to "_OTHER" on both the metric and the span, with
+// the original verb preserved exclusively on the span's
+// http.request.method_original attribute (never on the metric, to keep
+// label cardinality bounded).
+func TestWithTelemetry_NormalizesUnknownMethodOnSpan(t *testing.T) {
+	tel, reader, spanExp := newTelemetryHarness(t)
+
+	// Fiber rejects unknown verbs at the framework boundary by default.
+	// Extend RequestMethods so the middleware actually sees PROPFIND.
+	app := fiber.New(fiber.Config{
+		RequestMethods: append(fiber.DefaultMethods, "PROPFIND"),
+	})
+	mid := NewTelemetryMiddleware(tel)
+	app.Use(mid.WithTelemetry(tel))
+
+	app.Add("PROPFIND", "/dav/:resource", func(c *fiber.Ctx) error {
+		return c.SendStatus(http.StatusOK)
+	})
+
+	resp, err := app.Test(httptest.NewRequest("PROPFIND", "/dav/foo", nil))
+	require.NoError(t, err)
+	defer func() { require.NoError(t, resp.Body.Close()) }()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// Metric assertions: normalized to "_OTHER", no method_original.
+	dp := findDurationHistogram(t, reader)
+	require.NotNil(t, dp)
+
+	method, ok := attrValue(dp.Attributes, "http.request.method")
+	require.True(t, ok)
+	assert.Equal(t, "_OTHER", method)
+
+	_, hasOrigOnMetric := dp.Attributes.Value(attribute.Key("http.request.method_original"))
+	assert.False(t, hasOrigOnMetric, "method_original must NEVER appear on the metric")
+
+	// Span assertions: normalized method + original preserved.
+	spans := spanExp.GetSpans()
+	require.Len(t, spans, 1)
+	assert.Equal(t, "_OTHER", getSpanAttr(spans[0], "http.request.method"))
+	assert.Equal(t, "PROPFIND", getSpanAttr(spans[0], "http.request.method_original"))
+}
+
+// TestWithTelemetry_KnownMethodHasNoOriginal verifies that a canonical method
+// (GET) does not emit http.request.method_original anywhere.
+func TestWithTelemetry_KnownMethodHasNoOriginal(t *testing.T) {
+	tel, reader, spanExp := newTelemetryHarness(t)
+
+	app := fiber.New()
+	mid := NewTelemetryMiddleware(tel)
+	app.Use(mid.WithTelemetry(tel))
+
+	app.Get("/ping", func(c *fiber.Ctx) error {
+		return c.SendStatus(http.StatusOK)
+	})
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/ping", nil))
+	require.NoError(t, err)
+	defer func() { require.NoError(t, resp.Body.Close()) }()
+
+	dp := findDurationHistogram(t, reader)
+	require.NotNil(t, dp)
+	method, _ := attrValue(dp.Attributes, "http.request.method")
+	assert.Equal(t, "GET", method)
+	_, hasOrig := dp.Attributes.Value(attribute.Key("http.request.method_original"))
+	assert.False(t, hasOrig)
+
+	spans := spanExp.GetSpans()
+	require.NotEmpty(t, spans)
+	assert.Equal(t, "GET", getSpanAttr(spans[0], "http.request.method"))
+	assert.Empty(t, getSpanAttr(spans[0], "http.request.method_original"))
 }
