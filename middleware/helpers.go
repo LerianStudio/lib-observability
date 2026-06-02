@@ -7,8 +7,6 @@ import (
 	"regexp"
 	"strings"
 
-	"go.opentelemetry.io/otel/attribute"
-
 	constant "github.com/LerianStudio/lib-observability/constants"
 	"github.com/LerianStudio/lib-observability/redaction"
 	"github.com/gofiber/fiber/v2"
@@ -123,20 +121,7 @@ func errorTypeOriginal(handlerErr error) string {
 
 	return "error"
 }
-var tenantHeaderNames = []string{
-	"X-Tenant-Id",
-	"tenant-id",
-	"tenant_id",
-	"tenant.id",
-	"tenant",
-}
 
-var tenantMetadataNames = []string{
-	"tenant-id",
-	"tenant_id",
-	"tenant.id",
-	"tenant",
-}
 // isRouteExcludedFromList reports whether the request path matches any
 // excluded route on a path-segment boundary. A route matches when the
 // path equals it exactly or starts with "route + /", so "/health" excludes
@@ -232,52 +217,6 @@ func getGRPCUserAgent(ctx context.Context) string {
 // isInternalLerianService reports whether a user-agent belongs to a Lerian internal service.
 func isInternalLerianService(userAgent string) bool {
 	return internalServicePattern.MatchString(userAgent)
-}
-
-func resolveTenantIDFromHeaders(c *fiber.Ctx) string {
-	for _, key := range tenantHeaderNames {
-		value := normalizeRequestID(c.Get(key))
-		if !isNilOrEmptyString(&value) {
-			return value
-		}
-	}
-
-	return ""
-}
-
-func resolveTenantIDFromMetadata(ctx context.Context) string {
-	if ctx == nil {
-		return ""
-	}
-
-	md, ok := metadata.FromIncomingContext(ctx)
-	if !ok || md == nil {
-		return ""
-	}
-
-	for _, key := range tenantMetadataNames {
-		vals := md.Get(key)
-		if len(vals) == 0 {
-			continue
-		}
-
-		value := normalizeRequestID(vals[0])
-		if !isNilOrEmptyString(&value) {
-			return value
-		}
-	}
-
-	return ""
-}
-
-func tenantIDFromAttributes(attrs []attribute.KeyValue) string {
-	for _, attr := range attrs {
-		if attr.Key == attribute.Key("tenant.id") {
-			return attr.Value.AsString()
-		}
-	}
-
-	return ""
 }
 
 // replaceUUIDWithPlaceholder replaces UUIDs with a placeholder in a given path string.

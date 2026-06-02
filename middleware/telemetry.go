@@ -178,10 +178,9 @@ func (tm *TelemetryMiddleware) WithTelemetry(tl *tracing.Telemetry, excludedRout
 
 		ctx := c.UserContext()
 		_, _, reqId, _ := observability.NewTrackingFromContext(ctx)
-		tenantID := resolveTenantIDFromHeaders(c)
 
-		if tenantID != "" {
-			ctx = observability.ContextWithSpanAttributes(ctx, attribute.String("tenant.id", tenantID))
+		if tenantID := ResolveTenantIDFromHTTP(c); tenantID != "" {
+			ctx = observability.ContextWithSpanAttributes(ctx, attribute.String(attrKeyTenantID, tenantID))
 		}
 
 		c.SetUserContext(observability.ContextWithSpanAttributes(ctx,
@@ -440,10 +439,8 @@ func (tm *TelemetryMiddleware) WithTelemetryInterceptor(tl *tracing.Telemetry) g
 			methodName = info.FullMethod
 		}
 
-		tenantID := resolveTenantIDFromMetadata(ctx)
-
-		if tenantID != "" {
-			ctx = observability.ContextWithSpanAttributes(ctx, attribute.String("tenant.id", tenantID))
+		if tenantID := ResolveTenantIDFromGRPC(ctx); tenantID != "" {
+			ctx = observability.ContextWithSpanAttributes(ctx, attribute.String(attrKeyTenantID, tenantID))
 		}
 
 		ctx = observability.ContextWithSpanAttributes(ctx,

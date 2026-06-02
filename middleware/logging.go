@@ -228,18 +228,21 @@ func WithHTTPLogging(opts ...LogMiddlewareOption) fiber.Handler {
 		info := NewRequestInfo(c, mid.ObfuscationDisabled)
 
 		requestID := c.Get(headerID)
-		tenantID := resolveTenantIDFromHeaders(c)
-		if tenantID == "" {
-			tenantID = tenantIDFromAttributes(observability.AttributesFromContext(c.UserContext()))
+		ctx := c.UserContext()
+
+		if tenantID := ResolveTenantIDFromHTTP(c); tenantID != "" {
+			ctx = observability.ContextWithSpanAttributes(ctx, attribute.String(attrKeyTenantID, tenantID))
 		}
+
 		logger := mid.Logger.
 			With(obslog.String(headerID, info.TraceID)).
 			With(obslog.String("message_prefix", requestID+constant.LoggerDefaultSeparator))
-		if tenantID != "" {
-			logger = logger.With(obslog.String("tenant.id", tenantID))
+
+		if tenantID := tenantIDFromAttrBag(ctx); tenantID != "" {
+			logger = logger.With(obslog.String(attrKeyTenantID, tenantID))
 		}
 
-		ctx := observability.ContextWithLogger(c.UserContext(), logger)
+		ctx = observability.ContextWithLogger(ctx, logger)
 		c.SetUserContext(ctx)
 
 		err := c.Next()
@@ -299,8 +302,9 @@ func WithGrpcLogging(opts ...LogMiddlewareOption) grpc.UnaryServerInterceptor {
 
 		ctx = observability.ContextWithHeaderID(ctx, requestID)
 		ctx = observability.ContextWithSpanAttributes(ctx, attribute.String("app.request.request_id", requestID))
-		if tenantID := resolveTenantIDFromMetadata(ctx); tenantID != "" {
-			ctx = observability.ContextWithSpanAttributes(ctx, attribute.String("tenant.id", tenantID))
+
+		if tenantID := ResolveTenantIDFromGRPC(ctx); tenantID != "" {
+			ctx = observability.ContextWithSpanAttributes(ctx, attribute.String(attrKeyTenantID, tenantID))
 		}
 
 		_, _, reqID, _ := observability.NewTrackingFromContext(ctx)
@@ -309,6 +313,10 @@ func WithGrpcLogging(opts ...LogMiddlewareOption) grpc.UnaryServerInterceptor {
 		logger := mid.Logger.
 			With(obslog.String(headerID, reqID)).
 			With(obslog.String("message_prefix", reqID+constant.LoggerDefaultSeparator))
+
+		if tenantID := tenantIDFromAttrBag(ctx); tenantID != "" {
+			logger = logger.With(obslog.String(attrKeyTenantID, tenantID))
+		}
 
 		ctx = observability.ContextWithLogger(ctx, logger)
 
@@ -324,9 +332,6 @@ func WithGrpcLogging(opts ...LogMiddlewareOption) grpc.UnaryServerInterceptor {
 		fields := []obslog.Field{
 			obslog.String("method", methodName),
 			obslog.String("duration", duration.String()),
-		}
-		if tenantID := tenantIDFromAttributes(observability.AttributesFromContext(ctx)); tenantID != "" {
-			fields = append(fields, obslog.String("tenant.id", tenantID))
 		}
 		if err != nil {
 			fields = append(fields, obslog.Err(err))

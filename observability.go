@@ -22,10 +22,6 @@ import (
 
 type contextKey string
 
-const (
-	spanAttributeContextKey = "lib-observability:span-attributes"
-)
-
 // ContextKey is the context key used to store ContextValue.
 var ContextKey = contextKey("custom_context")
 
@@ -240,8 +236,12 @@ func newDefaultTrackingComponents() TrackingComponents {
 
 // ---- Attribute Bag (request-wide span attributes) ----
 
-// ContextWithSpanAttributes appends one or more attributes to the request's AttrBag.
-// Call this once at the ingress (HTTP/gRPC middleware) and avoid per-layer duplication.
+// ContextWithSpanAttributes merges one or more attributes into the request's
+// AttrBag using last-wins semantics: if a key is already present, its value is
+// replaced in place; otherwise the attribute is appended. Call this at the
+// ingress (HTTP/gRPC middleware) for shared identifiers and again from a
+// downstream layer (e.g. after authentication resolves the real tenant) to
+// override the value without producing duplicates in the bag.
 // Example keys: tenant.id, enduser.id, request.route, region, plan.
 func ContextWithSpanAttributes(ctx context.Context, kv ...attribute.KeyValue) context.Context {
 	if ctx == nil {
@@ -253,12 +253,35 @@ func ContextWithSpanAttributes(ctx context.Context, kv ...attribute.KeyValue) co
 	}
 
 	values := cloneContextValues(ctx)
-	// Append to the cloned (independent) slice.
-	values.AttrBag = append(values.AttrBag, kv...)
-
-	ctx = context.WithValue(ctx, spanAttributeContextKey, values.AttrBag)
+	values.AttrBag = mergeAttrBagLastWins(values.AttrBag, kv)
 
 	return context.WithValue(ctx, ContextKey, values)
+}
+
+// mergeAttrBagLastWins returns a slice where every key from incoming overrides
+// the matching key in bag (in place, preserving the original position), and
+// keys not yet present are appended. The bag input is treated as already
+// independent (cloneContextValues deep-copies it before calling), so it is
+// safe to mutate.
+func mergeAttrBagLastWins(bag, incoming []attribute.KeyValue) []attribute.KeyValue {
+	for _, attr := range incoming {
+		replaced := false
+
+		for i := range bag {
+			if bag[i].Key == attr.Key {
+				bag[i] = attr
+				replaced = true
+
+				break
+			}
+		}
+
+		if !replaced {
+			bag = append(bag, attr)
+		}
+	}
+
+	return bag
 }
 
 // AttributesFromContext returns a shallow copy of the AttrBag slice, safe to reuse by processors.
@@ -270,13 +293,6 @@ func AttributesFromContext(ctx context.Context) []attribute.KeyValue {
 	if values, ok := ctx.Value(ContextKey).(*ContextValue); ok && values != nil && len(values.AttrBag) > 0 {
 		out := make([]attribute.KeyValue, len(values.AttrBag))
 		copy(out, values.AttrBag)
-
-		return out
-	}
-
-	if values, ok := ctx.Value(spanAttributeContextKey).([]attribute.KeyValue); ok && len(values) > 0 {
-		out := make([]attribute.KeyValue, len(values))
-		copy(out, values)
 
 		return out
 	}
@@ -293,7 +309,6 @@ func ReplaceAttributes(ctx context.Context, kv ...attribute.KeyValue) context.Co
 	values := cloneContextValues(ctx)
 
 	values.AttrBag = append([]attribute.KeyValue(nil), kv...)
-	ctx = context.WithValue(ctx, spanAttributeContextKey, values.AttrBag)
 
 	return context.WithValue(ctx, ContextKey, values)
 }
