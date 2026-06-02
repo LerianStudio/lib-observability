@@ -13,6 +13,7 @@ import (
 	"time"
 
 	observability "github.com/LerianStudio/lib-observability"
+	constant "github.com/LerianStudio/lib-observability/constants"
 	"github.com/LerianStudio/lib-observability/tracing"
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
@@ -178,6 +179,10 @@ func (tm *TelemetryMiddleware) WithTelemetry(tl *tracing.Telemetry, excludedRout
 
 		ctx := c.UserContext()
 		_, _, reqId, _ := observability.NewTrackingFromContext(ctx)
+
+		if tenantID := ResolveTenantIDFromHTTP(c); tenantID != "" {
+			ctx = observability.ContextWithSpanAttributes(ctx, attribute.String(constant.AttrKeyTenantID, tenantID))
+		}
 
 		c.SetUserContext(observability.ContextWithSpanAttributes(ctx,
 			attribute.String("app.request.request_id", reqId),
@@ -433,6 +438,10 @@ func (tm *TelemetryMiddleware) WithTelemetryInterceptor(tl *tracing.Telemetry) g
 		methodName := "unknown"
 		if info != nil {
 			methodName = info.FullMethod
+		}
+
+		if tenantID := ResolveTenantIDFromGRPC(ctx); tenantID != "" {
+			ctx = observability.ContextWithSpanAttributes(ctx, attribute.String(constant.AttrKeyTenantID, tenantID))
 		}
 
 		ctx = observability.ContextWithSpanAttributes(ctx,
