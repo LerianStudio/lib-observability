@@ -4,35 +4,16 @@ import (
 	"context"
 
 	observability "github.com/LerianStudio/lib-observability"
+	constant "github.com/LerianStudio/lib-observability/constants"
 	"github.com/gofiber/fiber/v2"
 	"go.opentelemetry.io/otel/attribute"
 	"google.golang.org/grpc/metadata"
 )
 
-const (
-	// headerTenantID is the canonical HTTP header carrying the tenant
-	// identifier across Lerian services.
-	headerTenantID = "X-Tenant-Id"
-
-	// metadataTenantID is the canonical gRPC metadata key carrying the
-	// tenant identifier. gRPC metadata keys are lowercase by spec.
-	metadataTenantID = "tenant-id"
-
-	// attrKeyTenantID is the OpenTelemetry attribute / log field key used
-	// everywhere tenant.id is emitted (logs, traces, metrics).
-	attrKeyTenantID = "tenant.id"
-
-	// maxTenantIDLen caps the value extracted from request headers to keep
-	// telemetry cardinality bounded. Values exceeding the cap are dropped
-	// silently — the lib cannot validate semantics, but it MUST avoid
-	// becoming a vector for unbounded label growth in shared backends.
-	maxTenantIDLen = 128
-)
-
 // ResolveTenantIDFromHTTP returns the tenant identifier carried by the
 // canonical X-Tenant-Id header, normalized for safe inclusion in telemetry.
 // Returns an empty string when the header is absent, empty after trimming, or
-// longer than maxTenantIDLen bytes. The header is trusted only as an
+// longer than MaxTenantIDLen bytes. The header is trusted only as an
 // observability hint: callers MUST authenticate the tenant separately and
 // override via observability.ContextWithSpanAttributes when the real value
 // differs from the header.
@@ -41,13 +22,13 @@ func ResolveTenantIDFromHTTP(c *fiber.Ctx) string {
 		return ""
 	}
 
-	return sanitizeTenantID(c.Get(headerTenantID))
+	return sanitizeTenantID(c.Get(constant.HeaderTenantID))
 }
 
 // ResolveTenantIDFromGRPC returns the tenant identifier carried by the
 // canonical tenant-id gRPC metadata key, normalized for safe inclusion in
 // telemetry. Returns an empty string when the metadata is absent, empty, or
-// longer than maxTenantIDLen bytes. Same trust caveat as the HTTP variant.
+// longer than MaxTenantIDLen bytes. Same trust caveat as the HTTP variant.
 func ResolveTenantIDFromGRPC(ctx context.Context) string {
 	if ctx == nil {
 		return ""
@@ -58,7 +39,7 @@ func ResolveTenantIDFromGRPC(ctx context.Context) string {
 		return ""
 	}
 
-	vals := md.Get(metadataTenantID)
+	vals := md.Get(constant.MetadataTenantID)
 	if len(vals) == 0 {
 		return ""
 	}
@@ -67,7 +48,7 @@ func ResolveTenantIDFromGRPC(ctx context.Context) string {
 }
 
 // sanitizeTenantID trims whitespace and control bytes from raw, then enforces
-// the maxTenantIDLen cap. Returns "" for any value that fails normalization or
+// the MaxTenantIDLen cap. Returns "" for any value that fails normalization or
 // exceeds the cap, so callers can use it as a presence check.
 func sanitizeTenantID(raw string) string {
 	value := normalizeRequestID(raw)
@@ -75,7 +56,7 @@ func sanitizeTenantID(raw string) string {
 		return ""
 	}
 
-	if len(value) > maxTenantIDLen {
+	if len(value) > constant.MaxTenantIDLen {
 		return ""
 	}
 
@@ -88,7 +69,7 @@ func sanitizeTenantID(raw string) string {
 // the tenant — the bag carries a single entry per key.
 func tenantIDFromAttrBag(ctx context.Context) string {
 	for _, attr := range observability.AttributesFromContext(ctx) {
-		if attr.Key == attribute.Key(attrKeyTenantID) {
+		if attr.Key == attribute.Key(constant.AttrKeyTenantID) {
 			return attr.Value.AsString()
 		}
 	}

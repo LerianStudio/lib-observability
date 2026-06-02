@@ -231,7 +231,7 @@ func WithHTTPLogging(opts ...LogMiddlewareOption) fiber.Handler {
 		ctx := c.UserContext()
 
 		if tenantID := ResolveTenantIDFromHTTP(c); tenantID != "" {
-			ctx = observability.ContextWithSpanAttributes(ctx, attribute.String(attrKeyTenantID, tenantID))
+			ctx = observability.ContextWithSpanAttributes(ctx, attribute.String(constant.AttrKeyTenantID, tenantID))
 		}
 
 		logger := mid.Logger.
@@ -239,7 +239,7 @@ func WithHTTPLogging(opts ...LogMiddlewareOption) fiber.Handler {
 			With(obslog.String("message_prefix", requestID+constant.LoggerDefaultSeparator))
 
 		if tenantID := tenantIDFromAttrBag(ctx); tenantID != "" {
-			logger = logger.With(obslog.String(attrKeyTenantID, tenantID))
+			logger = logger.With(obslog.String(constant.AttrKeyTenantID, tenantID))
 		}
 
 		ctx = observability.ContextWithLogger(ctx, logger)
@@ -304,7 +304,7 @@ func WithGrpcLogging(opts ...LogMiddlewareOption) grpc.UnaryServerInterceptor {
 		ctx = observability.ContextWithSpanAttributes(ctx, attribute.String("app.request.request_id", requestID))
 
 		if tenantID := ResolveTenantIDFromGRPC(ctx); tenantID != "" {
-			ctx = observability.ContextWithSpanAttributes(ctx, attribute.String(attrKeyTenantID, tenantID))
+			ctx = observability.ContextWithSpanAttributes(ctx, attribute.String(constant.AttrKeyTenantID, tenantID))
 		}
 
 		_, _, reqID, _ := observability.NewTrackingFromContext(ctx)
@@ -315,7 +315,7 @@ func WithGrpcLogging(opts ...LogMiddlewareOption) grpc.UnaryServerInterceptor {
 			With(obslog.String("message_prefix", reqID+constant.LoggerDefaultSeparator))
 
 		if tenantID := tenantIDFromAttrBag(ctx); tenantID != "" {
-			logger = logger.With(obslog.String(attrKeyTenantID, tenantID))
+			logger = logger.With(obslog.String(constant.AttrKeyTenantID, tenantID))
 		}
 
 		ctx = observability.ContextWithLogger(ctx, logger)

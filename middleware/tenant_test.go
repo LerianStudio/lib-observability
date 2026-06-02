@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	observability "github.com/LerianStudio/lib-observability"
+	constant "github.com/LerianStudio/lib-observability/constants"
 	"github.com/gofiber/fiber/v2"
 	"github.com/stretchr/testify/assert"
 	"go.opentelemetry.io/otel/attribute"
@@ -26,8 +27,8 @@ func TestResolveTenantIDFromHTTP(t *testing.T) {
 		{name: "header absent", header: nil, want: ""},
 		{name: "header empty after trim", header: map[string]string{"X-Tenant-Id": "   "}, want: ""},
 		{name: "header literal null is dropped", header: map[string]string{"X-Tenant-Id": "null"}, want: ""},
-		{name: "header at max length is kept", header: map[string]string{"X-Tenant-Id": strings.Repeat("a", maxTenantIDLen)}, want: strings.Repeat("a", maxTenantIDLen)},
-		{name: "header above max length is dropped", header: map[string]string{"X-Tenant-Id": strings.Repeat("a", maxTenantIDLen+1)}, want: ""},
+		{name: "header at max length is kept", header: map[string]string{"X-Tenant-Id": strings.Repeat("a", constant.MaxTenantIDLen)}, want: strings.Repeat("a", constant.MaxTenantIDLen)},
+		{name: "header above max length is dropped", header: map[string]string{"X-Tenant-Id": strings.Repeat("a", constant.MaxTenantIDLen+1)}, want: ""},
 		{name: "control chars are stripped", header: map[string]string{"X-Tenant-Id": "acme\r\n"}, want: "acme"},
 		{name: "non-canonical aliases are ignored", header: map[string]string{"tenant-id": "acme"}, want: ""},
 	}
@@ -67,7 +68,7 @@ func TestResolveTenantIDFromGRPC(t *testing.T) {
 		{name: "canonical metadata present", md: metadata.Pairs("tenant-id", "acme"), want: "acme"},
 		{name: "metadata absent", md: nil, want: ""},
 		{name: "metadata empty", md: metadata.Pairs("tenant-id", "   "), want: ""},
-		{name: "metadata above max length is dropped", md: metadata.Pairs("tenant-id", strings.Repeat("a", maxTenantIDLen+1)), want: ""},
+		{name: "metadata above max length is dropped", md: metadata.Pairs("tenant-id", strings.Repeat("a", constant.MaxTenantIDLen+1)), want: ""},
 		{name: "non-canonical aliases are ignored", md: metadata.Pairs("tenant_id", "acme"), want: ""},
 	}
 
@@ -92,10 +93,10 @@ func TestTenantIDFromAttrBag_OverrideWins(t *testing.T) {
 	// layer overriding with the JWT-validated tenant. Last-wins must surface
 	// the override, not the original.
 	ctx := observability.ContextWithSpanAttributes(context.Background(),
-		attribute.String(attrKeyTenantID, "from-header"),
+		attribute.String(constant.AttrKeyTenantID, "from-header"),
 	)
 	ctx = observability.ContextWithSpanAttributes(ctx,
-		attribute.String(attrKeyTenantID, "from-jwt"),
+		attribute.String(constant.AttrKeyTenantID, "from-jwt"),
 	)
 
 	assert.Equal(t, "from-jwt", tenantIDFromAttrBag(ctx))
@@ -107,7 +108,7 @@ func TestTenantIDFromAttrBag_AbsentReturnsEmpty(t *testing.T) {
 
 func TestRequestAttributes_ReturnsCopy(t *testing.T) {
 	ctx := observability.ContextWithSpanAttributes(context.Background(),
-		attribute.String(attrKeyTenantID, "acme"),
+		attribute.String(constant.AttrKeyTenantID, "acme"),
 		attribute.String("app.request.request_id", "req-1"),
 	)
 
@@ -117,5 +118,5 @@ func TestRequestAttributes_ReturnsCopy(t *testing.T) {
 	// Mutating the returned slice must not affect the bag in ctx.
 	attrs[0] = attribute.String("tampered", "x")
 	again := RequestAttributes(ctx)
-	assert.Equal(t, attribute.Key(attrKeyTenantID), again[0].Key)
+	assert.Equal(t, attribute.Key(constant.AttrKeyTenantID), again[0].Key)
 }
