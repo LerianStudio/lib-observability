@@ -22,6 +22,10 @@ import (
 
 type contextKey string
 
+const (
+	spanAttributeContextKey = "lib-observability:span-attributes"
+)
+
 // ContextKey is the context key used to store ContextValue.
 var ContextKey = contextKey("custom_context")
 
@@ -252,6 +256,8 @@ func ContextWithSpanAttributes(ctx context.Context, kv ...attribute.KeyValue) co
 	// Append to the cloned (independent) slice.
 	values.AttrBag = append(values.AttrBag, kv...)
 
+	ctx = context.WithValue(ctx, spanAttributeContextKey, values.AttrBag)
+
 	return context.WithValue(ctx, ContextKey, values)
 }
 
@@ -268,6 +274,13 @@ func AttributesFromContext(ctx context.Context) []attribute.KeyValue {
 		return out
 	}
 
+	if values, ok := ctx.Value(spanAttributeContextKey).([]attribute.KeyValue); ok && len(values) > 0 {
+		out := make([]attribute.KeyValue, len(values))
+		copy(out, values)
+
+		return out
+	}
+
 	return nil
 }
 
@@ -280,6 +293,7 @@ func ReplaceAttributes(ctx context.Context, kv ...attribute.KeyValue) context.Co
 	values := cloneContextValues(ctx)
 
 	values.AttrBag = append([]attribute.KeyValue(nil), kv...)
+	ctx = context.WithValue(ctx, spanAttributeContextKey, values.AttrBag)
 
 	return context.WithValue(ctx, ContextKey, values)
 }

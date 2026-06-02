@@ -178,6 +178,11 @@ func (tm *TelemetryMiddleware) WithTelemetry(tl *tracing.Telemetry, excludedRout
 
 		ctx := c.UserContext()
 		_, _, reqId, _ := observability.NewTrackingFromContext(ctx)
+		tenantID := resolveTenantIDFromHeaders(c)
+
+		if tenantID != "" {
+			ctx = observability.ContextWithSpanAttributes(ctx, attribute.String("tenant.id", tenantID))
+		}
 
 		c.SetUserContext(observability.ContextWithSpanAttributes(ctx,
 			attribute.String("app.request.request_id", reqId),
@@ -433,6 +438,12 @@ func (tm *TelemetryMiddleware) WithTelemetryInterceptor(tl *tracing.Telemetry) g
 		methodName := "unknown"
 		if info != nil {
 			methodName = info.FullMethod
+		}
+
+		tenantID := resolveTenantIDFromMetadata(ctx)
+
+		if tenantID != "" {
+			ctx = observability.ContextWithSpanAttributes(ctx, attribute.String("tenant.id", tenantID))
 		}
 
 		ctx = observability.ContextWithSpanAttributes(ctx,

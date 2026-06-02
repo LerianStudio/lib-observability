@@ -228,9 +228,16 @@ func WithHTTPLogging(opts ...LogMiddlewareOption) fiber.Handler {
 		info := NewRequestInfo(c, mid.ObfuscationDisabled)
 
 		requestID := c.Get(headerID)
+		tenantID := resolveTenantIDFromHeaders(c)
+		if tenantID == "" {
+			tenantID = tenantIDFromAttributes(observability.AttributesFromContext(c.UserContext()))
+		}
 		logger := mid.Logger.
 			With(obslog.String(headerID, info.TraceID)).
 			With(obslog.String("message_prefix", requestID+constant.LoggerDefaultSeparator))
+		if tenantID != "" {
+			logger = logger.With(obslog.String("tenant.id", tenantID))
+		}
 
 		ctx := observability.ContextWithLogger(c.UserContext(), logger)
 		c.SetUserContext(ctx)
@@ -292,6 +299,9 @@ func WithGrpcLogging(opts ...LogMiddlewareOption) grpc.UnaryServerInterceptor {
 
 		ctx = observability.ContextWithHeaderID(ctx, requestID)
 		ctx = observability.ContextWithSpanAttributes(ctx, attribute.String("app.request.request_id", requestID))
+		if tenantID := resolveTenantIDFromMetadata(ctx); tenantID != "" {
+			ctx = observability.ContextWithSpanAttributes(ctx, attribute.String("tenant.id", tenantID))
+		}
 
 		_, _, reqID, _ := observability.NewTrackingFromContext(ctx)
 
@@ -314,6 +324,9 @@ func WithGrpcLogging(opts ...LogMiddlewareOption) grpc.UnaryServerInterceptor {
 		fields := []obslog.Field{
 			obslog.String("method", methodName),
 			obslog.String("duration", duration.String()),
+		}
+		if tenantID := tenantIDFromAttributes(observability.AttributesFromContext(ctx)); tenantID != "" {
+			fields = append(fields, obslog.String("tenant.id", tenantID))
 		}
 		if err != nil {
 			fields = append(fields, obslog.Err(err))

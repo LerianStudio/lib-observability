@@ -8,6 +8,8 @@ import (
 	"go.opentelemetry.io/otel/metric"
 )
 
+const spanAttributeContextKey = "lib-observability:span-attributes"
+
 var (
 	// ErrNilCounter is returned when a counter builder has no instrument.
 	ErrNilCounter = errors.New("counter instrument is nil")
@@ -90,7 +92,8 @@ func (c *CounterBuilder) Add(ctx context.Context, value int64) error {
 		return ErrNegativeCounterValue
 	}
 
-	c.counter.Add(ctx, value, metric.WithAttributes(c.attrs...))
+	counterAttrs := mergeAttributes(c.attrs, attributesFromContext(ctx))
+	c.counter.Add(ctx, value, metric.WithAttributes(counterAttrs...))
 
 	return nil
 }
@@ -170,7 +173,8 @@ func (g *GaugeBuilder) Set(ctx context.Context, value int64) error {
 		return ErrNilGauge
 	}
 
-	g.gauge.Record(ctx, value, metric.WithAttributes(g.attrs...))
+	gaugeAttrs := mergeAttributes(g.attrs, attributesFromContext(ctx))
+	g.gauge.Record(ctx, value, metric.WithAttributes(gaugeAttrs...))
 
 	return nil
 }
@@ -237,7 +241,49 @@ func (h *HistogramBuilder) Record(ctx context.Context, value int64) error {
 		return ErrNilHistogram
 	}
 
-	h.histogram.Record(ctx, value, metric.WithAttributes(h.attrs...))
+	histogramAttrs := mergeAttributes(h.attrs, attributesFromContext(ctx))
+	h.histogram.Record(ctx, value, metric.WithAttributes(histogramAttrs...))
 
 	return nil
+}
+
+func attributesFromContext(ctx context.Context) []attribute.KeyValue {
+	if ctx == nil {
+		return nil
+	}
+
+	rawAttrs, ok := ctx.Value(spanAttributeContextKey).([]attribute.KeyValue)
+	if !ok || len(rawAttrs) == 0 {
+		return nil
+	}
+
+	out := make([]attribute.KeyValue, len(rawAttrs))
+	copy(out, rawAttrs)
+
+	return out
+}
+
+func mergeAttributes(attrs []attribute.KeyValue, contextAttrs []attribute.KeyValue) []attribute.KeyValue {
+	if len(contextAttrs) == 0 {
+		return attrs
+	}
+
+	merged := make([]attribute.KeyValue, len(contextAttrs))
+	copy(merged, contextAttrs)
+
+	indexByKey := make(map[attribute.Key]int, len(contextAttrs))
+	for idx, attr := range merged {
+		indexByKey[attr.Key] = idx
+	}
+
+	for _, attr := range attrs {
+		if idx, ok := indexByKey[attr.Key]; ok {
+			merged[idx] = attr
+			continue
+		}
+
+		merged = append(merged, attr)
+	}
+
+	return merged
 }
