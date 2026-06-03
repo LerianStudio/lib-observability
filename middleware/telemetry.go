@@ -337,6 +337,12 @@ func applyTelemetrySpanAttributes(
 //     used by the logging middleware and avoids reporting 200 for failures.
 //   - error.type: only set when effective status >= 500, using the numeric
 //     status code as a stable, low-cardinality label.
+//   - tenant.id: only set when the request carried a canonical X-Tenant-Id
+//     header that the middleware resolved into the AttrBag. Omitted when
+//     absent so series for non-tenant traffic do not gain an empty label.
+//     Cardinality is bounded by the 128-byte tenant cap in middleware/tenant.go,
+//     keeping the label safe for use in dashboards and alerts that filter by
+//     tenant.
 func recordHTTPServerDuration(
 	c *fiber.Ctx,
 	hist metric.Float64Histogram,
@@ -360,6 +366,10 @@ func recordHTTPServerDuration(
 
 	if errType := classifyHTTPErrorType(statusCode); errType != "" {
 		attrs = append(attrs, attribute.String("error.type", errType))
+	}
+
+	if tenantID := tenantIDFromAttrBag(c.UserContext()); tenantID != "" {
+		attrs = append(attrs, attribute.String(constant.AttrKeyTenantID, tenantID))
 	}
 
 	durationSeconds := time.Since(start).Seconds()

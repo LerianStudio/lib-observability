@@ -61,9 +61,10 @@ Values are normalized (trimmed, control chars stripped) and dropped silently whe
 |---|---|---|
 | Logs | `WithHTTPLogging` / `WithGrpcLogging` add `tenant.id` as a structured field. | None |
 | Traces | The `AttrBagSpanProcessor` (registered by default in `tracing.NewTelemetry`) copies the request attribute bag onto every span at start. | None |
-| Metrics | Not automatic. Metric labels are a high-impact cardinality decision left to the caller. | Use `middleware.RequestAttributes(ctx)` to opt in per metric. |
+| `http.server.request.duration` (built-in metric) | `WithTelemetry` adds `tenant.id` to the histogram when present in the request bag. Label is omitted when no tenant was supplied so non-tenant traffic does not split the time series. | None |
+| Custom application metrics | Not automatic. Metric labels are a high-impact cardinality decision left to the caller. | Use `middleware.RequestAttributes(ctx)` to opt in per metric. |
 
-Example for metrics:
+Example for custom metrics:
 
 ```go
 import "github.com/LerianStudio/lib-observability/middleware"

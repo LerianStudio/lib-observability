@@ -845,3 +845,95 @@ func TestWithTelemetry_TruncatesUserAgentAtRuneBoundary(t *testing.T) {
 	// rune-aligned prefix that fits within the cap.
 	assert.Equal(t, strings.Repeat("€", 85), ua)
 }
+
+// TestWithTelemetry_RecordsDurationWithTenantID verifies that the
+// http.server.request.duration metric carries the tenant.id attribute when the
+// request supplies the canonical X-Tenant-Id header. This is the contract that
+// lets dashboards and alerts filter/group request volume and latency per
+// tenant — replacing the spanmetrics calls_total{tenant_id} usage previously
+// derived from the trace pipeline.
+func TestWithTelemetry_RecordsDurationWithTenantID(t *testing.T) {
+	tel, reader := newMetricsHarness(t)
+
+	app := fiber.New()
+	mid := NewTelemetryMiddleware(tel)
+	app.Use(mid.WithTelemetry(tel))
+
+	app.Get("/api/orders", func(c *fiber.Ctx) error {
+		return c.SendStatus(http.StatusOK)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/orders", nil)
+	req.Header.Set("X-Tenant-Id", "acme")
+
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, resp.Body.Close()) }()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	dp := findDurationHistogram(t, reader)
+	require.NotNil(t, dp)
+	assert.EqualValues(t, 1, dp.Count)
+
+	tenantVal, ok := attrValue(dp.Attributes, "tenant.id")
+	require.True(t, ok, "tenant.id label must be present when X-Tenant-Id is supplied")
+	assert.Equal(t, "acme", tenantVal)
+}
+
+// TestWithTelemetry_RecordsDurationWithoutTenantID verifies that the
+// tenant.id attribute is omitted entirely when the request does not carry the
+// canonical header. Series for non-tenant traffic (probes, internal callers)
+// must not gain an empty label that would split the time series.
+func TestWithTelemetry_RecordsDurationWithoutTenantID(t *testing.T) {
+	tel, reader := newMetricsHarness(t)
+
+	app := fiber.New()
+	mid := NewTelemetryMiddleware(tel)
+	app.Use(mid.WithTelemetry(tel))
+
+	app.Get("/api/orders", func(c *fiber.Ctx) error {
+		return c.SendStatus(http.StatusOK)
+	})
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/orders", nil))
+	require.NoError(t, err)
+	defer func() { require.NoError(t, resp.Body.Close()) }()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	dp := findDurationHistogram(t, reader)
+	require.NotNil(t, dp)
+
+	_, ok := attrValue(dp.Attributes, "tenant.id")
+	assert.False(t, ok, "tenant.id must be absent when no X-Tenant-Id header was supplied")
+}
+
+// TestWithTelemetry_RecordsDurationDropsOversizedTenantID verifies that a
+// tenant value exceeding the 128-byte cap enforced by ResolveTenantIDFromHTTP
+// is dropped silently and does NOT become a metric label. This is the
+// cardinality safety guarantee: an attacker that floods X-Tenant-Id with
+// random oversized values cannot inflate the Prometheus series set.
+func TestWithTelemetry_RecordsDurationDropsOversizedTenantID(t *testing.T) {
+	tel, reader := newMetricsHarness(t)
+
+	app := fiber.New()
+	mid := NewTelemetryMiddleware(tel)
+	app.Use(mid.WithTelemetry(tel))
+
+	app.Get("/api/orders", func(c *fiber.Ctx) error {
+		return c.SendStatus(http.StatusOK)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/orders", nil)
+	req.Header.Set("X-Tenant-Id", strings.Repeat("a", 129))
+
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, resp.Body.Close()) }()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	dp := findDurationHistogram(t, reader)
+	require.NotNil(t, dp)
+
+	_, ok := attrValue(dp.Attributes, "tenant.id")
+	assert.False(t, ok, "tenant.id must be absent when the header value exceeds the cap")
+}
