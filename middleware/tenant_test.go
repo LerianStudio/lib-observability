@@ -120,3 +120,30 @@ func TestRequestAttributes_ReturnsCopy(t *testing.T) {
 	again := RequestAttributes(ctx)
 	assert.Equal(t, attribute.Key(constant.AttrKeyTenantID), again[0].Key)
 }
+
+// TestTenantIDFromAttrBag_DropsOversizedFromContext guards the defense-in-depth
+// step that re-applies sanitizeTenantID to values pulled from the AttrBag.
+// Callers can populate tenant.id directly via observability.ContextWithSpanAttributes
+// (the documented escape hatch for handlers that resolve a real tenant from a
+// JWT). Without re-sanitization an oversized value injected this way would
+// bypass the 128-byte cap enforced at HTTP/gRPC ingestion and inflate log
+// fields and metric label cardinality downstream.
+func TestTenantIDFromAttrBag_DropsOversizedFromContext(t *testing.T) {
+	ctx := observability.ContextWithSpanAttributes(context.Background(),
+		attribute.String(constant.AttrKeyTenantID, strings.Repeat("a", constant.MaxTenantIDLen+1)),
+	)
+
+	assert.Equal(t, "", tenantIDFromAttrBag(ctx))
+}
+
+// TestTenantIDFromAttrBag_StripsControlBytesFromContext mirrors the previous
+// test for the other sanitization rule: control characters (CRLF, NUL) must
+// never reach a log field or metric label even when the caller injected them
+// directly into the bag.
+func TestTenantIDFromAttrBag_StripsControlBytesFromContext(t *testing.T) {
+	ctx := observability.ContextWithSpanAttributes(context.Background(),
+		attribute.String(constant.AttrKeyTenantID, "acme\r\n"),
+	)
+
+	assert.Equal(t, "acme", tenantIDFromAttrBag(ctx))
+}

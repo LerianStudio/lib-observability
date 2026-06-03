@@ -64,13 +64,22 @@ func sanitizeTenantID(raw string) string {
 }
 
 // tenantIDFromAttrBag returns the tenant.id stored in the request AttrBag, or
-// "" when absent. Because ContextWithSpanAttributes deduplicates by key
+// "" when absent or when the stored value would breach the telemetry
+// cardinality cap. Because ContextWithSpanAttributes deduplicates by key
 // (last-wins), this never returns a stale value when a later layer overrode
 // the tenant — the bag carries a single entry per key.
+//
+// The result is funneled through sanitizeTenantID so the constraints applied
+// at ingestion (MaxTenantIDLen cap, control-byte stripping) also hold for
+// values injected directly via observability.ContextWithSpanAttributes (for
+// example, a handler that wants to override the header-supplied tenant with
+// one resolved from a JWT). Without this defense-in-depth step a caller
+// could silently bypass the cap and inflate log fields and metric label
+// cardinality.
 func tenantIDFromAttrBag(ctx context.Context) string {
 	for _, attr := range observability.AttributesFromContext(ctx) {
 		if attr.Key == attribute.Key(constant.AttrKeyTenantID) {
-			return attr.Value.AsString()
+			return sanitizeTenantID(attr.Value.AsString())
 		}
 	}
 

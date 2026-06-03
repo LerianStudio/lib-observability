@@ -11,6 +11,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
+	constant "github.com/LerianStudio/lib-observability/constants"
 	"github.com/LerianStudio/lib-observability/metrics"
 	"github.com/LerianStudio/lib-observability/tracing"
 	"github.com/gofiber/fiber/v2"
@@ -924,7 +925,7 @@ func TestWithTelemetry_RecordsDurationDropsOversizedTenantID(t *testing.T) {
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/api/orders", nil)
-	req.Header.Set("X-Tenant-Id", strings.Repeat("a", 129))
+	req.Header.Set("X-Tenant-Id", strings.Repeat("a", constant.MaxTenantIDLen+1))
 
 	resp, err := app.Test(req)
 	require.NoError(t, err)
