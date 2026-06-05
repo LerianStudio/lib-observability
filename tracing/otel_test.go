@@ -208,10 +208,10 @@ func TestNewTelemetry_EndpointNormalization(t *testing.T) {
 			wantInsecure: false,
 		},
 		{
-			name:         "no scheme preserves insecure default",
+			name:         "no scheme infers insecure (k8s internal comms)",
 			endpoint:     "otel-collector:4317",
 			wantEndpoint: "otel-collector:4317",
-			wantInsecure: false,
+			wantInsecure: true,
 		},
 		{
 			name:             "https with explicit insecure override preserved",
