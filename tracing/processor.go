@@ -82,7 +82,7 @@ func redactAttributesByKey(attrs []attribute.KeyValue, redactor *Redactor) []att
 		case RedactionDrop:
 			continue
 		case RedactionHash:
-			redacted = append(redacted, attribute.String(string(attr.Key), redactor.hashString(attr.Value.Emit())))
+			redacted = append(redacted, attribute.String(string(attr.Key), redactor.hashString(attr.Value.String())))
 		default:
 			redacted = append(redacted, attribute.String(string(attr.Key), redactor.maskValue))
 		}
