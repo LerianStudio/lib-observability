@@ -100,7 +100,7 @@ func NewTelemetry(cfg TelemetryConfig) (*Telemetry, error) {
 	}
 
 	normalizeEndpoint(&cfg)
-	normalizeEndpointEnvVars()
+	normalizeEndpointEnvVars(cfg.Logger)
 
 	if cfg.EnableTelemetry && strings.TrimSpace(cfg.CollectorExporterEndpoint) == "" {
 		return handleEmptyEndpoint(cfg)
@@ -160,7 +160,7 @@ func normalizeEndpoint(cfg *TelemetryConfig) {
 // contain a URL scheme. The OTEL SDK's envconfig reads these via url.Parse(),
 // which fails on bare "host:port" values. Adding "http://" prevents noisy
 // "parse url" errors from the SDK's internal logger.
-func normalizeEndpointEnvVars() {
+func normalizeEndpointEnvVars(logger log.Logger) {
 	for _, key := range []string{
 		"OTEL_EXPORTER_OTLP_ENDPOINT",
 		"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
@@ -171,7 +171,13 @@ func normalizeEndpointEnvVars() {
 			continue
 		}
 
-		_ = os.Setenv(key, "http://"+v)
+		// Failure here means the SDK will later choke on the bare host:port value,
+		// so surface it rather than swallowing it silently.
+		if err := os.Setenv(key, "http://"+v); err != nil && logger != nil {
+			logger.Log(context.Background(), log.LevelWarn,
+				"failed to normalize OTEL endpoint env var",
+				log.String("key", key), log.Err(err))
+		}
 	}
 }
 
