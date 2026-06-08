@@ -14,8 +14,23 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/stretchr/testify/assert"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/baggage"
 	"google.golang.org/grpc/metadata"
 )
+
+// ctxWithBaggageTenant returns a context carrying tenant.id in the standard
+// OTel baggage, the same way lib-commons propagates it upstream.
+func ctxWithBaggageTenant(t *testing.T, value string) context.Context {
+	t.Helper()
+
+	m, err := baggage.NewMember(constant.AttrKeyTenantID, value)
+	assert.NoError(t, err)
+
+	b, err := baggage.New(m)
+	assert.NoError(t, err)
+
+	return baggage.ContextWithBaggage(context.Background(), b)
+}
 
 func TestResolveTenantIDFromHTTP(t *testing.T) {
 	cases := []struct {
@@ -104,6 +119,55 @@ func TestTenantIDFromAttrBag_OverrideWins(t *testing.T) {
 
 func TestTenantIDFromAttrBag_AbsentReturnsEmpty(t *testing.T) {
 	assert.Equal(t, "", tenantIDFromAttrBag(context.Background()))
+}
+
+func TestTenantIDFromBaggage(t *testing.T) {
+	t.Run("member present", func(t *testing.T) {
+		ctx := ctxWithBaggageTenant(t, "acme")
+		assert.Equal(t, "acme", tenantIDFromBaggage(ctx))
+	})
+
+	t.Run("member absent", func(t *testing.T) {
+		assert.Equal(t, "", tenantIDFromBaggage(context.Background()))
+	})
+
+	t.Run("nil ctx", func(t *testing.T) {
+		assert.Equal(t, "", tenantIDFromBaggage(nil))
+	})
+
+	t.Run("oversized baggage value is dropped", func(t *testing.T) {
+		ctx := ctxWithBaggageTenant(t, strings.Repeat("a", constant.MaxTenantIDLen+1))
+		assert.Equal(t, "", tenantIDFromBaggage(ctx))
+	})
+}
+
+// TestResolveTenantIDForLogging exercises the base→override precedence used by
+// the logging middleware: the OTel baggage is the base source and the request
+// AttrBag (header/JWT-resolved) overrides it when present.
+func TestResolveTenantIDForLogging(t *testing.T) {
+	t.Run("baggage only is used as base", func(t *testing.T) {
+		ctx := ctxWithBaggageTenant(t, "from-baggage")
+		assert.Equal(t, "from-baggage", resolveTenantIDForLogging(ctx))
+	})
+
+	t.Run("attrbag overrides baggage", func(t *testing.T) {
+		ctx := ctxWithBaggageTenant(t, "from-baggage")
+		ctx = observability.ContextWithSpanAttributes(ctx,
+			attribute.String(constant.AttrKeyTenantID, "from-header"),
+		)
+		assert.Equal(t, "from-header", resolveTenantIDForLogging(ctx))
+	})
+
+	t.Run("attrbag only", func(t *testing.T) {
+		ctx := observability.ContextWithSpanAttributes(context.Background(),
+			attribute.String(constant.AttrKeyTenantID, "from-header"),
+		)
+		assert.Equal(t, "from-header", resolveTenantIDForLogging(ctx))
+	})
+
+	t.Run("neither source", func(t *testing.T) {
+		assert.Equal(t, "", resolveTenantIDForLogging(context.Background()))
+	})
 }
 
 func TestRequestAttributes_ReturnsCopy(t *testing.T) {
