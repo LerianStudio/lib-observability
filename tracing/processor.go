@@ -69,11 +69,28 @@ func (p RedactingAttrBagSpanProcessor) OnStart(ctx context.Context, s sdktrace.R
 // can seed a span before the request AttrBag overrides them. Returns nil when
 // no recognized member is present.
 func baggageBaseAttributes(ctx context.Context) []attribute.KeyValue {
-	if v := baggage.FromContext(ctx).Member(constant.AttrKeyTenantID).Value(); v != "" {
+	if v := sanitizeTenantFromBaggage(baggage.FromContext(ctx).Member(constant.AttrKeyTenantID).Value()); v != "" {
 		return []attribute.KeyValue{attribute.String(constant.AttrKeyTenantID, v)}
 	}
 
 	return nil
+}
+
+// sanitizeTenantFromBaggage applies the same cardinality guards used on the
+// logging path (middleware.sanitizeTenantID) to raw baggage values: strip the
+// log-injection control bytes (\r \n \x00), trim surrounding whitespace, and
+// drop values exceeding MaxTenantIDLen. Mirroring those rules here keeps span
+// and log tenant.id identical, preventing cardinality drift between the two.
+// It is duplicated rather than imported because middleware depends on tracing,
+// so importing middleware here would create a cycle.
+func sanitizeTenantFromBaggage(raw string) string {
+	replacer := strings.NewReplacer("\r", "", "\n", "", "\x00", "")
+	v := strings.TrimSpace(replacer.Replace(raw))
+	if v == "" || len(v) > constant.MaxTenantIDLen {
+		return ""
+	}
+
+	return v
 }
 
 // OnEnd is a no-op for this processor.
