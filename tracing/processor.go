@@ -86,6 +86,7 @@ func baggageBaseAttributes(ctx context.Context) []attribute.KeyValue {
 func sanitizeTenantFromBaggage(raw string) string {
 	replacer := strings.NewReplacer("\r", "", "\n", "", "\x00", "")
 	v := strings.TrimSpace(replacer.Replace(raw))
+
 	if v == "" || len(v) > constant.MaxTenantIDLen {
 		return ""
 	}
