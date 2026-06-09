@@ -7,6 +7,7 @@ import (
 	constant "github.com/LerianStudio/lib-observability/constants"
 	"github.com/gofiber/fiber/v2"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/baggage"
 	"google.golang.org/grpc/metadata"
 )
 
@@ -84,4 +85,29 @@ func tenantIDFromAttrBag(ctx context.Context) string {
 	}
 
 	return ""
+}
+
+// tenantIDFromBaggage returns the tenant.id carried by the standard OTel
+// baggage (written upstream by lib-commons), normalized through
+// sanitizeTenantID so the same cardinality guards as every other ingestion
+// path apply. Returns "" when the member is absent.
+func tenantIDFromBaggage(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+
+	return sanitizeTenantID(baggage.FromContext(ctx).Member(constant.AttrKeyTenantID).Value())
+}
+
+// resolveTenantIDForLogging resolves the tenant.id to attach to a request
+// logger using the same base→override precedence as the span processor: the
+// standard OTel baggage is the base source, and the request AttrBag
+// (header/JWT-resolved) overrides it when present. Returns "" when neither
+// source carries a usable value.
+func resolveTenantIDForLogging(ctx context.Context) string {
+	if tenantID := tenantIDFromAttrBag(ctx); tenantID != "" {
+		return tenantID
+	}
+
+	return tenantIDFromBaggage(ctx)
 }
