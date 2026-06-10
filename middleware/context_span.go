@@ -11,11 +11,6 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// contextIDAttrKey is the OpenTelemetry attribute / log field key used for the
-// per-request context identifier. Kept local to mirror the existing literal
-// used on the span until a shared constant is introduced.
-const contextIDAttrKey = "context.id"
-
 // isNilSpan reports whether span is nil, including typed-nil interface values
 // where a concrete nil pointer is stored in a trace.Span interface.
 // This prevents panics when calling methods on a typed-nil span.
@@ -59,7 +54,7 @@ func SetHandlerSpanAttributes(ctx context.Context, span trace.Span, tenantID, co
 	}
 
 	if contextID != uuid.Nil {
-		attrs = append(attrs, attribute.String(contextIDAttrKey, contextID.String()))
+		attrs = append(attrs, attribute.String(constant.AttrKeyContextID, contextID.String()))
 	}
 
 	if !isNilSpan(span) {

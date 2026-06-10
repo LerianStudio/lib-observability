@@ -63,7 +63,7 @@ func TestSetHandlerSpanAttributes_PropagatesTenantToAttrBag(t *testing.T) {
 	assert.Equal(t, tenantID.String(), tenantIDFromAttrBag(ctx))
 
 	// context.id is also propagated.
-	gotCtxID, ok := attrBagValue(ctx, contextIDAttrKey)
+	gotCtxID, ok := attrBagValue(ctx, constant.AttrKeyContextID)
 	assert.True(t, ok, "context.id must be present in the AttrBag")
 	assert.Equal(t, contextID.String(), gotCtxID)
 
@@ -73,7 +73,7 @@ func TestSetHandlerSpanAttributes_PropagatesTenantToAttrBag(t *testing.T) {
 	assert.True(t, ok)
 	assert.Equal(t, tenantID.String(), gotSpanTenant)
 
-	gotSpanCtxID, ok := spanAttrValue(recorded, contextIDAttrKey)
+	gotSpanCtxID, ok := spanAttrValue(recorded, constant.AttrKeyContextID)
 	assert.True(t, ok)
 	assert.Equal(t, contextID.String(), gotSpanCtxID)
 }
@@ -93,10 +93,10 @@ func TestSetHandlerSpanAttributes_NilContextIDOmitsContextID(t *testing.T) {
 
 	assert.Equal(t, tenantID.String(), tenantIDFromAttrBag(ctx))
 
-	_, ok := attrBagValue(ctx, contextIDAttrKey)
+	_, ok := attrBagValue(ctx, constant.AttrKeyContextID)
 	assert.False(t, ok, "context.id must be omitted when contextID is uuid.Nil")
 
-	_, ok = spanAttrValue(recorder.Ended()[0], contextIDAttrKey)
+	_, ok = spanAttrValue(recorder.Ended()[0], constant.AttrKeyContextID)
 	assert.False(t, ok, "context.id must be omitted on the span when contextID is uuid.Nil")
 }
 
