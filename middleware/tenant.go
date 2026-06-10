@@ -99,12 +99,21 @@ func tenantIDFromBaggage(ctx context.Context) string {
 	return sanitizeTenantID(baggage.FromContext(ctx).Member(constant.AttrKeyTenantID).Value())
 }
 
-// resolveTenantIDForLogging resolves the tenant.id to attach to a request
-// logger using the same base→override precedence as the span processor: the
-// standard OTel baggage is the base source, and the request AttrBag
-// (header/JWT-resolved) overrides it when present. Returns "" when neither
-// source carries a usable value.
-func resolveTenantIDForLogging(ctx context.Context) string {
+// resolveTenantIDForTelemetry resolves the tenant.id to attach to a request's
+// telemetry (request logger AND the http.server.request.duration metric) using
+// the same base→override precedence as the span processor: the standard OTel
+// baggage is the base source, and the request AttrBag (header/JWT-resolved)
+// overrides it when present. Returns "" when neither source carries a usable
+// value.
+//
+// Sharing this resolver across logs, spans, and metrics is deliberate: tenant
+// .id frequently arrives cross-service via OTel baggage (see PR #20) rather
+// than the canonical X-Tenant-Id header on the local hop. The metric path
+// previously read the AttrBag only (tenantIDFromAttrBag), so baggage-propagated
+// tenants produced an empty tenant_id label on the duration histogram even
+// though spans and logs carried the value. Routing the metric through this
+// resolver keeps the tenant.id label consistent with the trace/log pipelines.
+func resolveTenantIDForTelemetry(ctx context.Context) string {
 	if tenantID := tenantIDFromAttrBag(ctx); tenantID != "" {
 		return tenantID
 	}

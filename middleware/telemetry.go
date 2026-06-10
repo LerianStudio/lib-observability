@@ -337,12 +337,16 @@ func applyTelemetrySpanAttributes(
 //     used by the logging middleware and avoids reporting 200 for failures.
 //   - error.type: only set when effective status >= 500, using the numeric
 //     status code as a stable, low-cardinality label.
-//   - tenant.id: only set when the request carried a canonical X-Tenant-Id
-//     header that the middleware resolved into the AttrBag. Omitted when
-//     absent so series for non-tenant traffic do not gain an empty label.
-//     Cardinality is bounded by the 128-byte tenant cap in middleware/tenant.go,
-//     keeping the label safe for use in dashboards and alerts that filter by
-//     tenant.
+//   - tenant.id: resolved via resolveTenantIDForTelemetry, the same
+//     AttrBag→baggage precedence used by the logging middleware and span
+//     processor. This covers both the local-hop X-Tenant-Id header (resolved
+//     into the AttrBag) AND tenant.id propagated cross-service via OTel
+//     baggage; reading the AttrBag alone previously dropped the baggage case,
+//     emitting an empty tenant_id label for downstream traffic. Omitted when
+//     neither source carries a value so series for non-tenant traffic do not
+//     gain an empty label. Cardinality is bounded by the 128-byte tenant cap in
+//     middleware/tenant.go, keeping the label safe for use in dashboards and
+//     alerts that filter by tenant.
 func recordHTTPServerDuration(
 	c *fiber.Ctx,
 	hist metric.Float64Histogram,
@@ -368,7 +372,7 @@ func recordHTTPServerDuration(
 		attrs = append(attrs, attribute.String("error.type", errType))
 	}
 
-	if tenantID := tenantIDFromAttrBag(c.UserContext()); tenantID != "" {
+	if tenantID := resolveTenantIDForTelemetry(c.UserContext()); tenantID != "" {
 		attrs = append(attrs, attribute.String(constant.AttrKeyTenantID, tenantID))
 	}
 
