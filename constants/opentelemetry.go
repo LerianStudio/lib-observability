@@ -17,6 +17,13 @@ const (
 	AttrPrefixPanic = "panic."
 )
 
+// Telemetry attribute keys for request identity.
+const (
+	// AttrKeyContextID is the OpenTelemetry attribute / log field key used
+	// everywhere context.id is emitted (logs, traces, metrics).
+	AttrKeyContextID = "context.id"
+)
+
 // Telemetry attribute keys for database connectors.
 const (
 	// AttrDBSystem is the OTEL semantic convention attribute key for the database system name.
