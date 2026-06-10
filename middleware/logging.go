@@ -238,7 +238,7 @@ func WithHTTPLogging(opts ...LogMiddlewareOption) fiber.Handler {
 			With(obslog.String(headerID, info.TraceID)).
 			With(obslog.String("message_prefix", requestID+constant.LoggerDefaultSeparator))
 
-		if tenantID := resolveTenantIDForLogging(ctx); tenantID != "" {
+		if tenantID := resolveTenantIDForTelemetry(ctx); tenantID != "" {
 			logger = logger.With(obslog.String(constant.AttrKeyTenantID, tenantID))
 		}
 
@@ -314,7 +314,7 @@ func WithGrpcLogging(opts ...LogMiddlewareOption) grpc.UnaryServerInterceptor {
 			With(obslog.String(headerID, reqID)).
 			With(obslog.String("message_prefix", reqID+constant.LoggerDefaultSeparator))
 
-		if tenantID := resolveTenantIDForLogging(ctx); tenantID != "" {
+		if tenantID := resolveTenantIDForTelemetry(ctx); tenantID != "" {
 			logger = logger.With(obslog.String(constant.AttrKeyTenantID, tenantID))
 		}
 

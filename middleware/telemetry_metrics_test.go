@@ -881,6 +881,48 @@ func TestWithTelemetry_RecordsDurationWithTenantID(t *testing.T) {
 	assert.Equal(t, "acme", tenantVal)
 }
 
+// TestWithTelemetry_RecordsDurationWithBaggageTenantID is the regression guard
+// for the metrics-only gap that survived PR #21: tenant.id propagated
+// cross-service via OTel baggage (PR #20) reached spans and logs but NOT the
+// http.server.request.duration metric, because the metric path read the
+// AttrBag only. The request below carries NO X-Tenant-Id header on the local
+// hop; the tenant is present solely in the inbound baggage, exactly as it
+// arrives at a downstream midaz plugin. The duration metric must still carry
+// tenant.id, matching the trace/log pipelines.
+func TestWithTelemetry_RecordsDurationWithBaggageTenantID(t *testing.T) {
+	tel, reader := newMetricsHarness(t)
+
+	app := fiber.New()
+	mid := NewTelemetryMiddleware(tel)
+
+	// Seed the request UserContext with baggage-propagated tenant.id before the
+	// telemetry middleware runs, mirroring an upstream service that injected
+	// tenant.id into the OTel baggage rather than the X-Tenant-Id header.
+	app.Use(func(c *fiber.Ctx) error {
+		c.SetUserContext(ctxWithBaggageTenant(t, "acme"))
+		return c.Next()
+	})
+	app.Use(mid.WithTelemetry(tel))
+
+	app.Get("/api/orders", func(c *fiber.Ctx) error {
+		return c.SendStatus(http.StatusOK)
+	})
+
+	// No X-Tenant-Id header: the only tenant source is the inbound baggage.
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/orders", nil))
+	require.NoError(t, err)
+	defer func() { require.NoError(t, resp.Body.Close()) }()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	dp := findDurationHistogram(t, reader)
+	require.NotNil(t, dp)
+	assert.EqualValues(t, 1, dp.Count)
+
+	tenantVal, ok := attrValue(dp.Attributes, "tenant.id")
+	require.True(t, ok, "tenant.id label must be present when tenant.id arrives via OTel baggage")
+	assert.Equal(t, "acme", tenantVal)
+}
+
 // TestWithTelemetry_RecordsDurationWithoutTenantID verifies that the
 // tenant.id attribute is omitted entirely when the request does not carry the
 // canonical header. Series for non-tenant traffic (probes, internal callers)

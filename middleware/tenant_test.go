@@ -141,13 +141,14 @@ func TestTenantIDFromBaggage(t *testing.T) {
 	})
 }
 
-// TestResolveTenantIDForLogging exercises the base→override precedence used by
-// the logging middleware: the OTel baggage is the base source and the request
-// AttrBag (header/JWT-resolved) overrides it when present.
-func TestResolveTenantIDForLogging(t *testing.T) {
+// TestResolveTenantIDForTelemetry exercises the base→override precedence shared
+// by the logging middleware AND the http.server.request.duration metric: the
+// OTel baggage is the base source and the request AttrBag (header/JWT-resolved)
+// overrides it when present.
+func TestResolveTenantIDForTelemetry(t *testing.T) {
 	t.Run("baggage only is used as base", func(t *testing.T) {
 		ctx := ctxWithBaggageTenant(t, "from-baggage")
-		assert.Equal(t, "from-baggage", resolveTenantIDForLogging(ctx))
+		assert.Equal(t, "from-baggage", resolveTenantIDForTelemetry(ctx))
 	})
 
 	t.Run("attrbag overrides baggage", func(t *testing.T) {
@@ -155,18 +156,18 @@ func TestResolveTenantIDForLogging(t *testing.T) {
 		ctx = observability.ContextWithSpanAttributes(ctx,
 			attribute.String(constant.AttrKeyTenantID, "from-header"),
 		)
-		assert.Equal(t, "from-header", resolveTenantIDForLogging(ctx))
+		assert.Equal(t, "from-header", resolveTenantIDForTelemetry(ctx))
 	})
 
 	t.Run("attrbag only", func(t *testing.T) {
 		ctx := observability.ContextWithSpanAttributes(context.Background(),
 			attribute.String(constant.AttrKeyTenantID, "from-header"),
 		)
-		assert.Equal(t, "from-header", resolveTenantIDForLogging(ctx))
+		assert.Equal(t, "from-header", resolveTenantIDForTelemetry(ctx))
 	})
 
 	t.Run("neither source", func(t *testing.T) {
-		assert.Equal(t, "", resolveTenantIDForLogging(context.Background()))
+		assert.Equal(t, "", resolveTenantIDForTelemetry(context.Background()))
 	})
 }
 
