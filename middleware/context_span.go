@@ -69,35 +69,35 @@ func SetHandlerSpanAttributes(ctx context.Context, span trace.Span, tenantID, co
 	return observability.ContextWithSpanAttributes(ctx, attrs...)
 }
 
-// SetTenantSpanAttribute adds tenant_id attribute to a trace span.
+// SetTenantSpanAttribute adds tenant.id attribute to a trace span.
 func SetTenantSpanAttribute(span trace.Span, tenantID uuid.UUID) {
 	if isNilSpan(span) {
 		return
 	}
 
-	span.SetAttributes(attribute.String("tenant.id", tenantID.String()))
+	span.SetAttributes(attribute.String(constant.AttrKeyTenantID, tenantID.String()))
 }
 
-// SetExceptionSpanAttributes adds tenant_id and exception_id attributes to a trace span.
+// SetExceptionSpanAttributes adds tenant.id and exception.id attributes to a trace span.
 func SetExceptionSpanAttributes(span trace.Span, tenantID, exceptionID uuid.UUID) {
 	if isNilSpan(span) {
 		return
 	}
 
 	span.SetAttributes(
-		attribute.String("tenant.id", tenantID.String()),
+		attribute.String(constant.AttrKeyTenantID, tenantID.String()),
 		attribute.String("exception.id", exceptionID.String()),
 	)
 }
 
-// SetDisputeSpanAttributes adds tenant_id and dispute_id attributes to a trace span.
+// SetDisputeSpanAttributes adds tenant.id and dispute.id attributes to a trace span.
 func SetDisputeSpanAttributes(span trace.Span, tenantID, disputeID uuid.UUID) {
 	if isNilSpan(span) {
 		return
 	}
 
 	span.SetAttributes(
-		attribute.String("tenant.id", tenantID.String()),
+		attribute.String(constant.AttrKeyTenantID, tenantID.String()),
 		attribute.String("dispute.id", disputeID.String()),
 	)
 }
