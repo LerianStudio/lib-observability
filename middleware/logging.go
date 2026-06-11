@@ -255,7 +255,12 @@ func WithHTTPLogging(opts ...LogMiddlewareOption) fiber.Handler {
 		}
 
 		info.FinishRequestInfo(&rw)
-		logger.Log(c.UserContext(), obslog.LevelInfo, info.CLFString())
+		logger.With(
+			obslog.Int("http_status_code", info.Status),
+			obslog.String("http_method", info.Method),
+			obslog.String("http_path", info.URI),
+			obslog.Int("http_latency_ms", int(info.Duration.Milliseconds())),
+		).Log(c.UserContext(), obslog.LevelInfo, info.CLFString())
 
 		return err
 	}

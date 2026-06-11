@@ -122,6 +122,22 @@ func TestWithHTTPLoggingAttachesLoggerAndLogsAccessEntry(t *testing.T) {
 	require.Len(t, messages, 1)
 	assert.Contains(t, messages[0], "GET /ok")
 	assert.Contains(t, fields, obslog.String(headerID, resp.Header.Get(headerID)))
+
+	var latencyFound bool
+
+	for _, f := range fields {
+		if f.Key != "http_latency_ms" {
+			continue
+		}
+
+		latencyFound = true
+
+		ms, ok := f.Value.(int)
+		require.True(t, ok, "http_latency_ms should be an int")
+		assert.GreaterOrEqual(t, ms, 0)
+	}
+
+	assert.True(t, latencyFound, "expected http_latency_ms field on access log entry")
 }
 
 func TestWithHTTPLoggingIgnoresTypedNilLogger(t *testing.T) {
