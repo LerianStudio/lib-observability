@@ -250,6 +250,93 @@ func TestWithHTTPLoggingLogsErrorStatus(t *testing.T) {
 	assert.Contains(t, messages[0], " 500 ")
 }
 
+func TestWithHTTPLoggingAddsClientIPField(t *testing.T) {
+	logger := &captureLogger{}
+	app := fiber.New()
+	app.Use(WithHTTPLogging(WithCustomLogger(logger)))
+	app.Get("/ok", func(c *fiber.Ctx) error {
+		return c.SendString("ok")
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/ok", nil)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, resp.Body.Close()) }()
+
+	_, fields := logger.snapshot()
+
+	var clientIPFound bool
+
+	for _, f := range fields {
+		if f.Key != "http_client_ip" {
+			continue
+		}
+
+		clientIPFound = true
+
+		ip, ok := f.Value.(string)
+		require.True(t, ok, "http_client_ip should be a string")
+		assert.NotEmpty(t, ip)
+	}
+
+	assert.True(t, clientIPFound, "expected http_client_ip field on access log entry")
+}
+
+func TestWithHTTPLoggingLogsSanitizedErrorBody(t *testing.T) {
+	logger := &captureLogger{}
+	app := fiber.New()
+	app.Use(WithHTTPLogging(WithCustomLogger(logger)))
+	app.Get("/fail", func(c *fiber.Ctx) error {
+		c.Set(headerContentType, "application/json")
+
+		return c.Status(http.StatusBadRequest).
+			SendString(`{"error":"invalid request","password":"secret"}`)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/fail", nil)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, resp.Body.Close()) }()
+
+	_, fields := logger.snapshot()
+
+	var errorBody string
+
+	for _, f := range fields {
+		if f.Key == "http_error" {
+			if s, ok := f.Value.(string); ok {
+				errorBody = s
+			}
+		}
+	}
+
+	require.NotEmpty(t, errorBody, "expected http_error field for 4xx response")
+	assert.Contains(t, errorBody, "invalid request")
+	assert.NotContains(t, errorBody, "secret")
+}
+
+func TestWithHTTPLoggingOmitsErrorBodyForSuccess(t *testing.T) {
+	logger := &captureLogger{}
+	app := fiber.New()
+	app.Use(WithHTTPLogging(WithCustomLogger(logger)))
+	app.Get("/ok", func(c *fiber.Ctx) error {
+		c.Set(headerContentType, "application/json")
+
+		return c.SendString(`{"status":"ok"}`)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/ok", nil)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, resp.Body.Close()) }()
+
+	_, fields := logger.snapshot()
+
+	for _, f := range fields {
+		assert.NotEqual(t, "http_error", f.Key, "http_error must not be logged for 2xx responses")
+	}
+}
+
 func TestWithGrpcLoggingUsesBodyRequestIDAndLogsResult(t *testing.T) {
 	logger := &captureLogger{}
 	bodyRequestID := "4fbf011b-bb11-4c73-9f7c-4f8e19ca8402"

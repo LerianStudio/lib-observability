@@ -255,10 +255,67 @@ func WithHTTPLogging(opts ...LogMiddlewareOption) fiber.Handler {
 		}
 
 		info.FinishRequestInfo(&rw)
-		logger.Log(c.UserContext(), obslog.LevelInfo, info.CLFString())
+
+		accessLogger := logger.With(obslog.String("http_client_ip", info.RemoteAddress))
+		if body := errorBodyForLog(c, statusCode, mid.ObfuscationDisabled); body != "" {
+			accessLogger = accessLogger.With(obslog.String("http_error", body))
+		}
+
+		accessLogger.Log(c.UserContext(), obslog.LevelInfo, info.CLFString())
 
 		return err
 	}
+}
+
+// maxErrorBodyLogLen caps the http_error field so a large error response body
+// cannot bloat the access log entry. 2 KiB comfortably covers structured API
+// error payloads while bounding log volume.
+const maxErrorBodyLogLen = 2048
+
+// errorBodyForLog returns a sanitized, length-capped copy of the response body
+// suitable for the http_error log field, or "" when it should not be logged.
+//
+// Bodies are only logged for error responses (status >= 400). The body is
+// obfuscated with the same content-type-aware redaction pipeline used for
+// request bodies (unless obfuscation is disabled), so sensitive fields are not
+// leaked, and is then truncated to maxErrorBodyLogLen bytes on a UTF-8 rune
+// boundary.
+func errorBodyForLog(c *fiber.Ctx, statusCode int, obfuscationDisabled bool) string {
+	if c == nil || statusCode < fiber.StatusBadRequest {
+		return ""
+	}
+
+	bodyBytes := c.Response().Body()
+	if len(bodyBytes) == 0 {
+		return ""
+	}
+
+	body := string(bodyBytes)
+	if !obfuscationDisabled {
+		body = getResponseBodyObfuscatedString(c, bodyBytes)
+	}
+
+	return truncateLogBody(body)
+}
+
+// truncateLogBody caps body at maxErrorBodyLogLen bytes, cutting on a rune
+// boundary so the stored value is always valid UTF-8.
+func truncateLogBody(body string) string {
+	if len(body) <= maxErrorBodyLogLen {
+		return body
+	}
+
+	lastFit := 0
+
+	for i := range body {
+		if i > maxErrorBodyLogLen {
+			return body[:lastFit]
+		}
+
+		lastFit = i
+	}
+
+	return body[:lastFit]
 }
 
 func httpStatusCode(c *fiber.Ctx, err error) int {

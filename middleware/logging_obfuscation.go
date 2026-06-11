@@ -26,6 +26,21 @@ func getBodyObfuscatedString(c *fiber.Ctx, bodyBytes []byte) string {
 	}
 }
 
+// getResponseBodyObfuscatedString obfuscates a response body for logging,
+// keying off the response Content-Type (not the request header). JSON error
+// payloads are passed through the same key-based redaction as request bodies so
+// sensitive fields are never written to the http_error log field; any other
+// content type is reduced to the [REDACTED] placeholder.
+func getResponseBodyObfuscatedString(c *fiber.Ctx, bodyBytes []byte) string {
+	contentType := strings.ToLower(string(c.Response().Header.ContentType()))
+
+	if strings.Contains(contentType, "application/json") {
+		return handleJSONBody(bodyBytes)
+	}
+
+	return redactedBody
+}
+
 func obfuscateMapRecursively(data map[string]any, depth int) {
 	if depth >= maxObfuscationDepth {
 		return
