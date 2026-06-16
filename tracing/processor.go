@@ -87,6 +87,12 @@ func sanitizeTenantFromBaggage(raw string) string {
 	replacer := strings.NewReplacer("\r", "", "\n", "", "\x00", "")
 	v := strings.TrimSpace(replacer.Replace(raw))
 
+	// Treat literal "null"/"nil" (case-insensitive) as empty, mirroring the
+	// middleware path, to handle JSON null serialization artifacts.
+	if strings.EqualFold(v, "null") || strings.EqualFold(v, "nil") {
+		return ""
+	}
+
 	if v == "" || len(v) > constant.MaxTenantIDLen {
 		return ""
 	}
