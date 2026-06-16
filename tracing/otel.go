@@ -152,6 +152,8 @@ func normalizeEndpoint(cfg *TelemetryConfig) {
 		cfg.CollectorExporterEndpoint = strings.TrimPrefix(ep, "https://")
 	default:
 		// No scheme — assume insecure (common in k8s internal comms).
+		// Persist the trimmed value back so leading/trailing whitespace is dropped.
+		cfg.CollectorExporterEndpoint = ep
 		cfg.InsecureExporter = true
 	}
 }
