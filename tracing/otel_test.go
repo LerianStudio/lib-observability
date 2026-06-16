@@ -9,11 +9,13 @@ import (
 	"testing"
 
 	observability "github.com/LerianStudio/lib-observability"
+	constant "github.com/LerianStudio/lib-observability/constants"
 	"github.com/LerianStudio/lib-observability/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/baggage"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -208,10 +210,10 @@ func TestNewTelemetry_EndpointNormalization(t *testing.T) {
 			wantInsecure: false,
 		},
 		{
-			name:         "no scheme preserves insecure default",
+			name:         "no scheme infers insecure (k8s internal comms)",
 			endpoint:     "otel-collector:4317",
 			wantEndpoint: "otel-collector:4317",
-			wantInsecure: false,
+			wantInsecure: true,
 		},
 		{
 			name:             "https with explicit insecure override preserved",
@@ -1128,6 +1130,89 @@ func TestAttrBagSpanProcessor_OnStart_WithContextAttributes(t *testing.T) {
 		}
 	}
 	assert.True(t, found, "span must contain app.request.id=r1 from context bag")
+}
+
+// ctxWithBaggageTenant returns a context carrying tenant.id in the standard
+// OTel baggage, mirroring how lib-commons propagates it across services.
+func ctxWithBaggageTenant(t *testing.T, value string) context.Context {
+	t.Helper()
+
+	m, err := baggage.NewMember(constant.AttrKeyTenantID, value)
+	require.NoError(t, err)
+
+	b, err := baggage.New(m)
+	require.NoError(t, err)
+
+	return baggage.ContextWithBaggage(context.Background(), b)
+}
+
+func TestAttrBagSpanProcessor_OnStart_TenantFromBaggage(t *testing.T) {
+	t.Parallel()
+
+	exporter := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithSpanProcessor(AttrBagSpanProcessor{}),
+		sdktrace.WithSyncer(exporter),
+	)
+	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
+
+	ctx := ctxWithBaggageTenant(t, "acme")
+	_, span := tp.Tracer("test").Start(ctx, "op")
+	span.End()
+
+	spans := exporter.GetSpans()
+	require.Len(t, spans, 1)
+	assert.Equal(t, "acme", attrsToMap(spans[0].Attributes)[constant.AttrKeyTenantID],
+		"span must inherit tenant.id from the standard OTel baggage")
+}
+
+func TestAttrBagSpanProcessor_OnStart_AttrBagOverridesBaggage(t *testing.T) {
+	t.Parallel()
+
+	exporter := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithSpanProcessor(AttrBagSpanProcessor{}),
+		sdktrace.WithSyncer(exporter),
+	)
+	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
+
+	// Baggage carries the propagated base value; the request AttrBag carries the
+	// authoritative (e.g. JWT-resolved) value and must win via last-wins.
+	ctx := ctxWithBaggageTenant(t, "from-baggage")
+	ctx = observability.ContextWithSpanAttributes(ctx,
+		attribute.String(constant.AttrKeyTenantID, "from-attrbag"))
+
+	_, span := tp.Tracer("test").Start(ctx, "op")
+	span.End()
+
+	spans := exporter.GetSpans()
+	require.Len(t, spans, 1)
+	assert.Equal(t, "from-attrbag", attrsToMap(spans[0].Attributes)[constant.AttrKeyTenantID],
+		"request AttrBag must override the baggage-derived tenant.id")
+}
+
+func TestRedactingAttrBagSpanProcessor_OnStart_TenantFromBaggage(t *testing.T) {
+	t.Parallel()
+
+	p := RedactingAttrBagSpanProcessor{Redactor: NewDefaultRedactor()}
+	exporter := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithSpanProcessor(p),
+		sdktrace.WithSyncer(exporter),
+	)
+	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
+
+	ctx := ctxWithBaggageTenant(t, "from-baggage")
+	ctx = observability.ContextWithSpanAttributes(ctx,
+		attribute.String(constant.AttrKeyTenantID, "from-attrbag"))
+
+	_, span := tp.Tracer("test").Start(ctx, "op")
+	span.End()
+
+	spans := exporter.GetSpans()
+	require.Len(t, spans, 1)
+	assert.Equal(t, "from-attrbag", attrsToMap(spans[0].Attributes)[constant.AttrKeyTenantID],
+		"request AttrBag must override baggage even through the redacting processor")
 }
 
 func TestRedactingAttrBagSpanProcessor_OnStart_WithContextAttributes(t *testing.T) {

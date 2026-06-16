@@ -5,7 +5,9 @@ import (
 	"strings"
 
 	observability "github.com/LerianStudio/lib-observability"
+	constant "github.com/LerianStudio/lib-observability/constants"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/baggage"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
@@ -20,24 +22,82 @@ type RedactingAttrBagSpanProcessor struct {
 }
 
 // OnStart applies request-scoped context attributes to newly started spans.
+//
+// Sources are applied base-first, override-last so SetAttributes' last-wins
+// semantics keep the precedence correct per key:
+//  1. standard OTel baggage (e.g. tenant.id propagated by lib-commons) — base;
+//  2. the request AttrBag (header/JWT-resolved values) — override.
 func (AttrBagSpanProcessor) OnStart(ctx context.Context, s sdktrace.ReadWriteSpan) {
+	if base := baggageBaseAttributes(ctx); len(base) > 0 {
+		s.SetAttributes(base...)
+	}
+
 	if kv := observability.AttributesFromContext(ctx); len(kv) > 0 {
 		s.SetAttributes(kv...)
 	}
 }
 
 // OnStart applies request-scoped attributes and redacts sensitive values before writing to span.
+//
+// Like AttrBagSpanProcessor.OnStart it layers the standard OTel baggage as the
+// base source and the request AttrBag as the override, redacting each source by
+// key before writing so the last-wins precedence survives redaction.
 func (p RedactingAttrBagSpanProcessor) OnStart(ctx context.Context, s sdktrace.ReadWriteSpan) {
+	base := baggageBaseAttributes(ctx)
 	kv := observability.AttributesFromContext(ctx)
-	if len(kv) == 0 {
+
+	if len(base) == 0 && len(kv) == 0 {
 		return
 	}
 
 	if p.Redactor != nil {
+		base = redactAttributesByKey(base, p.Redactor)
 		kv = redactAttributesByKey(kv, p.Redactor)
 	}
 
-	s.SetAttributes(kv...)
+	if len(base) > 0 {
+		s.SetAttributes(base...)
+	}
+
+	if len(kv) > 0 {
+		s.SetAttributes(kv...)
+	}
+}
+
+// baggageBaseAttributes extracts the shared identifiers carried by the standard
+// OTel baggage (currently tenant.id, written upstream by lib-commons) so they
+// can seed a span before the request AttrBag overrides them. Returns nil when
+// no recognized member is present.
+func baggageBaseAttributes(ctx context.Context) []attribute.KeyValue {
+	if v := sanitizeTenantFromBaggage(baggage.FromContext(ctx).Member(constant.AttrKeyTenantID).Value()); v != "" {
+		return []attribute.KeyValue{attribute.String(constant.AttrKeyTenantID, v)}
+	}
+
+	return nil
+}
+
+// sanitizeTenantFromBaggage applies the same cardinality guards used on the
+// logging path (middleware.sanitizeTenantID) to raw baggage values: strip the
+// log-injection control bytes (\r \n \x00), trim surrounding whitespace, and
+// drop values exceeding MaxTenantIDLen. Mirroring those rules here keeps span
+// and log tenant.id identical, preventing cardinality drift between the two.
+// It is duplicated rather than imported because middleware depends on tracing,
+// so importing middleware here would create a cycle.
+func sanitizeTenantFromBaggage(raw string) string {
+	replacer := strings.NewReplacer("\r", "", "\n", "", "\x00", "")
+	v := strings.TrimSpace(replacer.Replace(raw))
+
+	// Treat literal "null"/"nil" (case-insensitive) as empty, mirroring the
+	// middleware path, to handle JSON null serialization artifacts.
+	if strings.EqualFold(v, "null") || strings.EqualFold(v, "nil") {
+		return ""
+	}
+
+	if v == "" || len(v) > constant.MaxTenantIDLen {
+		return ""
+	}
+
+	return v
 }
 
 // OnEnd is a no-op for this processor.
@@ -82,7 +142,7 @@ func redactAttributesByKey(attrs []attribute.KeyValue, redactor *Redactor) []att
 		case RedactionDrop:
 			continue
 		case RedactionHash:
-			redacted = append(redacted, attribute.String(string(attr.Key), redactor.hashString(attr.Value.Emit())))
+			redacted = append(redacted, attribute.String(string(attr.Key), redactor.hashString(attr.Value.String())))
 		default:
 			redacted = append(redacted, attribute.String(string(attr.Key), redactor.maskValue))
 		}

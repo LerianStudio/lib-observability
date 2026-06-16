@@ -44,6 +44,44 @@ A configurable `Redactor` with rule-based field processing supporting mask, hash
 - **Redaction-first** — sensitive fields are masked in spans, logs, and attributes by default
 - **Interface-driven** — `Logger`, `MetricsFactory`, `ErrorReporter`, and `DLQMetrics` are all interface-bound for testability
 
+## Tenant ID propagation
+
+The HTTP and gRPC middleware automatically read a tenant identifier from the request and propagate it through telemetry as the `tenant.id` attribute / log field.
+
+### Wire protocol
+
+- **HTTP:** canonical header `X-Tenant-Id`. No aliases.
+- **gRPC:** canonical metadata key `tenant-id`. No aliases.
+
+Values are normalized (trimmed, control chars stripped) and dropped silently when empty or longer than 128 bytes to bound telemetry cardinality.
+
+### Where it shows up
+
+| Signal | How it gets there | Action required by caller |
+|---|---|---|
+| Logs | `WithHTTPLogging` / `WithGrpcLogging` add `tenant.id` as a structured field. | None |
+| Traces | The `AttrBagSpanProcessor` (registered by default in `tracing.NewTelemetry`) copies the request attribute bag onto every span at start. | None |
+| `http.server.request.duration` (built-in metric) | `WithTelemetry` adds `tenant.id` to the histogram when present in the request bag. Label is omitted when no tenant was supplied so non-tenant traffic does not split the time series. | None |
+| Custom application metrics | Not automatic. Metric labels are a high-impact cardinality decision left to the caller. | Use `middleware.RequestAttributes(ctx)` to opt in per metric. |
+
+Example for custom metrics:
+
+```go
+import "github.com/LerianStudio/lib-observability/middleware"
+
+counter, _ := factory.Counter("orders.created")
+_ = counter.
+    WithAttributes(middleware.RequestAttributes(ctx)...).
+    Add(ctx, 1)
+```
+
+### Trust boundary
+
+The header is **client-controlled**. The middleware treats it as an observability hint, not an authenticated identifier:
+
+- Run authentication (JWT, mTLS, etc.) **before** these middlewares apply effects you care about.
+- If your auth layer resolves the real tenant from a signed credential, call `observability.ContextWithSpanAttributes(ctx, attribute.String("tenant.id", real))` from the handler. The attribute bag is deduplicated by key with last-wins semantics, so the override surfaces in subsequent logs/traces and replaces the header-supplied value.
+
 ## Relationship to lib-commons
 
 This library was extracted from `lib-commons` to decouple observability infrastructure from service primitives and data connectors. Services that previously imported `lib-commons` for telemetry can migrate to `lib-observability` for a lighter dependency graph. `lib-commons` will depend on `lib-observability` for its own instrumentation needs (database spans, streaming metrics, middleware telemetry).

@@ -21,6 +21,10 @@ endef
 # ------------------------------------------------------
 
 # Integration test filter
+# RUN: specific test name pattern (e.g., TestIntegration_FeatureName)
+# PKG: specific package to test (e.g., ./...)
+# Usage: make test-integration RUN=TestIntegration_FeatureName
+#        make test-integration PKG=./...
 RUN ?=
 PKG ?=
 
@@ -32,6 +36,11 @@ else
 endif
 
 # Low-resource mode for limited machines (sets -p=1 -parallel=1, disables -race)
+# Usage: make test LOW_RESOURCE=1
+#        make test-unit LOW_RESOURCE=1
+#        make test-integration LOW_RESOURCE=1
+#        make coverage-unit LOW_RESOURCE=1
+#        make coverage-integration LOW_RESOURCE=1
 LOW_RESOURCE ?= 0
 
 # Computed flags for low-resource mode
@@ -45,9 +54,12 @@ else
   LOW_RES_RACE_FLAG := -race
 endif
 
-# macOS ld64 workaround
+# macOS ld64 workaround: newer ld emits noisy LC_DYSYMTAB warnings when linking test binaries with -race.
+# If available, prefer Apple's classic linker to silence them.
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Darwin)
+  # Prefer classic mode to suppress LC_DYSYMTAB warnings on macOS.
+  # Set DISABLE_OSX_LINKER_WORKAROUND=1 to disable this behavior.
   ifneq ($(DISABLE_OSX_LINKER_WORKAROUND),1)
     GO_TEST_LDFLAGS := -ldflags="-linkmode=external -extldflags=-ld_classic"
   else
@@ -61,18 +73,22 @@ endif
 # Test tooling configuration
 # ------------------------------------------------------
 
-GOTESTSUM_VERSION ?= v1.12.0
-GOSEC_VERSION ?= v2.22.4
-GOLANGCI_LINT_VERSION ?= v2.1.6
+# Pinned tool versions for reproducibility (update as needed)
+GOTESTSUM_VERSION ?= v1.13.0
+GOSEC_VERSION ?= v2.26.1
+GOLANGCI_LINT_VERSION ?= v2.12.2
 
 TEST_REPORTS_DIR ?= ./reports
 GOTESTSUM = $(shell command -v gotestsum 2>/dev/null)
-GOSEC = $(shell command -v gosec 2>/dev/null || \
-	GOBIN="$$(go env GOBIN)"; \
-	if [ -n "$$GOBIN" ]; then \
-		printf "%s/gosec" "$$GOBIN"; \
+GOSEC = $(shell if command -v gosec >/dev/null 2>&1; then \
+	command -v gosec; \
 	else \
-		printf "%s/bin/gosec" "$$(go env GOPATH)"; \
+		GOBIN="$$(go env GOBIN)"; \
+		if [ -n "$$GOBIN" ]; then \
+			printf "%s/gosec" "$$GOBIN"; \
+		else \
+			printf "%s/bin/gosec" "$$(go env GOPATH)"; \
+		fi; \
 	fi)
 RETRY_ON_FAIL ?= 0
 
@@ -216,7 +232,7 @@ test-unit:
 	$(call print_title,Running Go unit tests)
 	$(call check_command,go,"Install Go from https://golang.org/doc/install")
 	@set -e; mkdir -p $(TEST_REPORTS_DIR); \
-	pkgs=$$(go list ./... | grep -v '/tests'); \
+	pkgs=$$(go list -tags=unit ./...); \
 	if [ -z "$$pkgs" ]; then \
 	  echo "No unit test packages found"; \
 	else \
@@ -318,9 +334,9 @@ coverage-unit:
 	@set -e; mkdir -p $(TEST_REPORTS_DIR); \
 	if [ -n "$(PKG)" ]; then \
 	  echo "Using specified package: $(PKG)"; \
-	  pkgs=$$(go list $(PKG) 2>/dev/null | grep -v '/tests' | tr '\n' ' '); \
+	  pkgs=$$(go list -tags=unit $(PKG) 2>/dev/null | tr '\n' ' '); \
 	else \
-	  pkgs=$$(go list ./... | grep -v '/tests'); \
+	  pkgs=$$(go list -tags=unit ./...); \
 	fi; \
 	if [ -z "$$pkgs" ]; then \
 	  echo "No unit test packages found"; \
@@ -440,8 +456,29 @@ coverage:
 lint:
 	$(call print_title,Running linters on all packages (read-only))
 	$(call check_command,golangci-lint,"go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)")
-	@golangci-lint run ./...
-	@echo "$(GREEN)$(BOLD)[ok]$(NC) Lint checks passed successfully$(GREEN) ✔️$(NC)"
+	@out=$$(golangci-lint run ./... 2>&1); \
+	out_err=$$?; \
+	if command -v perfsprint >/dev/null 2>&1; then \
+		perf_out=$$(perfsprint ./... 2>&1); \
+		perf_err=$$?; \
+	else \
+		perf_out=""; \
+		perf_err=0; \
+		echo "Note: perfsprint not installed, skipping performance checks (go install github.com/catenacyber/perfsprint@latest)"; \
+	fi; \
+	echo "$$out"; \
+	if [ -n "$$perf_out" ]; then echo "$$perf_out"; fi; \
+	if [ $$out_err -ne 0 ]; then \
+		printf "\n%s\n" "$(BOLD)$(RED)An error has occurred during the lint process:$(NC)"; \
+		printf "%s\n" "$$out"; \
+		exit 1; \
+	fi; \
+	if [ $$perf_err -ne 0 ]; then \
+		printf "\n%s\n" "$(BOLD)$(RED)An error has occurred during the performance check:$(NC)"; \
+		printf "%s\n" "$$perf_out"; \
+		exit 1; \
+	fi
+	@echo "$(GREEN)$(BOLD)[ok]$(NC) Lint and performance checks passed successfully$(GREEN) ✔️$(NC)"
 
 .PHONY: lint-fix
 lint-fix:
