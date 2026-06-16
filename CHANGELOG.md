@@ -1,5 +1,33 @@
 # Lib-observability Changelog
 
+## [1.1.0](https://github.com/LerianStudio/lib-observability/releases/tag/v1.1.0)
+
+- **Features:**
+  - Add `tenant.id` as a shared observability attribute.
+  - Record `http.server.request.duration` in `WithTelemetry`.
+  - Skip probe and scrape paths by default; add `WithExcludedRoutes` tests.
+  - Read `tenant.id` from OTel baggage for spans and logs.
+
+- **Fixes:**
+  - Persist trimmed endpoint and treat null/nil baggage as empty in tracing.
+  - Add `http_latency_ms` field to `WithHTTPLogging` access log.
+  - Include baggage-propagated `tenant.id` in `http.server.request.duration` metric.
+  - Sanitize `tenant.id` from baggage before seeding spans.
+  - Infer insecure exporter for scheme-less OTLP endpoint.
+
+- **Improvements:**
+  - Promote `context.id` to shared `AttrKeyContextID` constant.
+  - Move tenant constants to constants package.
+  - Align duration histogram buckets with OTel advisory.
+  - Normalize `http.request.method` to OTel known set.
+  - Omit `http.route` for unmatched 404 requests.
+
+Contributors: @brunognovaes, @fredcamaral, @gandalf-at-lerian, @gauchito91, @lerian-studio, @qnen.
+
+[Compare changes](https://github.com/LerianStudio/lib-observability/compare/v1.0.1...v1.1.0)
+
+---
+
 ## [1.0.1](https://github.com/LerianStudio/lib-observability/releases/tag/v1.0.1)
 
 - Improvements:
