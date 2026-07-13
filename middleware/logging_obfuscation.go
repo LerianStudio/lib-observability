@@ -4,14 +4,14 @@ import (
 	"net/url"
 	"strings"
 
-	constant "github.com/LerianStudio/lib-observability/constants"
-	"github.com/LerianStudio/lib-observability/redaction"
-	"github.com/gofiber/fiber/v2"
+	constant "github.com/LerianStudio/lib-observability/v2/constants"
+	"github.com/LerianStudio/lib-observability/v2/redaction"
+	"github.com/gofiber/fiber/v3"
 )
 
 const redactedBody = "[REDACTED]"
 
-func getBodyObfuscatedString(c *fiber.Ctx, bodyBytes []byte) string {
+func getBodyObfuscatedString(c fiber.Ctx, bodyBytes []byte) string {
 	contentType := strings.ToLower(c.Get(headerContentType))
 
 	switch {
@@ -86,7 +86,7 @@ func handleURLEncodedBody(bodyBytes []byte) string {
 	return updatedBody.Encode()
 }
 
-func handleMultipartBody(c *fiber.Ctx) string {
+func handleMultipartBody(c fiber.Ctx) string {
 	form, err := c.MultipartForm()
 	if err != nil {
 		return "[multipart/form-data]"

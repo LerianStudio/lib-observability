@@ -11,10 +11,10 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	constant "github.com/LerianStudio/lib-observability/constants"
-	"github.com/LerianStudio/lib-observability/metrics"
-	"github.com/LerianStudio/lib-observability/tracing"
-	"github.com/gofiber/fiber/v2"
+	constant "github.com/LerianStudio/lib-observability/v2/constants"
+	"github.com/LerianStudio/lib-observability/v2/metrics"
+	"github.com/LerianStudio/lib-observability/v2/tracing"
+	"github.com/gofiber/fiber/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/attribute"
@@ -145,7 +145,7 @@ func TestWithTelemetry_RecordsDurationOnSuccess(t *testing.T) {
 	mid := NewTelemetryMiddleware(tel)
 	app.Use(mid.WithTelemetry(tel))
 
-	app.Get("/api/users/:id", func(c *fiber.Ctx) error {
+	app.Get("/api/users/:id", func(c fiber.Ctx) error {
 		return c.SendStatus(http.StatusOK)
 	})
 
@@ -185,7 +185,7 @@ func TestWithTelemetry_RecordsDurationOn4xx(t *testing.T) {
 	mid := NewTelemetryMiddleware(tel)
 	app.Use(mid.WithTelemetry(tel))
 
-	app.Get("/api/items/:id", func(c *fiber.Ctx) error {
+	app.Get("/api/items/:id", func(c fiber.Ctx) error {
 		return c.SendStatus(http.StatusNotFound)
 	})
 
@@ -216,7 +216,7 @@ func TestWithTelemetry_RecordsDurationOn5xxStatus(t *testing.T) {
 	mid := NewTelemetryMiddleware(tel)
 	app.Use(mid.WithTelemetry(tel))
 
-	app.Get("/api/health", func(c *fiber.Ctx) error {
+	app.Get("/api/health", func(c fiber.Ctx) error {
 		return c.SendStatus(http.StatusServiceUnavailable)
 	})
 
@@ -251,7 +251,7 @@ func TestWithTelemetry_RecordsDurationOnHandlerError(t *testing.T) {
 	tel, reader, spanExp := newTelemetryHarness(t)
 
 	app := fiber.New(fiber.Config{
-		ErrorHandler: func(c *fiber.Ctx, err error) error {
+		ErrorHandler: func(c fiber.Ctx, err error) error {
 			return c.Status(http.StatusInternalServerError).SendString(err.Error())
 		},
 	})
@@ -259,7 +259,7 @@ func TestWithTelemetry_RecordsDurationOnHandlerError(t *testing.T) {
 	app.Use(mid.WithTelemetry(tel))
 
 	sentinel := errors.New("boom")
-	app.Get("/api/explode", func(c *fiber.Ctx) error {
+	app.Get("/api/explode", func(c fiber.Ctx) error {
 		return sentinel
 	})
 
@@ -302,7 +302,7 @@ func TestWithTelemetry_FiberError4xxOmitsErrorTypeOnMetric(t *testing.T) {
 	mid := NewTelemetryMiddleware(tel)
 	app.Use(mid.WithTelemetry(tel))
 
-	app.Get("/api/items/:id", func(c *fiber.Ctx) error {
+	app.Get("/api/items/:id", func(c fiber.Ctx) error {
 		return fiber.NewError(http.StatusNotFound, "not found")
 	})
 
@@ -349,7 +349,7 @@ func TestWithTelemetry_FiberError400OmitsErrorTypeOnMetric(t *testing.T) {
 	mid := NewTelemetryMiddleware(tel)
 	app.Use(mid.WithTelemetry(tel))
 
-	app.Post("/api/validate", func(c *fiber.Ctx) error {
+	app.Post("/api/validate", func(c fiber.Ctx) error {
 		return fiber.NewError(http.StatusBadRequest, "invalid payload")
 	})
 
@@ -390,7 +390,7 @@ func TestWithTelemetry_RecordsDurationOnFiberError5xx(t *testing.T) {
 	mid := NewTelemetryMiddleware(tel)
 	app.Use(mid.WithTelemetry(tel))
 
-	app.Get("/api/down", func(c *fiber.Ctx) error {
+	app.Get("/api/down", func(c fiber.Ctx) error {
 		return fiber.NewError(http.StatusBadGateway, "upstream gone")
 	})
 
@@ -433,10 +433,10 @@ func TestWithTelemetry_FiberErrorAndSendStatusAreConsistent(t *testing.T) {
 	mid := NewTelemetryMiddleware(tel)
 	app.Use(mid.WithTelemetry(tel))
 
-	app.Get("/api/raise", func(c *fiber.Ctx) error {
+	app.Get("/api/raise", func(c fiber.Ctx) error {
 		return fiber.NewError(http.StatusServiceUnavailable, "down")
 	})
-	app.Get("/api/send", func(c *fiber.Ctx) error {
+	app.Get("/api/send", func(c fiber.Ctx) error {
 		return c.SendStatus(http.StatusServiceUnavailable)
 	})
 
@@ -504,7 +504,7 @@ func TestWithTelemetry_GenericHandlerErrorStatusCodeIs500(t *testing.T) {
 	mid := NewTelemetryMiddleware(tel)
 	app.Use(mid.WithTelemetry(tel))
 
-	app.Get("/api/explode", func(c *fiber.Ctx) error {
+	app.Get("/api/explode", func(c fiber.Ctx) error {
 		return errors.New("boom")
 	})
 
@@ -545,7 +545,7 @@ func TestWithTelemetry_DoesNotRecordForExcludedRoute(t *testing.T) {
 	mid := NewTelemetryMiddleware(tel)
 	app.Use(mid.WithTelemetry(tel, "/swagger"))
 
-	app.Get("/swagger/index.html", func(c *fiber.Ctx) error {
+	app.Get("/swagger/index.html", func(c fiber.Ctx) error {
 		return c.SendStatus(http.StatusOK)
 	})
 
@@ -571,7 +571,7 @@ func TestWithTelemetry_NilTelemetryDoesNotRecord(t *testing.T) {
 	mid := NewTelemetryMiddleware(nil)
 	app.Use(mid.WithTelemetry(nil))
 
-	app.Get("/ping", func(c *fiber.Ctx) error {
+	app.Get("/ping", func(c fiber.Ctx) error {
 		return c.SendStatus(http.StatusOK)
 	})
 
@@ -608,7 +608,7 @@ func TestWithTelemetry_NilMeterProviderDoesNotRecord(t *testing.T) {
 	mid := NewTelemetryMiddleware(tel)
 	app.Use(mid.WithTelemetry(tel))
 
-	app.Get("/no-mp", func(c *fiber.Ctx) error {
+	app.Get("/no-mp", func(c fiber.Ctx) error {
 		return c.SendStatus(http.StatusOK)
 	})
 
@@ -639,7 +639,7 @@ func TestWithTelemetry_NilMetricsFactoryDoesNotRecord(t *testing.T) {
 	mid := NewTelemetryMiddleware(tel)
 	app.Use(mid.WithTelemetry(tel))
 
-	app.Get("/no-factory", func(c *fiber.Ctx) error {
+	app.Get("/no-factory", func(c fiber.Ctx) error {
 		return c.SendStatus(http.StatusOK)
 	})
 
@@ -692,7 +692,7 @@ func TestWithTelemetry_UnmatchedRouteOmitsHTTPRoute(t *testing.T) {
 		app := fiber.New()
 		mid := NewTelemetryMiddleware(tel)
 		app.Use(mid.WithTelemetry(tel))
-		app.Get("/", func(c *fiber.Ctx) error { return c.SendStatus(http.StatusOK) })
+		app.Get("/", func(c fiber.Ctx) error { return c.SendStatus(http.StatusOK) })
 
 		resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/", nil))
 		require.NoError(t, err)
@@ -728,7 +728,7 @@ func TestWithTelemetry_NormalizesUnknownMethodOnSpan(t *testing.T) {
 	mid := NewTelemetryMiddleware(tel)
 	app.Use(mid.WithTelemetry(tel))
 
-	app.Add("PROPFIND", "/dav/:resource", func(c *fiber.Ctx) error {
+	app.Add([]string{"PROPFIND"}, "/dav/:resource", func(c fiber.Ctx) error {
 		return c.SendStatus(http.StatusOK)
 	})
 
@@ -764,7 +764,7 @@ func TestWithTelemetry_KnownMethodHasNoOriginal(t *testing.T) {
 	mid := NewTelemetryMiddleware(tel)
 	app.Use(mid.WithTelemetry(tel))
 
-	app.Get("/ping", func(c *fiber.Ctx) error {
+	app.Get("/ping", func(c fiber.Ctx) error {
 		return c.SendStatus(http.StatusOK)
 	})
 
@@ -794,7 +794,7 @@ func TestWithTelemetry_TruncatesLongUserAgent(t *testing.T) {
 	app := fiber.New()
 	mid := NewTelemetryMiddleware(tel)
 	app.Use(mid.WithTelemetry(tel))
-	app.Get("/x", func(c *fiber.Ctx) error { return c.SendStatus(http.StatusOK) })
+	app.Get("/x", func(c fiber.Ctx) error { return c.SendStatus(http.StatusOK) })
 
 	longUA := strings.Repeat("a", 4000)
 	req := httptest.NewRequest(http.MethodGet, "/x", nil)
@@ -824,7 +824,7 @@ func TestWithTelemetry_TruncatesUserAgentAtRuneBoundary(t *testing.T) {
 	app := fiber.New()
 	mid := NewTelemetryMiddleware(tel)
 	app.Use(mid.WithTelemetry(tel))
-	app.Get("/x", func(c *fiber.Ctx) error { return c.SendStatus(http.StatusOK) })
+	app.Get("/x", func(c fiber.Ctx) error { return c.SendStatus(http.StatusOK) })
 
 	longUA := strings.Repeat("€", 1000) // 3000 bytes
 	req := httptest.NewRequest(http.MethodGet, "/x", nil)
@@ -860,7 +860,7 @@ func TestWithTelemetry_RecordsDurationWithTenantID(t *testing.T) {
 	mid := NewTelemetryMiddleware(tel)
 	app.Use(mid.WithTelemetry(tel))
 
-	app.Get("/api/orders", func(c *fiber.Ctx) error {
+	app.Get("/api/orders", func(c fiber.Ctx) error {
 		return c.SendStatus(http.StatusOK)
 	})
 
@@ -898,13 +898,13 @@ func TestWithTelemetry_RecordsDurationWithBaggageTenantID(t *testing.T) {
 	// Seed the request UserContext with baggage-propagated tenant.id before the
 	// telemetry middleware runs, mirroring an upstream service that injected
 	// tenant.id into the OTel baggage rather than the X-Tenant-Id header.
-	app.Use(func(c *fiber.Ctx) error {
-		c.SetUserContext(ctxWithBaggageTenant(t, "acme"))
+	app.Use(func(c fiber.Ctx) error {
+		c.SetContext(ctxWithBaggageTenant(t, "acme"))
 		return c.Next()
 	})
 	app.Use(mid.WithTelemetry(tel))
 
-	app.Get("/api/orders", func(c *fiber.Ctx) error {
+	app.Get("/api/orders", func(c fiber.Ctx) error {
 		return c.SendStatus(http.StatusOK)
 	})
 
@@ -934,7 +934,7 @@ func TestWithTelemetry_RecordsDurationWithoutTenantID(t *testing.T) {
 	mid := NewTelemetryMiddleware(tel)
 	app.Use(mid.WithTelemetry(tel))
 
-	app.Get("/api/orders", func(c *fiber.Ctx) error {
+	app.Get("/api/orders", func(c fiber.Ctx) error {
 		return c.SendStatus(http.StatusOK)
 	})
 
@@ -962,7 +962,7 @@ func TestWithTelemetry_RecordsDurationDropsOversizedTenantID(t *testing.T) {
 	mid := NewTelemetryMiddleware(tel)
 	app.Use(mid.WithTelemetry(tel))
 
-	app.Get("/api/orders", func(c *fiber.Ctx) error {
+	app.Get("/api/orders", func(c fiber.Ctx) error {
 		return c.SendStatus(http.StatusOK)
 	})
 

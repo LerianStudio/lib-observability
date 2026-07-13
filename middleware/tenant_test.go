@@ -9,9 +9,9 @@ import (
 	"strings"
 	"testing"
 
-	observability "github.com/LerianStudio/lib-observability"
-	constant "github.com/LerianStudio/lib-observability/constants"
-	"github.com/gofiber/fiber/v2"
+	observability "github.com/LerianStudio/lib-observability/v2"
+	constant "github.com/LerianStudio/lib-observability/v2/constants"
+	"github.com/gofiber/fiber/v3"
 	"github.com/stretchr/testify/assert"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/baggage"
@@ -53,7 +53,7 @@ func TestResolveTenantIDFromHTTP(t *testing.T) {
 			app := fiber.New()
 
 			var got string
-			app.Get("/", func(c *fiber.Ctx) error {
+			app.Get("/", func(c fiber.Ctx) error {
 				got = ResolveTenantIDFromHTTP(c)
 				return nil
 			})

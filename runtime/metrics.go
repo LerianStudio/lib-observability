@@ -4,9 +4,9 @@ import (
 	"context"
 	"sync"
 
-	constant "github.com/LerianStudio/lib-observability/constants"
-	"github.com/LerianStudio/lib-observability/log"
-	"github.com/LerianStudio/lib-observability/metrics"
+	constant "github.com/LerianStudio/lib-observability/v2/constants"
+	"github.com/LerianStudio/lib-observability/v2/log"
+	"github.com/LerianStudio/lib-observability/v2/metrics"
 )
 
 // PanicMetrics provides panic-related metrics using OpenTelemetry.

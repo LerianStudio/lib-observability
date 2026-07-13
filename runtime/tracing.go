@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"regexp"
 
-	constant "github.com/LerianStudio/lib-observability/constants"
+	constant "github.com/LerianStudio/lib-observability/v2/constants"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"

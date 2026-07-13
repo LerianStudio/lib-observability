@@ -12,10 +12,10 @@ import (
 	"sync"
 	"time"
 
-	observability "github.com/LerianStudio/lib-observability"
-	constant "github.com/LerianStudio/lib-observability/constants"
-	"github.com/LerianStudio/lib-observability/tracing"
-	"github.com/gofiber/fiber/v2"
+	observability "github.com/LerianStudio/lib-observability/v2"
+	constant "github.com/LerianStudio/lib-observability/v2/constants"
+	"github.com/LerianStudio/lib-observability/v2/tracing"
+	"github.com/gofiber/fiber/v3"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -156,7 +156,7 @@ func (tm *TelemetryMiddleware) WithTelemetry(tl *tracing.Telemetry, excludedRout
 		)
 	}
 
-	return func(c *fiber.Ctx) error {
+	return func(c fiber.Ctx) error {
 		effectiveTelemetry := tl
 		if effectiveTelemetry == nil && tm != nil {
 			effectiveTelemetry = tm.Telemetry
@@ -177,14 +177,14 @@ func (tm *TelemetryMiddleware) WithTelemetry(tl *tracing.Telemetry, excludedRout
 		// whether tracing is enabled below.
 		requestStart := time.Now()
 
-		ctx := c.UserContext()
+		ctx := c.Context()
 		_, _, reqId, _ := observability.NewTrackingFromContext(ctx)
 
 		if tenantID := ResolveTenantIDFromHTTP(c); tenantID != "" {
 			ctx = observability.ContextWithSpanAttributes(ctx, attribute.String(constant.AttrKeyTenantID, tenantID))
 		}
 
-		c.SetUserContext(observability.ContextWithSpanAttributes(ctx,
+		c.SetContext(observability.ContextWithSpanAttributes(ctx,
 			attribute.String("app.request.request_id", reqId),
 		))
 
@@ -212,7 +212,7 @@ func (tm *TelemetryMiddleware) WithTelemetry(tl *tracing.Telemetry, excludedRout
 		tracer := effectiveTelemetry.TracerProvider.Tracer(effectiveTelemetry.LibraryName)
 		routePathWithMethod := method + " " + replaceUUIDWithPlaceholder(c.Path())
 
-		traceCtx := c.UserContext()
+		traceCtx := c.Context()
 		// Compatibility note: trace extraction currently trusts the internal-service
 		// User-Agent heuristic. This is an interoperability hint, not an authenticated
 		// trust boundary, and is preserved to avoid changing existing caller behavior.
@@ -228,7 +228,7 @@ func (tm *TelemetryMiddleware) WithTelemetry(tl *tracing.Telemetry, excludedRout
 		ctx = observability.ContextWithTracer(ctx, tracer)
 		ctx = observability.ContextWithMetricFactory(ctx, effectiveTelemetry.MetricsFactory)
 		ctx = contextWithSpanEndState(ctx, endState)
-		c.SetUserContext(ctx)
+		c.SetContext(ctx)
 
 		err := tm.collectMetrics(ctx)
 		if err != nil {
@@ -280,7 +280,7 @@ type telemetryRequestAttrs struct {
 // inline.
 func applyTelemetrySpanAttributes(
 	span trace.Span,
-	c *fiber.Ctx,
+	c fiber.Ctx,
 	statusCode int,
 	req telemetryRequestAttrs,
 ) {
@@ -348,7 +348,7 @@ func applyTelemetrySpanAttributes(
 //     middleware/tenant.go, keeping the label safe for use in dashboards and
 //     alerts that filter by tenant.
 func recordHTTPServerDuration(
-	c *fiber.Ctx,
+	c fiber.Ctx,
 	hist metric.Float64Histogram,
 	method string,
 	start time.Time,
@@ -372,12 +372,12 @@ func recordHTTPServerDuration(
 		attrs = append(attrs, attribute.String("error.type", errType))
 	}
 
-	if tenantID := resolveTenantIDForTelemetry(c.UserContext()); tenantID != "" {
+	if tenantID := resolveTenantIDForTelemetry(c.Context()); tenantID != "" {
 		attrs = append(attrs, attribute.String(constant.AttrKeyTenantID, tenantID))
 	}
 
 	durationSeconds := time.Since(start).Seconds()
-	hist.Record(c.UserContext(), durationSeconds, metric.WithAttributes(attrs...))
+	hist.Record(c.Context(), durationSeconds, metric.WithAttributes(attrs...))
 }
 
 // classifyHTTPErrorType returns the stable, low-cardinality error.type
@@ -396,15 +396,15 @@ func classifyHTTPErrorType(statusCode int) string {
 }
 
 // EndTracingSpans is a middleware that ends the tracing spans.
-func (tm *TelemetryMiddleware) EndTracingSpans(c *fiber.Ctx) error {
+func (tm *TelemetryMiddleware) EndTracingSpans(c fiber.Ctx) error {
 	if c == nil {
 		return ErrContextNotFound
 	}
 
-	originalCtx := c.UserContext()
+	originalCtx := c.Context()
 	err := c.Next()
 
-	endCtx := c.UserContext()
+	endCtx := c.Context()
 	if endCtx == nil {
 		endCtx = originalCtx
 	}
@@ -526,7 +526,7 @@ func (tm *TelemetryMiddleware) EndTracingSpansInterceptor() grpc.UnaryServerInte
 // The effective ID is always echoed back on the response so that callers can
 // correlate their request regardless of whether the ID was client-supplied or
 // server-generated.
-func setRequestHeaderID(c *fiber.Ctx) {
+func setRequestHeaderID(c fiber.Ctx) {
 	hid := normalizeRequestID(c.Get(headerID))
 
 	if isNilOrEmptyString(&hid) {
@@ -537,8 +537,8 @@ func setRequestHeaderID(c *fiber.Ctx) {
 	c.Set(headerID, hid)
 	c.Response().Header.Set(headerID, hid)
 
-	ctx := observability.ContextWithHeaderID(c.UserContext(), hid)
-	c.SetUserContext(ctx)
+	ctx := observability.ContextWithHeaderID(c.Context(), hid)
+	c.SetContext(ctx)
 }
 
 // resolveGRPCRequestID determines the request ID for a gRPC call from the request body,

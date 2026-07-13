@@ -12,9 +12,9 @@ import (
 	"sync"
 	"testing"
 
-	observability "github.com/LerianStudio/lib-observability"
-	obslog "github.com/LerianStudio/lib-observability/log"
-	"github.com/gofiber/fiber/v2"
+	observability "github.com/LerianStudio/lib-observability/v2"
+	obslog "github.com/LerianStudio/lib-observability/v2/log"
+	"github.com/gofiber/fiber/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/attribute"
@@ -71,7 +71,7 @@ func (r grpcRequestWithID) GetRequestId() string {
 
 func TestNewRequestInfoSanitizesRequestData(t *testing.T) {
 	app := fiber.New()
-	app.Post("/charge", func(c *fiber.Ctx) error {
+	app.Post("/charge", func(c fiber.Ctx) error {
 		info := NewRequestInfo(c, false)
 
 		assert.Equal(t, "POST", info.Method)
@@ -98,10 +98,10 @@ func TestWithHTTPLoggingAttachesLoggerAndLogsAccessEntry(t *testing.T) {
 	logger := &captureLogger{}
 	app := fiber.New()
 	app.Use(WithHTTPLogging(WithCustomLogger(logger)))
-	app.Get("/ok", func(c *fiber.Ctx) error {
-		_, _, requestID, _ := observability.NewTrackingFromContext(c.UserContext())
+	app.Get("/ok", func(c fiber.Ctx) error {
+		_, _, requestID, _ := observability.NewTrackingFromContext(c.Context())
 		assert.NotEmpty(t, requestID)
-		assert.Same(t, logger, observability.NewLoggerFromContext(c.UserContext()))
+		assert.Same(t, logger, observability.NewLoggerFromContext(c.Context()))
 
 		return c.SendString("ok")
 	})
@@ -144,8 +144,8 @@ func TestWithHTTPLoggingIgnoresTypedNilLogger(t *testing.T) {
 	var logger *captureLogger
 	app := fiber.New()
 	app.Use(WithHTTPLogging(WithCustomLogger(logger)))
-	app.Get("/ok", func(c *fiber.Ctx) error {
-		assert.NotNil(t, observability.NewLoggerFromContext(c.UserContext()))
+	app.Get("/ok", func(c fiber.Ctx) error {
+		assert.NotNil(t, observability.NewLoggerFromContext(c.Context()))
 		return c.SendStatus(http.StatusNoContent)
 	})
 
@@ -164,7 +164,7 @@ func TestWithHTTPLoggingSkipsDefaultProbePaths(t *testing.T) {
 			logger := &captureLogger{}
 			app := fiber.New()
 			app.Use(WithHTTPLogging(WithCustomLogger(logger)))
-			app.Get(path, func(c *fiber.Ctx) error {
+			app.Get(path, func(c fiber.Ctx) error {
 				return c.SendStatus(http.StatusOK)
 			})
 
@@ -188,7 +188,7 @@ func TestWithHTTPLoggingExcludedRoutesOptionSuppressesLogs(t *testing.T) {
 		WithCustomLogger(logger),
 		WithExcludedRoutes("/internal"),
 	))
-	app.Get("/internal/diag", func(c *fiber.Ctx) error {
+	app.Get("/internal/diag", func(c fiber.Ctx) error {
 		return c.SendString("ok")
 	})
 
@@ -209,7 +209,7 @@ func TestWithHTTPLoggingExcludedRoutesOptionPreservesDefaults(t *testing.T) {
 		WithCustomLogger(logger),
 		WithExcludedRoutes("/metrics"),
 	))
-	app.Get("/readyz", func(c *fiber.Ctx) error {
+	app.Get("/readyz", func(c fiber.Ctx) error {
 		return c.SendStatus(http.StatusOK)
 	})
 
@@ -230,7 +230,7 @@ func TestWithHTTPLoggingExcludedRoutesIgnoresEmptyStrings(t *testing.T) {
 		WithCustomLogger(logger),
 		WithExcludedRoutes("", "/skip"),
 	))
-	app.Get("/ok", func(c *fiber.Ctx) error {
+	app.Get("/ok", func(c fiber.Ctx) error {
 		return c.SendString("ok")
 	})
 
@@ -249,7 +249,7 @@ func TestWithHTTPLoggingLogsErrorStatus(t *testing.T) {
 	logger := &captureLogger{}
 	app := fiber.New()
 	app.Use(WithHTTPLogging(WithCustomLogger(logger)))
-	app.Get("/fail", func(*fiber.Ctx) error {
+	app.Get("/fail", func(fiber.Ctx) error {
 		return errors.New("handler failed")
 	})
 

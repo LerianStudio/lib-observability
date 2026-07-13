@@ -3,9 +3,9 @@ package middleware
 import (
 	"context"
 
-	observability "github.com/LerianStudio/lib-observability"
-	constant "github.com/LerianStudio/lib-observability/constants"
-	"github.com/gofiber/fiber/v2"
+	observability "github.com/LerianStudio/lib-observability/v2"
+	constant "github.com/LerianStudio/lib-observability/v2/constants"
+	"github.com/gofiber/fiber/v3"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/baggage"
 	"google.golang.org/grpc/metadata"
@@ -18,7 +18,7 @@ import (
 // observability hint: callers MUST authenticate the tenant separately and
 // override via observability.ContextWithSpanAttributes when the real value
 // differs from the header.
-func ResolveTenantIDFromHTTP(c *fiber.Ctx) string {
+func ResolveTenantIDFromHTTP(c fiber.Ctx) string {
 	if c == nil {
 		return ""
 	}

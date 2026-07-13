@@ -7,9 +7,9 @@ import (
 	"regexp"
 	"strings"
 
-	constant "github.com/LerianStudio/lib-observability/constants"
-	"github.com/LerianStudio/lib-observability/redaction"
-	"github.com/gofiber/fiber/v2"
+	constant "github.com/LerianStudio/lib-observability/v2/constants"
+	"github.com/LerianStudio/lib-observability/v2/redaction"
+	"github.com/gofiber/fiber/v3"
 	"google.golang.org/grpc/metadata"
 )
 
@@ -47,7 +47,7 @@ func normalizeHTTPMethod(raw string) (normalized, original string, replaced bool
 // request path is NOT "/") and report the attribute as absent so callers
 // can omit it entirely, matching OTel guidance that http.route SHOULD be
 // absent when no route matched.
-func routeAttribute(c *fiber.Ctx, effectiveStatus int) (string, bool) {
+func routeAttribute(c fiber.Ctx, effectiveStatus int) (string, bool) {
 	if c == nil {
 		return "", false
 	}
@@ -129,7 +129,7 @@ func errorTypeOriginal(handlerErr error) string {
 //
 // Trailing slashes on excluded entries are tolerated, and empty entries
 // are ignored so they cannot act as accidental wildcards.
-func isRouteExcludedFromList(c *fiber.Ctx, excludedRoutes []string) bool {
+func isRouteExcludedFromList(c fiber.Ctx, excludedRoutes []string) bool {
 	path := c.Path()
 
 	for _, route := range excludedRoutes {

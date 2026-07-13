@@ -8,7 +8,7 @@ import (
 	"math"
 	"testing"
 
-	"github.com/LerianStudio/lib-observability/log"
+	"github.com/LerianStudio/lib-observability/v2/log"
 	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/require"
 )
