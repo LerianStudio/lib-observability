@@ -1,0 +1,9 @@
+# Trivy ignore file — accepted-risk advisories (reviewed by security).
+#
+# GO-2026-5932 — golang.org/x/crypto/openpgp is unmaintained.
+#   - No fixed version exists (advisory applies to all versions; "unmaintained").
+#   - Pulled transitively via gofiber/fiber/v3 -> golang.org/x/crypto/acme/autocert.
+#   - The openpgp package is NOT imported by this module (only acme/autocert is
+#     reachable), so the unmaintained-package risk is not exercised here.
+#   - Accepted until an upstream (fiber/x-crypto) change removes the transitive edge.
+GO-2026-5932
