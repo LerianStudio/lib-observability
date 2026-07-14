@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/LerianStudio/lib-observability/metrics"
-	"github.com/LerianStudio/lib-observability/tracing"
-	"github.com/gofiber/fiber/v2"
+	"github.com/LerianStudio/lib-observability/v2/metrics"
+	"github.com/LerianStudio/lib-observability/v2/tracing"
+	"github.com/gofiber/fiber/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
@@ -51,7 +51,7 @@ func TestWithTelemetry(t *testing.T) {
 		name               string
 		path               string
 		method             string
-		setupHandler       func(c *fiber.Ctx) error
+		setupHandler       func(c fiber.Ctx) error
 		nilTelemetry       bool
 		traceparent        string
 		expectedStatusCode int
@@ -62,7 +62,7 @@ func TestWithTelemetry(t *testing.T) {
 			name:               "Basic middleware functionality",
 			path:               "/api/resource",
 			method:             "GET",
-			setupHandler:       func(c *fiber.Ctx) error { return c.SendStatus(http.StatusOK) },
+			setupHandler:       func(c fiber.Ctx) error { return c.SendStatus(http.StatusOK) },
 			expectedStatusCode: http.StatusOK,
 			expectSpan:         true,
 		},
@@ -70,7 +70,7 @@ func TestWithTelemetry(t *testing.T) {
 			name:               "Handler returns error",
 			path:               "/api/resource",
 			method:             "POST",
-			setupHandler:       func(c *fiber.Ctx) error { return errors.New("handler error") },
+			setupHandler:       func(c fiber.Ctx) error { return errors.New("handler error") },
 			expectedStatusCode: http.StatusInternalServerError,
 			expectSpan:         true,
 		},
@@ -78,7 +78,7 @@ func TestWithTelemetry(t *testing.T) {
 			name:               "Nil telemetry",
 			path:               "/api/resource",
 			method:             "GET",
-			setupHandler:       func(c *fiber.Ctx) error { return c.SendStatus(http.StatusOK) },
+			setupHandler:       func(c fiber.Ctx) error { return c.SendStatus(http.StatusOK) },
 			nilTelemetry:       true,
 			expectedStatusCode: http.StatusOK,
 			expectSpan:         false,
@@ -87,7 +87,7 @@ func TestWithTelemetry(t *testing.T) {
 			name:               "With trace context",
 			path:               "/api/resource",
 			method:             "GET",
-			setupHandler:       func(c *fiber.Ctx) error { return c.SendStatus(http.StatusOK) },
+			setupHandler:       func(c fiber.Ctx) error { return c.SendStatus(http.StatusOK) },
 			traceparent:        "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
 			expectedStatusCode: http.StatusOK,
 			expectSpan:         true,
@@ -96,7 +96,7 @@ func TestWithTelemetry(t *testing.T) {
 			name:               "UUID in path",
 			path:               "/api/users/123e4567-e89b-12d3-a456-426614174000/profile",
 			method:             "GET",
-			setupHandler:       func(c *fiber.Ctx) error { return c.SendStatus(http.StatusOK) },
+			setupHandler:       func(c fiber.Ctx) error { return c.SendStatus(http.StatusOK) },
 			expectedStatusCode: http.StatusOK,
 			expectSpan:         true,
 		},
@@ -104,7 +104,7 @@ func TestWithTelemetry(t *testing.T) {
 			name:               "Swagger path bypass",
 			path:               "/swagger/api-docs",
 			method:             "GET",
-			setupHandler:       func(c *fiber.Ctx) error { return c.SendStatus(http.StatusOK) },
+			setupHandler:       func(c fiber.Ctx) error { return c.SendStatus(http.StatusOK) },
 			expectedStatusCode: http.StatusOK,
 			expectSpan:         false,
 			swaggerPath:        true,
@@ -138,7 +138,7 @@ func TestWithTelemetry(t *testing.T) {
 			mid := NewTelemetryMiddleware(tel)
 
 			app := fiber.New(fiber.Config{
-				ErrorHandler: func(c *fiber.Ctx, err error) error {
+				ErrorHandler: func(c fiber.Ctx, err error) error {
 					return c.Status(http.StatusInternalServerError).SendString(err.Error())
 				},
 			})
@@ -151,7 +151,7 @@ func TestWithTelemetry(t *testing.T) {
 				}
 			}
 
-			app.All(tt.path, func(c *fiber.Ctx) error {
+			app.All(tt.path, func(c fiber.Ctx) error {
 				return tt.setupHandler(c)
 			})
 
@@ -264,7 +264,7 @@ func TestWithTelemetryExcludedRoutes(t *testing.T) {
 			app := fiber.New()
 			app.Use(mid.WithTelemetry(tel, tt.excludedRoutes...))
 
-			app.All(tt.path, func(c *fiber.Ctx) error {
+			app.All(tt.path, func(c fiber.Ctx) error {
 				return c.SendStatus(http.StatusOK)
 			})
 
@@ -343,8 +343,8 @@ func TestEndTracingSpans(t *testing.T) {
 
 			app := fiber.New()
 
-			setupMiddleware := func(c *fiber.Ctx) error {
-				ctx := c.UserContext()
+			setupMiddleware := func(c fiber.Ctx) error {
+				ctx := c.Context()
 				if ctx == nil {
 					ctx = context.Background()
 				}
@@ -352,13 +352,13 @@ func TestEndTracingSpans(t *testing.T) {
 				if tt.setupCtx {
 					tracer := tp.Tracer("test")
 					ctx, _ = tracer.Start(ctx, "test-span")
-					c.SetUserContext(ctx)
+					c.SetContext(ctx)
 				}
 
 				return c.Next()
 			}
 
-			handler := func(c *fiber.Ctx) error {
+			handler := func(c fiber.Ctx) error {
 				return tt.handlerErr
 			}
 
@@ -400,7 +400,7 @@ func TestEndTracingSpans_CallsNextWithoutInitialContext(t *testing.T) {
 	mid := &TelemetryMiddleware{}
 	handlerCalled := false
 
-	app.Get("/test", mid.EndTracingSpans, func(c *fiber.Ctx) error {
+	app.Get("/test", mid.EndTracingSpans, func(c fiber.Ctx) error {
 		handlerCalled = true
 		return c.SendStatus(http.StatusNoContent)
 	})
@@ -422,9 +422,9 @@ func TestEndTracingSpans_EndsFinalContextSpan(t *testing.T) {
 	app := fiber.New()
 	mid := &TelemetryMiddleware{}
 
-	app.Get("/test", mid.EndTracingSpans, func(c *fiber.Ctx) error {
+	app.Get("/test", mid.EndTracingSpans, func(c fiber.Ctx) error {
 		ctx, _ := tp.Tracer("test").Start(context.Background(), "handler-span")
-		c.SetUserContext(ctx)
+		c.SetContext(ctx)
 		return c.SendStatus(http.StatusNoContent)
 	})
 
@@ -572,8 +572,8 @@ func TestExtractHTTPContext(t *testing.T) {
 
 	app := fiber.New()
 
-	app.Get("/test", func(c *fiber.Ctx) error {
-		ctx := tracing.ExtractHTTPContext(c.UserContext(), c)
+	app.Get("/test", func(c fiber.Ctx) error {
+		ctx := tracing.ExtractHTTPContext(c.Context(), c)
 
 		spanCtx := oteltrace.SpanContextFromContext(ctx)
 
@@ -663,8 +663,8 @@ func TestWithTelemetryConditionalTracePropagation(t *testing.T) {
 			app.Use(mid.WithTelemetry(tel))
 
 			var capturedSpanContext oteltrace.SpanContext
-			app.Get("/test", func(c *fiber.Ctx) error {
-				capturedSpanContext = oteltrace.SpanContextFromContext(c.UserContext())
+			app.Get("/test", func(c fiber.Ctx) error {
+				capturedSpanContext = oteltrace.SpanContextFromContext(c.Context())
 				return c.SendStatus(http.StatusOK)
 			})
 

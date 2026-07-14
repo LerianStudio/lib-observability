@@ -6,8 +6,8 @@ import (
 	"context"
 	"testing"
 
-	observability "github.com/LerianStudio/lib-observability"
-	constant "github.com/LerianStudio/lib-observability/constants"
+	observability "github.com/LerianStudio/lib-observability/v2"
+	constant "github.com/LerianStudio/lib-observability/v2/constants"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"go.opentelemetry.io/otel/attribute"

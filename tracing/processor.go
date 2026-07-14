@@ -4,8 +4,8 @@ import (
 	"context"
 	"strings"
 
-	observability "github.com/LerianStudio/lib-observability"
-	constant "github.com/LerianStudio/lib-observability/constants"
+	observability "github.com/LerianStudio/lib-observability/v2"
+	constant "github.com/LerianStudio/lib-observability/v2/constants"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/baggage"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
