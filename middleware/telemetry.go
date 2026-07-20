@@ -78,10 +78,11 @@ type spanEndStateKey struct{}
 type spanEndState struct {
 	span trace.Span
 	// once guarantees End() is idempotent. It is retained (not superseded by
-	// owned) because it still protects the paths where owned does not apply:
-	// the gRPC interceptor pair (which ends via both defer and
-	// EndTracingSpansInterceptor) and the foreign/handler-created span on the
-	// HTTP fallback path. owned resolves ordering; once resolves double-end.
+	// owned) because it still protects the foreign/handler-created span on the
+	// HTTP and gRPC fallback paths (where owned==false and the span may be
+	// ended both by a defer and by the End middleware). owned resolves ordering
+	// (which middleware ends the span, and that it happens after finalization);
+	// once resolves double-end.
 	once sync.Once
 	// owned marks the span as exclusively finalized/ended by the middleware
 	// that created it (WithTelemetry). When set, EndTracingSpans must NOT end
@@ -521,13 +522,14 @@ func (tm *TelemetryMiddleware) WithTelemetryInterceptor(tl *tracing.Telemetry) g
 
 		ctx, span := tracer.Start(traceCtx, methodName, trace.WithSpanKind(trace.SpanKindServer))
 		endState := newSpanEndState(span)
+		// WithTelemetryInterceptor owns this span's lifecycle: it applies
+		// rpc.method / rpc.grpc.status_code / handler error status AFTER the
+		// handler returns (below), then ends the span via the defer. Marking it
+		// owned makes EndTracingSpansInterceptor skip it, so those post-handler
+		// attributes can't be dropped by a chain where the end interceptor
+		// unwinds first — mirroring the HTTP WithTelemetry/EndTracingSpans pair.
+		endState.owned = true
 
-		// Intentionally NOT marked owned (unlike WithTelemetry). The gRPC span is
-		// named from info.FullMethod (already low-cardinality, no PII) and has no
-		// post-handler rename to protect, so EndTracingSpansInterceptor may end it;
-		// once guards the resulting double-end. If a post-return rename is ever
-		// added to gRPC, set owned=true here to reinstate the ordering guarantee.
-		// See TRD ADR-001 (gRPC deferred as out of scope).
 		defer endState.End()
 
 		ctx = observability.ContextWithTracer(ctx, tracer)
@@ -565,6 +567,13 @@ func (tm *TelemetryMiddleware) EndTracingSpansInterceptor() grpc.UnaryServerInte
 	) (any, error) {
 		resp, err := handler(ctx, req)
 		if state := spanEndStateFromContext(ctx); state != nil {
+			// A span owned by WithTelemetryInterceptor is finalized and ended by
+			// that interceptor after it records post-handler attributes/status.
+			// Skip it here (same reasoning as the HTTP EndTracingSpans).
+			if state.owned {
+				return resp, err
+			}
+
 			state.End()
 			return resp, err
 		}

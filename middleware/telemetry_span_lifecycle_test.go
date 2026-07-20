@@ -180,6 +180,25 @@ func TestSpanLifecycle_MiddlewareOrderings(t *testing.T) {
 		// EndTracingSpans in the chain.
 		assertRootSpanEndedOnce(t, rec, wantName, route)
 	})
+
+	t.Run("EndTracingSpans registered before WithTelemetry (inverted order)", func(t *testing.T) {
+		app, rec := telemetryTestApp(t, func(app *fiber.App, mid *TelemetryMiddleware, tel *tracing.Telemetry) {
+			// Pathological order: EndTracingSpans is the OUTERMOST middleware, so
+			// it unwinds LAST — after WithTelemetry has finalized and ended its
+			// own owned span. EndTracingSpans must find the owned state and skip
+			// it (no double-end, no lost finalization).
+			app.Use(mid.EndTracingSpans)
+			app.Use(mid.WithTelemetry(tel))
+			app.Get(route, handler)
+		})
+
+		resp, err := app.Test(httptest.NewRequest(http.MethodGet, concretePath, nil))
+		require.NoError(t, err)
+		defer func() { require.NoError(t, resp.Body.Close()) }()
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+		assertRootSpanEndedOnce(t, rec, wantName, route)
+	})
 }
 
 // TestWithTelemetry_SpanNameUsesRouteTemplate is the primary anti-cardinality /

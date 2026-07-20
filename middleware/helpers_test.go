@@ -9,6 +9,7 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestIsRouteExcludedFromList(t *testing.T) {
@@ -57,7 +58,7 @@ func TestIsRouteExcludedFromList(t *testing.T) {
 
 			req := httptest.NewRequest(http.MethodGet, tc.path, nil)
 			resp, err := app.Test(req)
-			assert.NoError(t, err)
+			require.NoError(t, err)
 			defer func() { _ = resp.Body.Close() }()
 
 			assert.Equal(t, tc.want, got, "isRouteExcludedFromList(path=%q, excluded=%v)", tc.path, tc.excluded)
@@ -88,7 +89,7 @@ func TestRouteAttribute_MatchedRoute(t *testing.T) {
 	})
 
 	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/users/42", nil))
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer func() { _ = resp.Body.Close() }()
 
 	assert.True(t, gotPresent, "matched route must be present")
@@ -115,7 +116,7 @@ func TestRouteAttribute_UnmatchedCatchAll404(t *testing.T) {
 	})
 
 	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/definitely/not/registered", nil))
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer func() { _ = resp.Body.Close() }()
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
 
@@ -141,7 +142,7 @@ func TestRouteAttribute_RegisteredRoot(t *testing.T) {
 	})
 
 	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/", nil))
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer func() { _ = resp.Body.Close() }()
 
 	assert.True(t, gotPresent, "registered root handler must retain the route")
