@@ -575,6 +575,7 @@ func (tm *TelemetryMiddleware) EndTracingSpansInterceptor() grpc.UnaryServerInte
 			}
 
 			state.End()
+
 			return resp, err
 		}
 
