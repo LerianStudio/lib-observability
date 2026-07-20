@@ -7,7 +7,6 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -172,19 +171,24 @@ func TestWithTelemetry(t *testing.T) {
 			if tt.expectSpan && !tt.nilTelemetry && !tt.swaggerPath {
 				require.GreaterOrEqual(t, len(spans), 1, "Expected at least one span to be created")
 
-				expectedPath := tt.path
-				if strings.Contains(tt.path, "123e4567-e89b-12d3-a456-426614174000") {
-					expectedPath = replaceUUIDWithPlaceholder(tt.path)
-				}
+				// After the fix the span is named "{method} {route template}".
+				// These tests register the route with app.All(tt.path, ...), so
+				// the matched route template IS tt.path verbatim (no :param
+				// placeholder). The span name therefore equals method+" "+tt.path.
+				// Note: the concrete path here doubles as the route template only
+				// because the route is registered literally; a real :param route
+				// would yield the template, never the concrete value (asserted in
+				// TestWithTelemetry_SpanNameUsesRouteTemplate).
+				expectedName := tt.method + " " + tt.path
 
 				spanFound := false
 				for _, span := range spans {
-					if span.Name() == tt.method+" "+expectedPath {
+					if span.Name() == expectedName {
 						spanFound = true
 						break
 					}
 				}
-				assert.True(t, spanFound, "Expected span with name %s not found", tt.method+" "+expectedPath)
+				assert.True(t, spanFound, "Expected span with name %s not found", expectedName)
 			} else if tt.swaggerPath || tt.nilTelemetry {
 				assert.Empty(t, spans, "Expected no spans for swagger path or nil telemetry")
 			}
@@ -281,7 +285,10 @@ func TestWithTelemetryExcludedRoutes(t *testing.T) {
 			if tt.expectSpan {
 				require.GreaterOrEqual(t, len(spans), 1, "Expected at least one span to be created")
 
-				expectedSpanName := tt.method + " " + replaceUUIDWithPlaceholder(tt.path)
+				// Route registered literally via app.All(tt.path, ...), so the
+				// matched template equals tt.path and the span is named
+				// "{method} {template}".
+				expectedSpanName := tt.method + " " + tt.path
 				spanFound := false
 				for _, span := range spans {
 					if span.Name() == expectedSpanName {
