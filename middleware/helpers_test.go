@@ -9,6 +9,7 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestIsRouteExcludedFromList(t *testing.T) {
@@ -57,10 +58,93 @@ func TestIsRouteExcludedFromList(t *testing.T) {
 
 			req := httptest.NewRequest(http.MethodGet, tc.path, nil)
 			resp, err := app.Test(req)
-			assert.NoError(t, err)
+			require.NoError(t, err)
 			defer func() { _ = resp.Body.Close() }()
 
 			assert.Equal(t, tc.want, got, "isRouteExcludedFromList(path=%q, excluded=%v)", tc.path, tc.excluded)
 		})
 	}
+}
+
+// TestRouteAttribute_NilContext verifies the nil-context guard returns absent.
+func TestRouteAttribute_NilContext(t *testing.T) {
+	route, present := routeAttribute(nil, http.StatusOK)
+	assert.False(t, present, "nil ctx must report the route as absent")
+	assert.Empty(t, route)
+}
+
+// TestRouteAttribute_MatchedRoute verifies that a matched :param route yields
+// the route template (never the concrete path) with present==true.
+func TestRouteAttribute_MatchedRoute(t *testing.T) {
+	app := fiber.New()
+
+	var (
+		gotRoute   string
+		gotPresent bool
+	)
+
+	app.Get("/api/users/:id", func(c fiber.Ctx) error {
+		gotRoute, gotPresent = routeAttribute(c, http.StatusOK)
+		return c.SendStatus(http.StatusOK)
+	})
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/users/42", nil))
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.True(t, gotPresent, "matched route must be present")
+	assert.Equal(t, "/api/users/:id", gotRoute,
+		"must return the route template, never the concrete path")
+}
+
+// TestRouteAttribute_UnmatchedCatchAll404 verifies the Fiber catch-all guard:
+// an unmatched request (effective 404, Route().Path=="/", request path != "/")
+// reports the route as absent so callers can omit http.route.
+func TestRouteAttribute_UnmatchedCatchAll404(t *testing.T) {
+	app := fiber.New()
+
+	var (
+		gotRoute   string
+		gotPresent bool
+	)
+
+	// A catch-all middleware runs for the unmatched path so we can inspect the
+	// context Fiber assembled for the 404. No route is registered for the path.
+	app.Use(func(c fiber.Ctx) error {
+		gotRoute, gotPresent = routeAttribute(c, http.StatusNotFound)
+		return c.Next()
+	})
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/definitely/not/registered", nil))
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+
+	assert.False(t, gotPresent,
+		"unmatched catch-all 404 must report the route as absent")
+	assert.Empty(t, gotRoute)
+}
+
+// TestRouteAttribute_RegisteredRoot verifies that a legitimately-registered
+// root ("/") handler retains the route (present==true), distinguishing it from
+// the catch-all 404 case that also exposes Route().Path=="/".
+func TestRouteAttribute_RegisteredRoot(t *testing.T) {
+	app := fiber.New()
+
+	var (
+		gotRoute   string
+		gotPresent bool
+	)
+
+	app.Get("/", func(c fiber.Ctx) error {
+		gotRoute, gotPresent = routeAttribute(c, http.StatusOK)
+		return c.SendStatus(http.StatusOK)
+	})
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/", nil))
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.True(t, gotPresent, "registered root handler must retain the route")
+	assert.Equal(t, "/", gotRoute)
 }

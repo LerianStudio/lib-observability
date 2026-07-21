@@ -77,7 +77,21 @@ type spanEndStateKey struct{}
 
 type spanEndState struct {
 	span trace.Span
+	// once guarantees End() is idempotent. It is retained (not superseded by
+	// owned) because it still protects the foreign/handler-created span on the
+	// HTTP and gRPC fallback paths (where owned==false and the span may be
+	// ended both by a defer and by the End middleware). owned resolves ordering
+	// (which middleware ends the span, and that it happens after finalization);
+	// once resolves double-end.
 	once sync.Once
+	// owned marks the span as exclusively finalized/ended by the middleware
+	// that created it (WithTelemetry). When set, EndTracingSpans must NOT end
+	// it: the owning middleware ends it via its own deferred End() AFTER
+	// applying the route template name and post-c.Next() attributes. This
+	// removes the ordering hazard where a separately-registered EndTracingSpans
+	// unwinds first (Fiber LIFO) and ends the span before finalization,
+	// silently discarding http.route/status/error.type and the span rename.
+	owned bool
 }
 
 func newSpanEndState(span trace.Span) *spanEndState {
@@ -210,7 +224,14 @@ func (tm *TelemetryMiddleware) WithTelemetry(tl *tracing.Telemetry, excludedRout
 		userAgent := string([]byte(c.Get(headerUserAgent)))
 
 		tracer := effectiveTelemetry.TracerProvider.Tracer(effectiveTelemetry.LibraryName)
-		routePathWithMethod := method + " " + replaceUUIDWithPlaceholder(c.Path())
+		// Create the span with a method-only name (e.g. "GET"). The route
+		// template is not reliably known until after routing (c.Next), and the
+		// concrete path carries PII / unbounded cardinality (IDs, Pix keys). A
+		// method-only creation name keeps PII out of the name the sampler sees
+		// and out of spans that are dropped or never match a route. After
+		// c.Next, applyTelemetrySpanAttributes renames the span to
+		// "{method} {route template}" once the route is known.
+		spanName := method
 
 		traceCtx := c.Context()
 		// Compatibility note: trace extraction currently trusts the internal-service
@@ -220,8 +241,13 @@ func (tm *TelemetryMiddleware) WithTelemetry(tl *tracing.Telemetry, excludedRout
 			traceCtx = tracing.ExtractHTTPContext(traceCtx, c)
 		}
 
-		ctx, span := tracer.Start(traceCtx, routePathWithMethod, trace.WithSpanKind(trace.SpanKindServer))
+		ctx, span := tracer.Start(traceCtx, spanName, trace.WithSpanKind(trace.SpanKindServer))
 		endState := newSpanEndState(span)
+		// WithTelemetry owns this span's lifecycle: it is the sole ender (via the
+		// defer below, which fires on return AFTER applyTelemetrySpanAttributes
+		// has renamed and finalized the span). EndTracingSpans, if also
+		// registered, detects the owned flag and does NOT end it.
+		endState.owned = true
 
 		defer endState.End()
 
@@ -294,6 +320,17 @@ func applyTelemetrySpanAttributes(
 	}
 	if routePath, present := routeAttribute(c, statusCode); present {
 		spanAttrs = append(spanAttrs, attribute.String("http.route", routePath))
+
+		// Rename the span from its method-only creation name to the OTel
+		// convention "{method} {http.route}" now that routing has resolved the
+		// low-cardinality, PII-free route template. Guarded by IsRecording so
+		// the intent ("skip if already ended/not recording") is explicit and
+		// testable rather than relying on the post-End() no-op. When no route
+		// matched (routeAttribute present=false, e.g. catch-all 404) the
+		// method-only name is left intact and http.route is omitted.
+		if span.IsRecording() {
+			span.SetName(req.method + " " + routePath)
+		}
 	}
 
 	if req.methodReplaced {
@@ -410,7 +447,18 @@ func (tm *TelemetryMiddleware) EndTracingSpans(c fiber.Ctx) error {
 	}
 
 	if state := spanEndStateFromContext(endCtx); state != nil {
+		// A span owned by WithTelemetry is finalized and ended by WithTelemetry
+		// itself (after it applies the route template name and post-c.Next
+		// attributes). Ending it here would be a no-op at best and, due to
+		// Fiber's LIFO unwinding, could race ahead of that finalization and
+		// discard the rename/attributes. Return early and let the owning
+		// middleware end it.
+		if state.owned {
+			return err
+		}
+
 		state.End()
+
 		return err
 	}
 
@@ -474,6 +522,13 @@ func (tm *TelemetryMiddleware) WithTelemetryInterceptor(tl *tracing.Telemetry) g
 
 		ctx, span := tracer.Start(traceCtx, methodName, trace.WithSpanKind(trace.SpanKindServer))
 		endState := newSpanEndState(span)
+		// WithTelemetryInterceptor owns this span's lifecycle: it applies
+		// rpc.method / rpc.grpc.status_code / handler error status AFTER the
+		// handler returns (below), then ends the span via the defer. Marking it
+		// owned makes EndTracingSpansInterceptor skip it, so those post-handler
+		// attributes can't be dropped by a chain where the end interceptor
+		// unwinds first — mirroring the HTTP WithTelemetry/EndTracingSpans pair.
+		endState.owned = true
 
 		defer endState.End()
 
@@ -512,7 +567,15 @@ func (tm *TelemetryMiddleware) EndTracingSpansInterceptor() grpc.UnaryServerInte
 	) (any, error) {
 		resp, err := handler(ctx, req)
 		if state := spanEndStateFromContext(ctx); state != nil {
+			// A span owned by WithTelemetryInterceptor is finalized and ended by
+			// that interceptor after it records post-handler attributes/status.
+			// Skip it here (same reasoning as the HTTP EndTracingSpans).
+			if state.owned {
+				return resp, err
+			}
+
 			state.End()
+
 			return resp, err
 		}
 

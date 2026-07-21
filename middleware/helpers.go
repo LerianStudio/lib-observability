@@ -13,9 +13,6 @@ import (
 	"google.golang.org/grpc/metadata"
 )
 
-// uuidPattern matches standard UUID v4 strings (8-4-4-4-12 hex digits).
-var uuidPattern = regexp.MustCompile(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}`)
-
 // internalServicePattern matches Lerian internal service user-agent strings.
 var internalServicePattern = regexp.MustCompile(`^[\w-]+/[\d.]+\s+LerianStudio$`)
 
@@ -217,11 +214,6 @@ func getGRPCUserAgent(ctx context.Context) string {
 // isInternalLerianService reports whether a user-agent belongs to a Lerian internal service.
 func isInternalLerianService(userAgent string) bool {
 	return internalServicePattern.MatchString(userAgent)
-}
-
-// replaceUUIDWithPlaceholder replaces UUIDs with a placeholder in a given path string.
-func replaceUUIDWithPlaceholder(path string) string {
-	return uuidPattern.ReplaceAllString(path, ":id")
 }
 
 // isNilOrEmptyString reports whether a string pointer is nil or the trimmed value is empty.
