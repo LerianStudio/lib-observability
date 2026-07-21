@@ -67,7 +67,7 @@ Values are normalized (trimmed, control chars stripped) and dropped silently whe
 Example for custom metrics:
 
 ```go
-import "github.com/LerianStudio/lib-observability/middleware"
+import "github.com/LerianStudio/lib-observability/v2/middleware"
 
 counter, _ := factory.Counter("orders.created")
 _ = counter.
