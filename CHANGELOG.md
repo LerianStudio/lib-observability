@@ -1,5 +1,21 @@
 # Lib-observability Changelog
 
+## [2.0.0](https://github.com/LerianStudio/lib-observability/releases/tag/v2.0.0)
+
+Features:
+- Migrate to Fiber `v3`, initiating a new major version `/v2`. (@rodrigodh)
+
+Fixes:
+- Update the import path in the README example to use the `/v2` path. (@gandalf-at-lerian)
+- Upgrade `golang.org/x/text` to `v0.39.0` to address a security vulnerability. (@rodrigodh)
+
+Improvements:
+- Accept the unmaintained `x/crypto/openpgp` issue `GO-2026-5932` in the CI process. (@rodrigodh)
+
+[Compare changes](https://github.com/LerianStudio/lib-observability/compare/v1.1.0...v2.0.0)
+
+---
+
 ## [1.1.0](https://github.com/LerianStudio/lib-observability/releases/tag/v1.1.0)
 
 - **Features:**
