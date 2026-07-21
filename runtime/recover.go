@@ -4,7 +4,7 @@ import (
 	"context"
 	"runtime/debug"
 
-	"github.com/LerianStudio/lib-observability/log"
+	"github.com/LerianStudio/lib-observability/v2/log"
 )
 
 // Logger defines the minimal logging interface required by runtime.
@@ -217,7 +217,7 @@ func recordPanicObservability(
 // Example (Fiber middleware):
 //
 //	recover.New(recover.Config{
-//	    StackTraceHandler: func(c *fiber.Ctx, panicValue any) {
+//	    StackTraceHandler: func(c fiber.Ctx, panicValue any) {
 //	        ctx := extractContext(c)
 //	        runtime.HandlePanicValue(ctx, logger, panicValue, "matcher", "http_handler")
 //	    },

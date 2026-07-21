@@ -3,7 +3,7 @@ package runtime
 import (
 	"context"
 
-	"github.com/LerianStudio/lib-observability/log"
+	"github.com/LerianStudio/lib-observability/v2/log"
 )
 
 // SafeGo launches a goroutine with panic recovery. If the goroutine panics,

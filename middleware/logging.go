@@ -11,10 +11,10 @@ import (
 	"strings"
 	"time"
 
-	observability "github.com/LerianStudio/lib-observability"
-	constant "github.com/LerianStudio/lib-observability/constants"
-	obslog "github.com/LerianStudio/lib-observability/log"
-	"github.com/gofiber/fiber/v2"
+	observability "github.com/LerianStudio/lib-observability/v2"
+	constant "github.com/LerianStudio/lib-observability/v2/constants"
+	obslog "github.com/LerianStudio/lib-observability/v2/log"
+	"github.com/gofiber/fiber/v3"
 	"go.opentelemetry.io/otel/attribute"
 	"google.golang.org/grpc"
 )
@@ -47,7 +47,7 @@ type RequestInfo struct {
 
 // ResponseMetricsWrapper stores response metadata used to finish RequestInfo.
 type ResponseMetricsWrapper struct {
-	Context    *fiber.Ctx
+	Context    fiber.Ctx
 	StatusCode int
 	Size       int
 }
@@ -130,7 +130,7 @@ func isNilLogger(logger obslog.Logger) bool {
 }
 
 // NewRequestInfo creates RequestInfo from a Fiber context.
-func NewRequestInfo(c *fiber.Ctx, obfuscationDisabled bool) *RequestInfo {
+func NewRequestInfo(c fiber.Ctx, obfuscationDisabled bool) *RequestInfo {
 	if c == nil {
 		return &RequestInfo{Date: time.Now().UTC()}
 	}
@@ -212,7 +212,7 @@ func (r *RequestInfo) FinishRequestInfo(rw *ResponseMetricsWrapper) {
 // WithExcludedRoutes to suppress additional paths without losing the
 // defaults.
 func WithHTTPLogging(opts ...LogMiddlewareOption) fiber.Handler {
-	return func(c *fiber.Ctx) error {
+	return func(c fiber.Ctx) error {
 		mid := buildOpts(opts...)
 
 		if isRouteExcludedFromList(c, mid.ExcludedRoutes) {
@@ -228,7 +228,7 @@ func WithHTTPLogging(opts ...LogMiddlewareOption) fiber.Handler {
 		info := NewRequestInfo(c, mid.ObfuscationDisabled)
 
 		requestID := c.Get(headerID)
-		ctx := c.UserContext()
+		ctx := c.Context()
 
 		if tenantID := ResolveTenantIDFromHTTP(c); tenantID != "" {
 			ctx = observability.ContextWithSpanAttributes(ctx, attribute.String(constant.AttrKeyTenantID, tenantID))
@@ -243,7 +243,7 @@ func WithHTTPLogging(opts ...LogMiddlewareOption) fiber.Handler {
 		}
 
 		ctx = observability.ContextWithLogger(ctx, logger)
-		c.SetUserContext(ctx)
+		c.SetContext(ctx)
 
 		err := c.Next()
 		statusCode := httpStatusCode(c, err)
@@ -260,13 +260,13 @@ func WithHTTPLogging(opts ...LogMiddlewareOption) fiber.Handler {
 			obslog.String("http_method", info.Method),
 			obslog.String("http_path", info.URI),
 			obslog.Int("http_latency_ms", int(info.Duration.Milliseconds())),
-		).Log(c.UserContext(), obslog.LevelInfo, info.CLFString())
+		).Log(c.Context(), obslog.LevelInfo, info.CLFString())
 
 		return err
 	}
 }
 
-func httpStatusCode(c *fiber.Ctx, err error) int {
+func httpStatusCode(c fiber.Ctx, err error) int {
 	statusCode := c.Response().StatusCode()
 	if err == nil {
 		return statusCode

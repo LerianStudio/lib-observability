@@ -6,7 +6,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/LerianStudio/lib-observability/metrics"
+	"github.com/LerianStudio/lib-observability/v2/metrics"
 	"github.com/stretchr/testify/assert"
 )
 

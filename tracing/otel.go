@@ -14,13 +14,13 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	observability "github.com/LerianStudio/lib-observability"
-	"github.com/LerianStudio/lib-observability/assert"
-	constant "github.com/LerianStudio/lib-observability/constants"
-	"github.com/LerianStudio/lib-observability/log"
-	"github.com/LerianStudio/lib-observability/metrics"
-	"github.com/LerianStudio/lib-observability/redaction"
-	"github.com/gofiber/fiber/v2"
+	observability "github.com/LerianStudio/lib-observability/v2"
+	"github.com/LerianStudio/lib-observability/v2/assert"
+	constant "github.com/LerianStudio/lib-observability/v2/constants"
+	"github.com/LerianStudio/lib-observability/v2/log"
+	"github.com/LerianStudio/lib-observability/v2/metrics"
+	"github.com/LerianStudio/lib-observability/v2/redaction"
+	"github.com/gofiber/fiber/v3"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -738,7 +738,7 @@ func truncateUTF8(s string, maxBytes int) string {
 
 // SetSpanAttributeForParam adds a request parameter attribute to the current context bag.
 // Sensitive parameter names (as determined by redaction.IsSensitiveField) are masked.
-func SetSpanAttributeForParam(c *fiber.Ctx, param, value, entityName string) {
+func SetSpanAttributeForParam(c fiber.Ctx, param, value, entityName string) {
 	if c == nil {
 		return
 	}
@@ -754,7 +754,7 @@ func SetSpanAttributeForParam(c *fiber.Ctx, param, value, entityName string) {
 		attrValue = "[REDACTED]"
 	}
 
-	c.SetUserContext(observability.ContextWithSpanAttributes(c.UserContext(), attribute.String(spanAttrKey, attrValue)))
+	c.SetContext(observability.ContextWithSpanAttributes(c.Context(), attribute.String(spanAttrKey, attrValue)))
 }
 
 // InjectTraceContext injects trace context into a generic text map carrier.
@@ -785,7 +785,7 @@ func InjectHTTPContext(ctx context.Context, headers http.Header) {
 }
 
 // ExtractHTTPContext extracts trace headers from a Fiber request.
-func ExtractHTTPContext(ctx context.Context, c *fiber.Ctx) context.Context {
+func ExtractHTTPContext(ctx context.Context, c fiber.Ctx) context.Context {
 	if c == nil {
 		return ctx
 	}

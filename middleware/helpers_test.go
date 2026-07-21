@@ -7,7 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v3"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -50,7 +50,7 @@ func TestIsRouteExcludedFromList(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			app := fiber.New()
 			var got bool
-			app.Use(func(c *fiber.Ctx) error {
+			app.Use(func(c fiber.Ctx) error {
 				got = isRouteExcludedFromList(c, tc.excluded)
 				return c.SendStatus(http.StatusNoContent)
 			})

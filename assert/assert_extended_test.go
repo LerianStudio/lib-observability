@@ -7,14 +7,14 @@ import (
 	"strings"
 	"testing"
 
-	constant "github.com/LerianStudio/lib-observability/constants"
-	"github.com/LerianStudio/lib-observability/log"
-	libRuntime "github.com/LerianStudio/lib-observability/runtime"
+	constant "github.com/LerianStudio/lib-observability/v2/constants"
+	"github.com/LerianStudio/lib-observability/v2/log"
+	libRuntime "github.com/LerianStudio/lib-observability/v2/runtime"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/metric/noop"
 	tracesdk "go.opentelemetry.io/otel/sdk/trace"
 
-	"github.com/LerianStudio/lib-observability/metrics"
+	"github.com/LerianStudio/lib-observability/v2/metrics"
 )
 
 func newTestMetricsFactory(t *testing.T) *metrics.MetricsFactory {
