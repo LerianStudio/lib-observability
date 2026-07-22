@@ -1,5 +1,17 @@
 # Lib-observability Changelog
 
+## [2.1.0](https://github.com/LerianStudio/lib-observability/releases/tag/v2.1.0)
+
+Features:
+- Add `zap.Slog` accessor for `slog`-compatible consumers. (@rodrigodh)
+
+Fixes:
+- Bump `google.golang.org/grpc` to `v1.82.1`. (@rodrigodh)
+
+[Compare changes](https://github.com/LerianStudio/lib-observability/compare/v2.0.0...v2.1.0)
+
+---
+
 ## [2.0.0](https://github.com/LerianStudio/lib-observability/releases/tag/v2.0.0)
 
 Features:
