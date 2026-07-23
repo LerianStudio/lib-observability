@@ -25,6 +25,9 @@ A lib emite **métricas OTLP** que vão: `app → OTel SDK (lib) → collector �
 
 ```go
 import (
+    "context"
+    "log"
+
     "github.com/LerianStudio/lib-observability/v2/tracing"
 )
 
@@ -33,10 +36,10 @@ tel, err := tracing.NewTelemetry(tracing.TelemetryConfig{
     ServiceName:               "ledger",              // service.name
     ServiceVersion:            "3.9.0",
     DeploymentEnv:             "production",
-    CollectorExporterEndpoint: "otel-collector:4317", // host:porta do collector OTLP gRPC
+    CollectorExporterEndpoint: "https://otel-collector:4318", // HTTPS em produção (ver nota abaixo)
     EnableTelemetry:           true,                  // sem isso = tudo no-op
     EnableRuntimeMetrics:      true,                  // liga go.* (goroutines/heap/gc). opt-in.
-    InsecureExporter:          true,                  // true em cluster interno (sem TLS)
+    InsecureExporter:          false,                 // produção: false. Ver nota de segurança.
 })
 if err != nil {
     // NewTelemetry pode retornar handle nil em falha — trate e SAIA aqui,
@@ -48,6 +51,7 @@ defer tel.ShutdownTelemetryWithContext(ctx) // flush/close no shutdown (ou tel.S
 ```
 
 - `NewTelemetry` já registra os providers globais (ApplyGlobals). Não precisa chamar de novo.
+- **Segurança do exporter (importante):** em ambiente `production`/`prd`, `InsecureExporter: true` faz o `NewTelemetry` **retornar erro** (o serviço não sobe) a menos que a env `ALLOW_INSECURE_OTEL="<justificativa>"` esteja definida. Em produção use endpoint **`https://`** com `InsecureExporter: false`. Só use `InsecureExporter: true` em `DeploymentEnv: "development"`/`"local"` (cluster interno sem TLS) — nesses ambientes é permitido.
 - `EnableTelemetry: false` → retorna telemetria no-op segura (nada quebra, nada emite). Útil em teste.
 - `EnableRuntimeMetrics: true` → emite `go.*` automaticamente (sem mais código).
 
