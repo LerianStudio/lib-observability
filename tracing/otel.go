@@ -15,13 +15,10 @@ import (
 	"time"
 	"unicode/utf8"
 
-	observability "github.com/LerianStudio/lib-observability/v2"
 	"github.com/LerianStudio/lib-observability/v2/assert"
 	constant "github.com/LerianStudio/lib-observability/v2/constants"
 	"github.com/LerianStudio/lib-observability/v2/log"
 	"github.com/LerianStudio/lib-observability/v2/metrics"
-	"github.com/LerianStudio/lib-observability/v2/redaction"
-	"github.com/gofiber/fiber/v3"
 	otelruntime "go.opentelemetry.io/contrib/instrumentation/runtime"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -800,27 +797,6 @@ func truncateUTF8(s string, maxBytes int) string {
 	return s
 }
 
-// SetSpanAttributeForParam adds a request parameter attribute to the current context bag.
-// Sensitive parameter names (as determined by redaction.IsSensitiveField) are masked.
-func SetSpanAttributeForParam(c fiber.Ctx, param, value, entityName string) {
-	if c == nil {
-		return
-	}
-
-	spanAttrKey := "app.request." + param
-	if entityName != "" && param == "id" {
-		spanAttrKey = "app.request." + entityName + "_id"
-	}
-
-	// Mask value if the parameter name is considered sensitive
-	attrValue := value
-	if redaction.IsSensitiveField(param) {
-		attrValue = "[REDACTED]"
-	}
-
-	c.SetContext(observability.ContextWithSpanAttributes(c.Context(), attribute.String(spanAttrKey, attrValue)))
-}
-
 // InjectTraceContext injects trace context into a generic text map carrier.
 func InjectTraceContext(ctx context.Context, carrier propagation.TextMapCarrier) {
 	if carrier == nil {
@@ -846,20 +822,6 @@ func InjectHTTPContext(ctx context.Context, headers http.Header) {
 	}
 
 	InjectTraceContext(ctx, propagation.HeaderCarrier(headers))
-}
-
-// ExtractHTTPContext extracts trace headers from a Fiber request.
-func ExtractHTTPContext(ctx context.Context, c fiber.Ctx) context.Context {
-	if c == nil {
-		return ctx
-	}
-
-	carrier := propagation.HeaderCarrier{}
-	for key, value := range c.Request().Header.All() {
-		carrier.Set(string(key), string(value))
-	}
-
-	return ExtractTraceContext(ctx, carrier)
 }
 
 // InjectGRPCContext injects trace context into gRPC metadata.

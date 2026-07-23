@@ -1,6 +1,6 @@
 //go:build unit
 
-package middleware
+package grpcmiddleware
 
 import (
 	"context"
@@ -20,10 +20,9 @@ import (
 )
 
 // findRPCDurationHistogram extracts a named RPC duration histogram data point
-// from a ManualReader collection, mirroring findDurationHistogram for the HTTP
-// metric. Returns nil if the metric is absent (used to assert non-recording
-// paths). When present it also locks the unit to seconds, matching the metric
-// contract (docs/metrics-contract.md).
+// from a ManualReader collection. Returns nil if the metric is absent (used to
+// assert non-recording paths). When present it also locks the unit to seconds,
+// matching the metric contract (docs/metrics-contract.md).
 func findRPCDurationHistogram(
 	t *testing.T,
 	reader *sdkmetric.ManualReader,
@@ -184,7 +183,7 @@ func TestWithTelemetryInterceptor_NilMetricsFactoryDoesNotRecord(t *testing.T) {
 		"nil MetricsFactory must not record rpc.server.duration")
 }
 
-// TestUnaryClientInterceptor_RecordsClientDurationOnSuccess verifies the new
+// TestUnaryClientInterceptor_RecordsClientDurationOnSuccess verifies the
 // client interceptor emits rpc.client.duration with rpc.system=grpc,
 // rpc.method, rpc.grpc.status_code=0 and NO tenant.id (client side omits it).
 func TestUnaryClientInterceptor_RecordsClientDurationOnSuccess(t *testing.T) {

@@ -7,23 +7,18 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"sync"
 	"testing"
 	"time"
 
-	"github.com/LerianStudio/lib-observability/v2/metrics"
 	"github.com/LerianStudio/lib-observability/v2/tracing"
 	"github.com/gofiber/fiber/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
-	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	oteltrace "go.opentelemetry.io/otel/trace"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/metadata"
 )
 
 // setupTestTracer sets up a test tracer provider and returns it along with a span recorder.
@@ -445,123 +440,6 @@ func TestEndTracingSpans_EndsFinalContextSpan(t *testing.T) {
 	assert.Equal(t, "handler-span", spanRecorder.Ended()[0].Name())
 }
 
-// TestGetMetricsCollectionInterval tests the getMetricsCollectionInterval function.
-func TestGetMetricsCollectionInterval(t *testing.T) {
-	tests := []struct {
-		name     string
-		envValue string
-		expected time.Duration
-	}{
-		{
-			name:     "default when not set",
-			envValue: "",
-			expected: DefaultMetricsCollectionInterval,
-		},
-		{
-			name:     "valid duration in seconds",
-			envValue: "10s",
-			expected: 10 * time.Second,
-		},
-		{
-			name:     "valid duration in milliseconds",
-			envValue: "500ms",
-			expected: 500 * time.Millisecond,
-		},
-		{
-			name:     "valid duration in minutes",
-			envValue: "1m",
-			expected: 1 * time.Minute,
-		},
-		{
-			name:     "invalid format falls back to default",
-			envValue: "invalid",
-			expected: DefaultMetricsCollectionInterval,
-		},
-		{
-			name:     "zero value falls back to default",
-			envValue: "0s",
-			expected: DefaultMetricsCollectionInterval,
-		},
-		{
-			name:     "negative value falls back to default",
-			envValue: "-5s",
-			expected: DefaultMetricsCollectionInterval,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if tt.envValue != "" {
-				t.Setenv("METRICS_COLLECTION_INTERVAL", tt.envValue)
-			} else {
-				t.Setenv("METRICS_COLLECTION_INTERVAL", "")
-			}
-
-			result := getMetricsCollectionInterval()
-			assert.Equal(t, tt.expected, result)
-		})
-	}
-}
-
-func resetMetricsCollectorState() {
-	metricsCollectorMu.Lock()
-	defer metricsCollectorMu.Unlock()
-
-	if metricsCollectorStarted && metricsCollectorShutdown != nil {
-		close(metricsCollectorShutdown)
-		time.Sleep(50 * time.Millisecond)
-	}
-
-	metricsCollectorShutdown = nil
-	metricsCollectorStarted = false
-	metricsCollectorOnce = &sync.Once{}
-	metricsCollectorInitErr = nil
-}
-
-func TestEnsureMetricsCollector_ReturnsErrorWhenMetricsFactoryNil(t *testing.T) {
-	resetMetricsCollectorState()
-	t.Cleanup(resetMetricsCollectorState)
-
-	mid := &TelemetryMiddleware{Telemetry: &tracing.Telemetry{
-		TelemetryConfig: tracing.TelemetryConfig{LibraryName: "test-library", EnableTelemetry: true},
-		MeterProvider:   sdkmetric.NewMeterProvider(),
-	}}
-
-	err := mid.ensureMetricsCollector()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "MetricsFactory is nil")
-	assert.False(t, metricsCollectorStarted)
-}
-
-func TestEnsureMetricsCollector_NoMeterProviderReturnsNil(t *testing.T) {
-	resetMetricsCollectorState()
-	t.Cleanup(resetMetricsCollectorState)
-
-	mid := &TelemetryMiddleware{Telemetry: &tracing.Telemetry{}}
-	require.NoError(t, mid.ensureMetricsCollector())
-	assert.False(t, metricsCollectorStarted)
-}
-
-func TestStopMetricsCollector_AllowsRestart(t *testing.T) {
-	resetMetricsCollectorState()
-	t.Cleanup(resetMetricsCollectorState)
-
-	mid := &TelemetryMiddleware{Telemetry: &tracing.Telemetry{
-		TelemetryConfig: tracing.TelemetryConfig{LibraryName: "test-library", EnableTelemetry: true},
-		MeterProvider:   sdkmetric.NewMeterProvider(),
-		MetricsFactory:  metrics.NewNopFactory(),
-	}}
-
-	require.NoError(t, mid.ensureMetricsCollector())
-	assert.True(t, metricsCollectorStarted)
-
-	StopMetricsCollector()
-	assert.False(t, metricsCollectorStarted)
-
-	require.NoError(t, mid.ensureMetricsCollector())
-	assert.True(t, metricsCollectorStarted)
-}
-
 // TestExtractHTTPContext tests the ExtractHTTPContext function from tracing package.
 func TestExtractHTTPContext(t *testing.T) {
 	ctx := context.Background()
@@ -580,7 +458,7 @@ func TestExtractHTTPContext(t *testing.T) {
 	app := fiber.New()
 
 	app.Get("/test", func(c fiber.Ctx) error {
-		ctx := tracing.ExtractHTTPContext(c.Context(), c)
+		ctx := ExtractHTTPContext(c.Context(), c)
 
 		spanCtx := oteltrace.SpanContextFromContext(ctx)
 
@@ -705,51 +583,6 @@ func TestWithTelemetryConditionalTracePropagation(t *testing.T) {
 	}
 }
 
-// TestGetGRPCUserAgent tests the getGRPCUserAgent helper function.
-func TestGetGRPCUserAgent(t *testing.T) {
-	tests := []struct {
-		name          string
-		setupMetadata func() context.Context
-		expectedUA    string
-		description   string
-	}{
-		{
-			name: "Valid user-agent in metadata",
-			setupMetadata: func() context.Context {
-				md := metadata.Pairs("user-agent", "midaz/1.0.0 LerianStudio")
-				return metadata.NewIncomingContext(context.Background(), md)
-			},
-			expectedUA:  "midaz/1.0.0 LerianStudio",
-			description: "Should extract user-agent from gRPC metadata",
-		},
-		{
-			name: "No metadata in context",
-			setupMetadata: func() context.Context {
-				return context.Background()
-			},
-			expectedUA:  "",
-			description: "Should return empty string when no metadata present",
-		},
-		{
-			name: "Metadata without user-agent",
-			setupMetadata: func() context.Context {
-				md := metadata.Pairs("authorization", "Bearer token")
-				return metadata.NewIncomingContext(context.Background(), md)
-			},
-			expectedUA:  "",
-			description: "Should return empty string when user-agent key not present",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			ctx := tt.setupMetadata()
-			result := getGRPCUserAgent(ctx)
-			assert.Equal(t, tt.expectedUA, result, tt.description)
-		})
-	}
-}
-
 // ---------------------------------------------------------------------------
 // sanitizeURL tests
 // ---------------------------------------------------------------------------
@@ -813,91 +646,4 @@ func TestSanitizeURL_RelativePath(t *testing.T) {
 
 	result := sanitizeURL("/api/v1/users?token=abc123")
 	assert.NotContains(t, result, "abc123")
-}
-
-// TestWithTelemetryInterceptorConditionalTracePropagation tests conditional trace propagation in gRPC interceptor.
-func TestWithTelemetryInterceptorConditionalTracePropagation(t *testing.T) {
-	tests := []struct {
-		name                 string
-		userAgent            string
-		traceparent          string
-		shouldPropagateTrace bool
-		description          string
-	}{
-		{
-			name:                 "Internal Lerian service via gRPC - should propagate trace",
-			userAgent:            "midaz/1.0.0 LerianStudio",
-			traceparent:          "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
-			shouldPropagateTrace: true,
-			description:          "Internal gRPC service should propagate trace context",
-		},
-		{
-			name:                 "External gRPC client - should NOT propagate trace",
-			userAgent:            "grpc-go/1.50.0",
-			traceparent:          "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
-			shouldPropagateTrace: false,
-			description:          "External gRPC client should create new root span",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			ctx := context.Background()
-
-			tp, spanRecorder := setupTestTracer(t)
-			defer func() {
-				_ = tp.Shutdown(ctx)
-			}()
-
-			oldTracerProvider := otel.GetTracerProvider()
-			otel.SetTracerProvider(tp)
-			defer otel.SetTracerProvider(oldTracerProvider)
-
-			tel := &tracing.Telemetry{
-				TelemetryConfig: tracing.TelemetryConfig{
-					LibraryName:     "test-library",
-					EnableTelemetry: true,
-				},
-				TracerProvider: tp,
-			}
-
-			mid := NewTelemetryMiddleware(tel)
-			interceptor := mid.WithTelemetryInterceptor(tel)
-
-			md := metadata.New(map[string]string{})
-			if tt.userAgent != "" {
-				md.Set("user-agent", tt.userAgent)
-			}
-			if tt.traceparent != "" {
-				md.Set("traceparent", tt.traceparent)
-			}
-			ctx = metadata.NewIncomingContext(ctx, md)
-
-			var capturedSpanContext oteltrace.SpanContext
-			handler := func(ctx context.Context, req any) (any, error) {
-				capturedSpanContext = oteltrace.SpanContextFromContext(ctx)
-				return "response", nil
-			}
-
-			info := &grpc.UnaryServerInfo{
-				FullMethod: "/test.Service/Method",
-			}
-
-			_, err := interceptor(ctx, "request", info, handler)
-			require.NoError(t, err)
-
-			spans := spanRecorder.Ended()
-			require.GreaterOrEqual(t, len(spans), 1, "Expected at least one span to be created")
-
-			if tt.shouldPropagateTrace {
-				assert.True(t, capturedSpanContext.IsValid(), "Span context should be valid for internal services")
-				assert.Equal(t, "4bf92f3577b34da6a3ce929d0e0e4736", capturedSpanContext.TraceID().String(),
-					"Trace ID should match the traceparent for internal gRPC services")
-			} else {
-				require.True(t, capturedSpanContext.IsValid(), "Expected middleware to attach a valid span context")
-				assert.NotEqual(t, "4bf92f3577b34da6a3ce929d0e0e4736", capturedSpanContext.TraceID().String(),
-					"Trace ID should be different from traceparent for external services")
-			}
-		})
-	}
 }

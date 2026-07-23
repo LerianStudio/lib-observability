@@ -25,6 +25,47 @@ Padronizar a emissão de métricas transversais (a lib emite por default, nome/u
 
 Arquivos: middleware/telemetry.go, tracing/otel.go, go.mod (+contrib/instrumentation/runtime v0.69.0), 3 test files (16 testes). Verificado: go test unit PASS, vet OK, lint 0, ManualReader (emissão real), zero label proibido, no-op safe.
 
+## DESACOPLAMENTO Fiber v3 ↔ core (✅ implementado, testado) — BREAKING
+
+Objetivo: tirar a dependência de `github.com/gofiber/fiber/v3` do núcleo da lib para que apps ainda em **Fiber v2** possam usar TUDO menos o middleware HTTP (core `NewTelemetry`, runtime metrics, messaging, gRPC, DB/cache).
+
+Causa raiz: `tracing/otel.go` importava `fiber/v3` só por 2 helpers HTTP. Isso contaminava o pacote `tracing` inteiro e, transitivamente, `messagingobs` (importa tracing), `runtime` e os interceptors gRPC — `go list -deps ./messagingobs` mostrava 13 deps de fiber.
+
+### O que mudou
+- **`tracing` agora é fiber-free.** Removido o import de `fiber/v3` (e `redaction`/`observability`, que só existiam por causa das 2 funções movidas).
+- **Novo pacote `grpcmiddleware/`** (fiber-free): interceptors gRPC saíram de `middleware` (que importa fiber). HTTP (`WithTelemetry`/`EndTracingSpans`) fica onde estava (fiber, correto).
+- **Novo pacote `telemetrycore/`** (fiber-free): coletor de métricas de sistema (singleton único), compartilhado por HTTP e gRPC — evita duas goroutines de coleta quando a app usa os dois transportes.
+
+### Símbolos movidos (BREAKING — ajustar import path nos callers)
+| Símbolo | Antes | Depois |
+|---|---|---|
+| `SetSpanAttributeForParam(c fiber.Ctx, ...)` | `tracing` (`.../v2/tracing`) | `middleware` (`.../v2/middleware`) |
+| `ExtractHTTPContext(ctx, c fiber.Ctx)` | `tracing` | `middleware` |
+| `WithTelemetryInterceptor` (gRPC) | `middleware.TelemetryMiddleware` | `grpcmiddleware.TelemetryMiddleware` |
+| `EndTracingSpansInterceptor` (gRPC) | `middleware.TelemetryMiddleware` | `grpcmiddleware.TelemetryMiddleware` |
+| `UnaryClientInterceptor` (gRPC) | `middleware.TelemetryMiddleware` | `grpcmiddleware.TelemetryMiddleware` |
+| `ResolveTenantIDFromGRPC` | `middleware` (mantido lá tb.) | também em `grpcmiddleware` |
+| `StopMetricsCollector` / `DefaultMetricsCollectionInterval` | `middleware` (mantidos p/ compat) | fonte agora em `telemetrycore` |
+
+Novo construtor gRPC: `grpcmiddleware.NewTelemetryMiddleware(tl)` (mesma assinatura de `middleware.NewTelemetryMiddleware`).
+
+### Fix externo pendente (midaz — outro repo, outro PR)
+`midaz` `pkg/net/http/withBody.go:235` usa `SetSpanAttributeForParam` importando de `tracing`. Trocar para o pacote `middleware`:
+`github.com/LerianStudio/lib-observability/v2/middleware.SetSpanAttributeForParam`.
+(Apps que consomem os interceptors gRPC via `middleware` também precisam trocar para `grpcmiddleware`.)
+
+### Verificação (`go list -deps`, deps de gofiber)
+| Pacote | Antes | Depois |
+|---|---|---|
+| `tracing` | 13 | **0** |
+| `messagingobs` | 13 | **0** |
+| `runtime` | 0 | 0 |
+| `grpcmiddleware` (gRPC) | (era `middleware`=13) | **0** |
+| `telemetrycore` | — | **0** |
+| `middleware` (HTTP `WithTelemetry`) | 13 | 13 (correto, inalterado) |
+
+Comportamento 100% preservado (só MOVE código; nenhuma lógica de métrica/telemetria alterada). `go test -tags=unit ./...` PASS em todos os pacotes; golangci-lint (wsl_v5) 0 issues. Core OTel mantido em v1.44.0.
+
 ## FASE 2 — Wrappers de auto-instrumentação (a implementar)
 
 | Feature | Métrica | Helper | Cobre |

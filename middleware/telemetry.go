@@ -1,5 +1,10 @@
-// Package middleware provides Fiber HTTP and gRPC telemetry middleware that
-// integrates with the lib-observability tracing and metrics packages.
+// Package middleware provides Fiber HTTP telemetry middleware that integrates
+// with the lib-observability tracing and metrics packages.
+//
+// The gRPC telemetry interceptors live in the sibling grpcmiddleware package,
+// which is Fiber-free so Fiber-v2 applications can consume them without pulling
+// in Fiber v3. Both packages share the single process-wide system-metrics
+// collector via telemetrycore.
 package middleware
 
 import (
@@ -21,10 +26,6 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
-	"google.golang.org/grpc"
-	grpccodes "google.golang.org/grpc/codes"
-	"google.golang.org/grpc/metadata"
-	"google.golang.org/grpc/status"
 )
 
 // httpServerRequestDurationMetric is the OpenTelemetry semantic-convention metric name
@@ -35,25 +36,6 @@ const httpServerRequestDurationMetric = "http.server.request.duration"
 // name for the number of in-flight HTTP server requests. Recorded as an Int64
 // UpDownCounter in the unitless "{request}" dimension.
 const httpServerActiveRequestsMetric = "http.server.active_requests"
-
-// rpcServerDurationMetric / rpcClientDurationMetric are the metric names for
-// gRPC server- and client-side call duration. Recorded as Float64 histograms in
-// seconds.
-//
-// Naming note (see docs/metrics-contract.md ¹): the OTel RPC semconv train is
-// mid-migration between the experimental `rpc.server.duration` and the RC
-// `rpc.server.call.duration`. We intentionally keep the experimental names so
-// the metric aligns with the span attributes this library already emits
-// (`rpc.grpc.status_code`, telemetry.go), giving operators one consistent RPC
-// vocabulary across traces and metrics. Revisit in lockstep when the span
-// attributes migrate to the RC names.
-const (
-	rpcServerDurationMetric = "rpc.server.duration"
-	rpcClientDurationMetric = "rpc.client.duration"
-)
-
-// rpcSystemGRPC is the rpc.system attribute value for gRPC calls.
-const rpcSystemGRPC = "grpc"
 
 // httpServerDurationBuckets follows the current OpenTelemetry HTTP semantic
 // conventions advisory layout for http.server.request.duration. Update only
@@ -85,36 +67,6 @@ func newHTTPServerDurationHistogram(meter metric.Meter) metric.Float64Histogram 
 	return hist
 }
 
-// rpcDurationBuckets follows the current OpenTelemetry advisory layout shared by
-// the HTTP and RPC signals (docs/metrics-contract.md). Update only in lockstep
-// with the spec.
-var rpcDurationBuckets = []float64{
-	0.005, 0.01, 0.025, 0.05, 0.075,
-	0.1, 0.25, 0.5, 0.75,
-	1, 2.5, 5, 7.5, 10,
-}
-
-// newRPCDurationHistogram builds a float64 seconds histogram for the given RPC
-// duration metric name on the provided meter. Returns nil if the meter is nil
-// or instrument creation fails - callers must treat nil as "do not record".
-func newRPCDurationHistogram(meter metric.Meter, name, description string) metric.Float64Histogram {
-	if meter == nil {
-		return nil
-	}
-
-	hist, err := meter.Float64Histogram(
-		name,
-		metric.WithUnit("s"),
-		metric.WithDescription(description),
-		metric.WithExplicitBucketBoundaries(rpcDurationBuckets...),
-	)
-	if err != nil {
-		return nil
-	}
-
-	return hist
-}
-
 // newActiveRequestsCounter builds the int64 UpDownCounter instrument for
 // http.server.active_requests on the given meter. Returns nil if the meter is
 // nil or instrument creation fails - callers must treat nil as "do not record".
@@ -133,21 +85,6 @@ func newActiveRequestsCounter(meter metric.Meter) metric.Int64UpDownCounter {
 	}
 
 	return counter
-}
-
-// classifyGRPCErrorType returns the low-cardinality error.type label for the
-// RPC duration metrics. It mirrors classifyHTTPErrorType's status-driven
-// approach: any non-OK gRPC status maps to the canonical code name (a bounded
-// enum, e.g. "NotFound", "Unavailable"), and OK maps to "" so successful calls
-// carry no error.type. Using the code name rather than the handler's Go error
-// type keeps the label set bounded regardless of how many distinct application
-// errors flow through.
-func classifyGRPCErrorType(code grpccodes.Code) string {
-	if code == grpccodes.OK {
-		return ""
-	}
-
-	return code.String()
 }
 
 // Header and metadata key constants used by the middleware.
@@ -214,7 +151,7 @@ func spanEndStateFromContext(ctx context.Context) *spanEndState {
 	return state
 }
 
-// TelemetryMiddleware wraps HTTP and gRPC handlers with tracing and metrics setup.
+// TelemetryMiddleware wraps Fiber HTTP handlers with tracing and metrics setup.
 type TelemetryMiddleware struct {
 	Telemetry *tracing.Telemetry
 }
@@ -338,7 +275,7 @@ func (tm *TelemetryMiddleware) WithTelemetry(tl *tracing.Telemetry, excludedRout
 		// User-Agent heuristic. This is an interoperability hint, not an authenticated
 		// trust boundary, and is preserved to avoid changing existing caller behavior.
 		if isInternalLerianService(userAgent) {
-			traceCtx = tracing.ExtractHTTPContext(traceCtx, c)
+			traceCtx = ExtractHTTPContext(traceCtx, c)
 		}
 
 		ctx, span := tracer.Start(traceCtx, spanName, trace.WithSpanKind(trace.SpanKindServer))
@@ -588,270 +525,6 @@ func (tm *TelemetryMiddleware) EndTracingSpans(c fiber.Ctx) error {
 	}
 
 	return err
-}
-
-// WithTelemetryInterceptor is a gRPC interceptor that adds tracing to the context.
-//
-// When the effective Telemetry has a non-nil MeterProvider AND a non-nil
-// MetricsFactory, the interceptor also records the rpc.server.duration
-// (Float64 seconds) histogram for every call, independently of whether tracing
-// is enabled - mirroring the HTTP WithTelemetry gate. Recording is best-effort:
-// nil telemetry / MeterProvider / MetricsFactory and instrument-creation errors
-// all silently skip the metric without affecting the request path.
-func (tm *TelemetryMiddleware) WithTelemetryInterceptor(tl *tracing.Telemetry) grpc.UnaryServerInterceptor {
-	// Build the server duration histogram once at interceptor-construction time,
-	// symmetric to the HTTP WithTelemetry construction-once block.
-	var serverDurationHistogram metric.Float64Histogram
-
-	bootstrapTelemetry := tl
-	if bootstrapTelemetry == nil && tm != nil {
-		bootstrapTelemetry = tm.Telemetry
-	}
-
-	if bootstrapTelemetry != nil &&
-		bootstrapTelemetry.MeterProvider != nil &&
-		bootstrapTelemetry.MetricsFactory != nil {
-		serverDurationHistogram = newRPCDurationHistogram(
-			bootstrapTelemetry.MeterProvider.Meter(bootstrapTelemetry.LibraryName),
-			rpcServerDurationMetric,
-			"Duration of gRPC server calls.",
-		)
-	}
-
-	return func(
-		ctx context.Context,
-		req any,
-		info *grpc.UnaryServerInfo,
-		handler grpc.UnaryHandler,
-	) (any, error) {
-		ctx = normalizeGRPCContext(ctx)
-
-		effectiveTelemetry := tl
-		if effectiveTelemetry == nil && tm != nil {
-			effectiveTelemetry = tm.Telemetry
-		}
-
-		if effectiveTelemetry == nil {
-			return handler(ctx, req)
-		}
-
-		requestID := resolveGRPCRequestID(ctx, req)
-		ctx = observability.ContextWithHeaderID(ctx, requestID)
-
-		methodName := "unknown"
-		if info != nil {
-			methodName = info.FullMethod
-		}
-
-		if effectiveTelemetry.TracerProvider == nil {
-			start := time.Now()
-			resp, err := handler(ctx, req)
-
-			recordRPCDuration(ctx, serverDurationHistogram, methodName, start, err,
-				ResolveTenantIDFromGRPC(ctx))
-
-			return resp, err
-		}
-
-		tracer := effectiveTelemetry.TracerProvider.Tracer(effectiveTelemetry.LibraryName)
-
-		tenantID := ResolveTenantIDFromGRPC(ctx)
-		if tenantID != "" {
-			ctx = observability.ContextWithSpanAttributes(ctx, attribute.String(constant.AttrKeyTenantID, tenantID))
-		}
-
-		ctx = observability.ContextWithSpanAttributes(ctx,
-			attribute.String("app.request.request_id", requestID),
-			attribute.String("grpc.method", methodName),
-		)
-
-		traceCtx := ctx
-		// Compatibility note: trace extraction currently trusts the internal-service
-		// User-Agent heuristic. This is an interoperability hint, not an authenticated
-		// trust boundary, and is preserved to avoid changing existing caller behavior.
-		if isInternalLerianService(getGRPCUserAgent(ctx)) {
-			md, _ := metadata.FromIncomingContext(ctx)
-			traceCtx = tracing.ExtractGRPCContext(ctx, md)
-		}
-
-		ctx, span := tracer.Start(traceCtx, methodName, trace.WithSpanKind(trace.SpanKindServer))
-		endState := newSpanEndState(span)
-		// WithTelemetryInterceptor owns this span's lifecycle: it applies
-		// rpc.method / rpc.grpc.status_code / handler error status AFTER the
-		// handler returns (below), then ends the span via the defer. Marking it
-		// owned makes EndTracingSpansInterceptor skip it, so those post-handler
-		// attributes can't be dropped by a chain where the end interceptor
-		// unwinds first — mirroring the HTTP WithTelemetry/EndTracingSpans pair.
-		endState.owned = true
-
-		defer endState.End()
-
-		ctx = observability.ContextWithTracer(ctx, tracer)
-		ctx = observability.ContextWithMetricFactory(ctx, effectiveTelemetry.MetricsFactory)
-		ctx = contextWithSpanEndState(ctx, endState)
-
-		err := tm.collectMetrics(ctx)
-		if err != nil {
-			tracing.HandleSpanError(span, "Failed to collect metrics", err)
-		}
-
-		// Capture start immediately before the handler so the duration metric
-		// reflects the handler chain, then record after the status is known.
-		start := time.Now()
-		resp, err := handler(ctx, req)
-
-		grpcStatusCode := status.Code(err)
-		span.SetAttributes(
-			attribute.String("rpc.method", methodName),
-			attribute.Int("rpc.grpc.status_code", int(grpcStatusCode)),
-		)
-
-		if err != nil {
-			tracing.HandleSpanError(span, "gRPC handler error", err)
-		}
-
-		recordRPCDuration(ctx, serverDurationHistogram, methodName, start, err, tenantID)
-
-		return resp, err
-	}
-}
-
-// recordRPCDuration emits an RPC duration histogram observation (server or
-// client) for a completed unary call. It is a no-op when the histogram is nil
-// (telemetry / MeterProvider / MetricsFactory absent or instrument creation
-// failed), so callers can invoke it unconditionally.
-//
-// Attribute set follows the metric contract (docs/metrics-contract.md):
-//   - rpc.system: always "grpc"
-//   - rpc.method: the gRPC full method (bounded set of registered methods)
-//   - rpc.grpc.status_code: the numeric gRPC status code, matching the span
-//     attribute this library already emits (telemetry.go)
-//   - error.type: only set for non-OK statuses, using the canonical code name
-//     (a bounded enum) to keep cardinality low
-//   - tenant.id: server-side only, passed by the caller (already resolved via
-//     ResolveTenantIDFromGRPC); the client path passes "" so the label is
-//     omitted, since a client does not own the tenant boundary
-func recordRPCDuration(
-	ctx context.Context,
-	hist metric.Float64Histogram,
-	methodName string,
-	start time.Time,
-	callErr error,
-	tenantID string,
-) {
-	if hist == nil {
-		return
-	}
-
-	grpcStatusCode := status.Code(callErr)
-
-	attrs := []attribute.KeyValue{
-		attribute.String("rpc.system", rpcSystemGRPC),
-		attribute.String("rpc.method", methodName),
-		attribute.Int("rpc.grpc.status_code", int(grpcStatusCode)),
-	}
-
-	if errType := classifyGRPCErrorType(grpcStatusCode); errType != "" {
-		attrs = append(attrs, attribute.String("error.type", errType))
-	}
-
-	if tenantID != "" {
-		attrs = append(attrs, attribute.String(constant.AttrKeyTenantID, tenantID))
-	}
-
-	hist.Record(ctx, time.Since(start).Seconds(), metric.WithAttributes(attrs...))
-}
-
-// EndTracingSpansInterceptor is a gRPC interceptor that ends the tracing spans.
-func (tm *TelemetryMiddleware) EndTracingSpansInterceptor() grpc.UnaryServerInterceptor {
-	return func(
-		ctx context.Context,
-		req any,
-		info *grpc.UnaryServerInfo,
-		handler grpc.UnaryHandler,
-	) (any, error) {
-		resp, err := handler(ctx, req)
-		if state := spanEndStateFromContext(ctx); state != nil {
-			// A span owned by WithTelemetryInterceptor is finalized and ended by
-			// that interceptor after it records post-handler attributes/status.
-			// Skip it here (same reasoning as the HTTP EndTracingSpans).
-			if state.owned {
-				return resp, err
-			}
-
-			state.End()
-
-			return resp, err
-		}
-
-		trace.SpanFromContext(ctx).End()
-
-		return resp, err
-	}
-}
-
-// UnaryClientInterceptor is a gRPC client interceptor that propagates trace
-// context on outgoing calls and records the rpc.client.duration (Float64
-// seconds) histogram.
-//
-// The histogram is built once at construction time and gated on a non-nil
-// MeterProvider AND MetricsFactory, mirroring the server interceptor. Trace
-// context is injected into the outgoing metadata via tracing.InjectGRPCContext
-// so downstream services join the trace instead of starting a new root.
-// Recording and injection are best-effort: nil telemetry degrades to a plain
-// pass-through to the invoker, never blocking the call.
-//
-// The client metric intentionally OMITS tenant.id: a client does not own the
-// tenant boundary, and the server side already attributes the call to a tenant.
-func (tm *TelemetryMiddleware) UnaryClientInterceptor(tl *tracing.Telemetry) grpc.UnaryClientInterceptor {
-	var clientDurationHistogram metric.Float64Histogram
-
-	bootstrapTelemetry := tl
-	if bootstrapTelemetry == nil && tm != nil {
-		bootstrapTelemetry = tm.Telemetry
-	}
-
-	if bootstrapTelemetry != nil &&
-		bootstrapTelemetry.MeterProvider != nil &&
-		bootstrapTelemetry.MetricsFactory != nil {
-		clientDurationHistogram = newRPCDurationHistogram(
-			bootstrapTelemetry.MeterProvider.Meter(bootstrapTelemetry.LibraryName),
-			rpcClientDurationMetric,
-			"Duration of gRPC client calls.",
-		)
-	}
-
-	return func(
-		ctx context.Context,
-		method string,
-		req, reply any,
-		cc *grpc.ClientConn,
-		invoker grpc.UnaryInvoker,
-		opts ...grpc.CallOption,
-	) error {
-		ctx = normalizeGRPCContext(ctx)
-
-		// Inject trace context into the outgoing metadata so the downstream
-		// server joins this trace. Merge with any metadata already on the
-		// outgoing context rather than overwriting it.
-		md, ok := metadata.FromOutgoingContext(ctx)
-		if !ok || md == nil {
-			md = metadata.New(nil)
-		} else {
-			md = md.Copy()
-		}
-
-		md = tracing.InjectGRPCContext(ctx, md)
-		ctx = metadata.NewOutgoingContext(ctx, md)
-
-		start := time.Now()
-		err := invoker(ctx, method, req, reply, cc, opts...)
-
-		// Client metric carries no tenant.id (empty string omits the label).
-		recordRPCDuration(ctx, clientDurationHistogram, method, start, err, "")
-
-		return err
-	}
 }
 
 // setRequestHeaderID ensures the Fiber request carries a unique correlation ID header.

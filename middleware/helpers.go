@@ -191,26 +191,6 @@ func sanitizeLogValue(raw string) string {
 	return replacer.Replace(raw)
 }
 
-// getGRPCUserAgent extracts the User-Agent from incoming gRPC metadata.
-// Returns empty string if the metadata is not present or doesn't contain user-agent.
-func getGRPCUserAgent(ctx context.Context) string {
-	if ctx == nil {
-		return ""
-	}
-
-	md, ok := metadata.FromIncomingContext(ctx)
-	if !ok || md == nil {
-		return ""
-	}
-
-	userAgents := md.Get(strings.ToLower(headerUserAgent))
-	if len(userAgents) == 0 {
-		return ""
-	}
-
-	return userAgents[0]
-}
-
 // isInternalLerianService reports whether a user-agent belongs to a Lerian internal service.
 func isInternalLerianService(userAgent string) bool {
 	return internalServicePattern.MatchString(userAgent)
