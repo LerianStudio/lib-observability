@@ -179,8 +179,18 @@ func (c dsnConnector) Driver() driver.Driver { return c.driver }
 
 // InstrumentDB returns a new *sql.DB that wraps the same underlying driver as
 // db with OpenTelemetry instrumentation, emitting db.client.operation.duration
-// (seconds) tagged with db.system.name=system. The caller keeps ownership of
-// the connection lifecycle; this helper only adds instrumentation.
+// (seconds) tagged with db.system.name=system.
+//
+// IMPORTANT — separate connection pool: the returned *sql.DB is backed by a
+// FRESH, independent connection pool (built via sql.OpenDB); it does NOT share
+// the pool of the input db. To avoid two live pools against the same database,
+// the caller MUST:
+//   1. use ONLY the returned handle going forward, and Close() the original db;
+//   2. re-apply any pool tuning (SetMaxOpenConns / SetMaxIdleConns /
+//      SetConnMaxLifetime / SetConnMaxIdleTime) on the RETURNED handle — those
+//      settings are per-*sql.DB and are NOT carried over from the original.
+// The caller keeps ownership of the connection lifecycle; this helper only adds
+// instrumentation.
 //
 // Because a *sql.DB does not expose its DSN, supply it via WithDSN when the
 // driver needs it to open connections (most do). When no DSN is given the

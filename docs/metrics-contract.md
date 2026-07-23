@@ -35,7 +35,7 @@
 | `messaging.process.duration` (consume) | Histogram | s | messaging.system, messaging.operation.name, messaging.destination.template, messaging.consumer.group.name, error.type | (Fase 2) |
 | `go.*` (runtime) | Gauge/Counter/Hist | várias | (dimensões fixas do contrib/runtime) | (T3) |
 
-¹ **Nota gRPC (validar na T2):** o train contrib atual pode emitir `rpc.server.duration` (experimental, este contrato) ou `rpc.server.call.duration` (RC, semconv). Confirmar o nome contra o pacote pinado no momento da T2 e alinhar. Manter `rpc.grpc.status_code` OU `rpc.response.status_code` conforme o que o interceptor da lib emite (hoje o span usa `rpc.grpc.status_code`, telemetry.go:549).
+¹ **Nota gRPC (validar na T2):** o train contrib atual pode emitir `rpc.server.duration` (experimental, este contrato) ou `rpc.server.call.duration` (RC, semconv). Confirmar o nome contra o pacote pinado no momento da T2 e alinhar. Manter `rpc.grpc.status_code` OU `rpc.response.status_code` conforme o que o interceptor da lib emite (hoje o span/métrica usam `rpc.grpc.status_code`, setado em `grpcmiddleware.WithTelemetryInterceptor` / `recordRPCDuration`).
 
 ## PROIBIDO como label (PII / cardinalidade ilimitada)
 
