@@ -23,23 +23,30 @@ A lib emite **métricas OTLP** que vão: `app → OTel SDK (lib) → collector �
 
 ## 1. Bootstrap (obrigatório, uma vez, no início do serviço)
 
+> **NUNCA hard-code endpoint/URL no código.** Toda configuração vem de **variáveis de ambiente** (injetadas pelo Helm). Use os nomes canônicos já adotados nos serviços Lerian (ver `.env.example`): `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_RESOURCE_SERVICE_NAME`, `OTEL_RESOURCE_SERVICE_VERSION`, `OTEL_RESOURCE_DEPLOYMENT_ENVIRONMENT`, `OTEL_LIBRARY_NAME`, `ENABLE_TELEMETRY`, `ENV_NAME`.
+
 ```go
 import (
     "context"
     "log"
+    "os"
+    "strconv"
 
     "github.com/LerianStudio/lib-observability/v2/tracing"
 )
 
+enableTel, _ := strconv.ParseBool(os.Getenv("ENABLE_TELEMETRY"))
+insecure, _  := strconv.ParseBool(os.Getenv("OTEL_EXPORTER_OTLP_INSECURE")) // opcional; default false
+
 tel, err := tracing.NewTelemetry(tracing.TelemetryConfig{
-    LibraryName:               "ledger",              // vira o Meter/Tracer scope
-    ServiceName:               "ledger",              // service.name
-    ServiceVersion:            "3.9.0",
-    DeploymentEnv:             "production",
-    CollectorExporterEndpoint: "https://otel-collector:4318", // HTTPS em produção (ver nota abaixo)
-    EnableTelemetry:           true,                  // sem isso = tudo no-op
-    EnableRuntimeMetrics:      true,                  // liga go.* (goroutines/heap/gc). opt-in.
-    InsecureExporter:          false,                 // produção: false. Ver nota de segurança.
+    LibraryName:               os.Getenv("OTEL_LIBRARY_NAME"),
+    ServiceName:               os.Getenv("OTEL_RESOURCE_SERVICE_NAME"),
+    ServiceVersion:            os.Getenv("OTEL_RESOURCE_SERVICE_VERSION"),
+    DeploymentEnv:             os.Getenv("OTEL_RESOURCE_DEPLOYMENT_ENVIRONMENT"), // ou ENV_NAME
+    CollectorExporterEndpoint: os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),         // do Helm — NUNCA literal
+    EnableTelemetry:           enableTel,
+    EnableRuntimeMetrics:      true, // liga go.* (goroutines/heap/gc). opt-in.
+    InsecureExporter:          insecure,
 })
 if err != nil {
     // NewTelemetry pode retornar handle nil em falha — trate e SAIA aqui,
@@ -50,9 +57,10 @@ ctx := context.Background() // ctx de shutdown
 defer tel.ShutdownTelemetryWithContext(ctx) // flush/close no shutdown (ou tel.ShutdownTelemetry() sem ctx)
 ```
 
+- Endpoint, service name, env etc. vêm SEMPRE de env (Helm). O `.env.example` do serviço documenta os valores por ambiente. O código só lê `os.Getenv(...)`.
 - `NewTelemetry` já registra os providers globais (ApplyGlobals). Não precisa chamar de novo.
-- **Segurança do exporter (importante):** em ambiente `production`/`prd`, `InsecureExporter: true` faz o `NewTelemetry` **retornar erro** (o serviço não sobe) a menos que a env `ALLOW_INSECURE_OTEL="<justificativa>"` esteja definida. Em produção use endpoint **`https://`** com `InsecureExporter: false`. Só use `InsecureExporter: true` em `DeploymentEnv: "development"`/`"local"` (cluster interno sem TLS) — nesses ambientes é permitido.
-- `EnableTelemetry: false` → retorna telemetria no-op segura (nada quebra, nada emite). Útil em teste.
+- **Segurança do exporter:** em ambiente `production`/`prd`, `InsecureExporter: true` faz o `NewTelemetry` **retornar erro** (o serviço não sobe) a menos que a env `ALLOW_INSECURE_OTEL="<justificativa>"` esteja definida. Em produção o `OTEL_EXPORTER_OTLP_ENDPOINT` deve ser `https://...` e `InsecureExporter` false. Insecure só em `development`/`local` (cluster interno sem TLS). Como isso vem de env, é o Helm de cada ambiente que decide — o código não fixa nada.
+- `EnableTelemetry: false` (env `ENABLE_TELEMETRY=false`) → telemetria no-op segura (nada quebra, nada emite). Padrão em dev/teste.
 - `EnableRuntimeMetrics: true` → emite `go.*` automaticamente (sem mais código).
 
 ---
