@@ -39,10 +39,12 @@ import (
 // silenciosamente — "ture" não deve virar telemetria desligada sem aviso).
 parseBoolEnv := func(key string) (bool, error) {
     v, ok := os.LookupEnv(key)
-    if !ok || v == "" {
-        return false, nil // não setada = default false
+    if !ok {
+        return false, nil // NÃO setada = default false
     }
-    return strconv.ParseBool(v) // valor inválido retorna erro
+    // setada (mesmo que vazia): valida. Valor vazio/inválido → erro visível,
+    // p/ um valor vazio do Helm não desligar telemetria silenciosamente.
+    return strconv.ParseBool(v)
 }
 
 enableTel, err := parseBoolEnv("ENABLE_TELEMETRY")
