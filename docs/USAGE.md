@@ -35,15 +35,34 @@ import (
     "github.com/LerianStudio/lib-observability/v2/tracing"
 )
 
-enableTel, _ := strconv.ParseBool(os.Getenv("ENABLE_TELEMETRY"))
-insecure, _  := strconv.ParseBool(os.Getenv("OTEL_EXPORTER_OTLP_INSECURE")) // opcional; default false
+// parseBoolEnv: false quando NÃO setada; erro em valor inválido (não engole typo
+// silenciosamente — "ture" não deve virar telemetria desligada sem aviso).
+parseBoolEnv := func(key string) (bool, error) {
+    v, ok := os.LookupEnv(key)
+    if !ok || v == "" {
+        return false, nil // não setada = default false
+    }
+    return strconv.ParseBool(v) // valor inválido retorna erro
+}
+
+enableTel, err := parseBoolEnv("ENABLE_TELEMETRY")
+if err != nil { log.Fatalf("ENABLE_TELEMETRY inválido: %v", err) }
+insecure, err := parseBoolEnv("OTEL_EXPORTER_OTLP_INSECURE")
+if err != nil { log.Fatalf("OTEL_EXPORTER_OTLP_INSECURE inválido: %v", err) }
+
+// DeploymentEnv: prefere OTEL_RESOURCE_DEPLOYMENT_ENVIRONMENT; cai p/ ENV_NAME
+// se a primeira não estiver setada (ambos são usados nos .env dos serviços).
+deploymentEnv := os.Getenv("OTEL_RESOURCE_DEPLOYMENT_ENVIRONMENT")
+if deploymentEnv == "" {
+    deploymentEnv = os.Getenv("ENV_NAME")
+}
 
 tel, err := tracing.NewTelemetry(tracing.TelemetryConfig{
     LibraryName:               os.Getenv("OTEL_LIBRARY_NAME"),
     ServiceName:               os.Getenv("OTEL_RESOURCE_SERVICE_NAME"),
     ServiceVersion:            os.Getenv("OTEL_RESOURCE_SERVICE_VERSION"),
-    DeploymentEnv:             os.Getenv("OTEL_RESOURCE_DEPLOYMENT_ENVIRONMENT"), // ou ENV_NAME
-    CollectorExporterEndpoint: os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),         // do Helm — NUNCA literal
+    DeploymentEnv:             deploymentEnv,
+    CollectorExporterEndpoint: os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"), // do Helm — NUNCA literal
     EnableTelemetry:           enableTel,
     EnableRuntimeMetrics:      true, // liga go.* (goroutines/heap/gc). opt-in.
     InsecureExporter:          insecure,
