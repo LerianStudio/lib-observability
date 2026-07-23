@@ -38,7 +38,12 @@ tel, err := tracing.NewTelemetry(tracing.TelemetryConfig{
     EnableRuntimeMetrics:      true,                  // liga go.* (goroutines/heap/gc). opt-in.
     InsecureExporter:          true,                  // true em cluster interno (sem TLS)
 })
-if err != nil { /* tratar */ }
+if err != nil {
+    // NewTelemetry pode retornar handle nil em falha — trate e SAIA aqui,
+    // NÃO siga para o defer (deferir shutdown de um tel nil causa panic).
+    log.Fatalf("telemetry init: %v", err)
+}
+ctx := context.Background() // ctx de shutdown
 defer tel.ShutdownTelemetryWithContext(ctx) // flush/close no shutdown (ou tel.ShutdownTelemetry() sem ctx)
 ```
 
@@ -126,8 +131,9 @@ resolver := dbresolver.New(dbresolver.WithPrimaryDBs(primary), dbresolver.WithRe
 
 ### 4c. Métricas de pool (opcional, alto valor p/ saturação)
 ```go
-reg, _ := sqlobs.RegisterDBStatsMetrics(instrumented, sqlobs.SystemPostgreSQL)
-defer reg.Unregister()
+reg, err := sqlobs.RegisterDBStatsMetrics(instrumented, sqlobs.SystemPostgreSQL)
+if err != nil { /* tratar */ }
+defer reg.Unregister() // só após sucesso
 ```
 
 ### 4d. APOSENTAR spans manuais (o ganho de cardinalidade)
@@ -212,7 +218,8 @@ _ = f.RecordTransactionProcessed(ctx,
 )
 
 // custom:
-c, _ := f.Counter(metrics.Metric{Name: "settlements_completed", Unit: "1"})
+c, err := f.Counter(metrics.Metric{Name: "settlements_completed", Unit: "1"})
+if err != nil { /* tratar */ }
 _ = c.WithAttributes(attribute.String("tenant.id", tenantID)).AddOne(ctx)
 ```
 > ⚠️ Métrica de negócio NÃO herda `tenant.id` automático — passe explícito via `.WithAttributes` (ou nos atributos variádicos dos helpers `Record*`).
@@ -226,7 +233,7 @@ _ = c.WithAttributes(attribute.String("tenant.id", tenantID)).AddOne(ctx)
 3. [ ] SQL: `sqlobs.InstrumentDB` em cada `*sql.DB` (antes do dbresolver), fechar o original, reaplicar pool limits. Remover spans `postgres.*` manuais.
 4. [ ] Redis/Valkey: `redisobs.Instrument(client)`. Remover spans `redis.*` manuais.
 5. [ ] RabbitMQ: envolver produce/consume com `messagingobs`. Remover spans de fila manuais.
-6. [ ] HTTP (SÓ se Fiber v3): `middleware.WithTelemetry`. Se Fiber v2, pular.
+6. [ ] HTTP (SÓ se Fiber v3): `tm := middleware.NewTelemetryMiddleware(tel)` + `app.Use(tm.WithTelemetry(tel))`. Se Fiber v2, pular.
 7. [ ] Negócio: garantir `Record*`/Counter nos pontos-chave (tenant.id explícito).
 8. [ ] Validar no Grafana/Mimir: as métricas `db.client.operation.duration`, `rpc.*.duration`, `messaging.*.duration`, `go.*` aparecem para o `service.name` do serviço.
 
