@@ -12,15 +12,14 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
-	observability "github.com/LerianStudio/lib-observability/v2"
 	"github.com/LerianStudio/lib-observability/v2/assert"
 	constant "github.com/LerianStudio/lib-observability/v2/constants"
 	"github.com/LerianStudio/lib-observability/v2/log"
 	"github.com/LerianStudio/lib-observability/v2/metrics"
-	"github.com/LerianStudio/lib-observability/v2/redaction"
-	"github.com/gofiber/fiber/v3"
+	otelruntime "go.opentelemetry.io/contrib/instrumentation/runtime"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -69,9 +68,20 @@ type TelemetryConfig struct {
 	CollectorExporterEndpoint string
 	EnableTelemetry           bool
 	InsecureExporter          bool
-	Logger                    log.Logger
-	Propagator                propagation.TextMapPropagator
-	Redactor                  *Redactor
+	// EnableRuntimeMetrics turns on the Go runtime instrumentation
+	// (go.opentelemetry.io/contrib/instrumentation/runtime), emitting go.*
+	// runtime metrics (heap, GC, goroutines) through this instance's
+	// MeterProvider. It follows the Go zero-value convention: default false,
+	// opt-in true. It is honored only when EnableTelemetry is also true and a
+	// real MeterProvider exists; with telemetry disabled or a noop provider it
+	// degrades to a no-op. Applications that want runtime metrics on by default
+	// should set this to true explicitly at their bootstrap - keeping the
+	// zero-value off avoids surprising callers who construct TelemetryConfig
+	// partially and inheriting a background collector they did not request.
+	EnableRuntimeMetrics bool
+	Logger               log.Logger
+	Propagator           propagation.TextMapPropagator
+	Redactor             *Redactor
 }
 
 // Telemetry holds configured OpenTelemetry providers and lifecycle handlers.
@@ -250,6 +260,12 @@ func initExporters(ctx context.Context, cfg TelemetryConfig) (*Telemetry, error)
 		return nil, err
 	}
 
+	// Start Go runtime instrumentation on the real MeterProvider when opted in.
+	// Best-effort: a failure here is logged inside the helper and never aborts
+	// telemetry bring-up, since runtime metrics are auxiliary to request-path
+	// observability.
+	startRuntimeMetrics(cfg, mp)
+
 	shutdown, shutdownCtx := buildShutdownHandlers(cfg.Logger, mp, tp, lp, tExp, mExp, lExp)
 
 	return &Telemetry{
@@ -261,6 +277,51 @@ func initExporters(ctx context.Context, cfg TelemetryConfig) (*Telemetry, error)
 		shutdown:        shutdown,
 		shutdownCtx:     shutdownCtx,
 	}, nil
+}
+
+// runtimeMinReadMemStatsInterval is the minimum interval between the relatively
+// expensive runtime.ReadMemStats() calls made by the Go runtime instrumentation.
+const runtimeMinReadMemStatsInterval = 15 * time.Second
+
+// startRuntimeMetrics registers the Go runtime instrumentation
+// (go.opentelemetry.io/contrib/instrumentation/runtime) against the supplied
+// MeterProvider when cfg.EnableRuntimeMetrics is set. It returns true when the
+// instrumentation was started, false when it was skipped (toggle off, nil
+// MeterProvider) or failed to register.
+//
+// It is best-effort and never panics: a nil MeterProvider or a Start error is
+// logged (when a logger is available) and reported via the false return, so
+// telemetry bring-up proceeds regardless. The contrib instrumentation registers
+// asynchronous callbacks on the MeterProvider's meter; there is no separate
+// goroutine to shut down, so teardown follows the MeterProvider's own shutdown.
+func startRuntimeMetrics(cfg TelemetryConfig, mp *sdkmetric.MeterProvider) bool {
+	if !cfg.EnableRuntimeMetrics {
+		return false
+	}
+
+	if mp == nil {
+		if cfg.Logger != nil {
+			cfg.Logger.Log(context.Background(), log.LevelWarn,
+				"runtime metrics requested but MeterProvider is nil; skipping")
+		}
+
+		return false
+	}
+
+	err := otelruntime.Start(
+		otelruntime.WithMeterProvider(mp),
+		otelruntime.WithMinimumReadMemStatsInterval(runtimeMinReadMemStatsInterval),
+	)
+	if err != nil {
+		if cfg.Logger != nil {
+			cfg.Logger.Log(context.Background(), log.LevelError,
+				"failed to start Go runtime metrics", log.Err(err))
+		}
+
+		return false
+	}
+
+	return true
 }
 
 // newNoopTelemetry creates a Telemetry instance with no-op providers (no exporters).
@@ -736,27 +797,6 @@ func truncateUTF8(s string, maxBytes int) string {
 	return s
 }
 
-// SetSpanAttributeForParam adds a request parameter attribute to the current context bag.
-// Sensitive parameter names (as determined by redaction.IsSensitiveField) are masked.
-func SetSpanAttributeForParam(c fiber.Ctx, param, value, entityName string) {
-	if c == nil {
-		return
-	}
-
-	spanAttrKey := "app.request." + param
-	if entityName != "" && param == "id" {
-		spanAttrKey = "app.request." + entityName + "_id"
-	}
-
-	// Mask value if the parameter name is considered sensitive
-	attrValue := value
-	if redaction.IsSensitiveField(param) {
-		attrValue = "[REDACTED]"
-	}
-
-	c.SetContext(observability.ContextWithSpanAttributes(c.Context(), attribute.String(spanAttrKey, attrValue)))
-}
-
 // InjectTraceContext injects trace context into a generic text map carrier.
 func InjectTraceContext(ctx context.Context, carrier propagation.TextMapCarrier) {
 	if carrier == nil {
@@ -782,20 +822,6 @@ func InjectHTTPContext(ctx context.Context, headers http.Header) {
 	}
 
 	InjectTraceContext(ctx, propagation.HeaderCarrier(headers))
-}
-
-// ExtractHTTPContext extracts trace headers from a Fiber request.
-func ExtractHTTPContext(ctx context.Context, c fiber.Ctx) context.Context {
-	if c == nil {
-		return ctx
-	}
-
-	carrier := propagation.HeaderCarrier{}
-	for key, value := range c.Request().Header.All() {
-		carrier.Set(string(key), string(value))
-	}
-
-	return ExtractTraceContext(ctx, carrier)
 }
 
 // InjectGRPCContext injects trace context into gRPC metadata.
