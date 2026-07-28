@@ -232,7 +232,9 @@ RedPanda/Kafka: NÃO usa este pacote (vem da lib-streaming, mesmo contrato de no
 
 Para chamadas HTTP de SAÍDA (identity provider, BACEN/SPB, tenant-manager, outro serviço). Classifica como span **CLIENT** e emite `http.client.request.duration` (s). Thin wrapper sobre otelhttp.
 
-**Boundary:** a lib NÃO cria nem fecha o `*http.Client`. A app monta o transport (TLS/timeout/proxy dela) e passa aqui; a lib envolve e devolve.
+> ⚠️ **Depende dos providers configurados** (mesma pegadinha do §0): por padrão usa os providers GLOBAIS (`otel.GetMeterProvider`/`GetTracerProvider`). Sem `MeterProvider` a métrica é no-op; sem `TracerProvider` o span não é criado. Com `NewTelemetry`+`ApplyGlobals` no bootstrap (fluxo normal) funciona; se não, passe explícito via `WithMeterProvider(tel.MeterProvider)`/`WithTracerProvider(tel.TracerProvider)`. Telemetria ausente NÃO é falha de instrumentação — é provider não configurado.
+
+**Boundary:** a lib NÃO gerencia o lifecycle do client da app — ela envolve o **transport** que você passa (preservando TLS/timeout/proxy) e nunca faz dial/close por conta própria. `NewTransport` só embrulha um `http.RoundTripper`; `NewClient` é um **construtor de conveniência** que devolve um `*http.Client` já com o transport envolvido (passe seu base transport p/ preservar o TLS).
 
 ```go
 import "github.com/LerianStudio/lib-observability/v2/httpobs"
