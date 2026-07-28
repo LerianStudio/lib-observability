@@ -228,6 +228,57 @@ RedPanda/Kafka: NÃO usa este pacote (vem da lib-streaming, mesmo contrato de no
 
 ---
 
+## 6.5 HTTP client / chamadas externas — `httpobs` (NÃO exige Fiber)
+
+Para chamadas HTTP de SAÍDA (identity provider, BACEN/SPB, tenant-manager, outro serviço). Classifica como span **CLIENT** e emite `http.client.request.duration` (s). Thin wrapper sobre otelhttp.
+
+**Boundary:** a lib NÃO cria nem fecha o `*http.Client`. A app monta o transport (TLS/timeout/proxy dela) e passa aqui; a lib envolve e devolve.
+
+```go
+import "github.com/LerianStudio/lib-observability/v2/httpobs"
+
+// Opção A: envolver o transport (preserva TLS/timeout do base)
+client := &http.Client{
+    Transport: httpobs.NewTransport(http.DefaultTransport), // ou seu transport custom
+    Timeout:   10 * time.Second,
+}
+
+// Opção B: conveniência — devolve um *http.Client já com o transport envolvido
+client := httpobs.NewClient(baseTransport)
+```
+- Labels: `http.request.method`, `http.response.status_code`, `server.address`, `error.type`. Nome do span bounded ("HTTP GET") — nunca URL/path.
+- O caller DEVE ler e fechar o response body (o span fecha no close/EOF do body).
+- Opções: `WithMeterProvider`, `WithTracerProvider`, `WithPropagators`, `WithSpanNameFormatter`.
+
+## 6.6 Saída sem wrapper (último recurso) — `tracing.StartClientSpan`
+
+Só para saídas que NÃO têm wrapper dedicado (ex.: MongoDB — sem otelmongo v2 estável; ou uma SDK/RPC custom). Marca o span como **CLIENT** sem você precisar lembrar do `trace.WithSpanKind`.
+
+```go
+import "github.com/LerianStudio/lib-observability/v2/tracing"
+
+ctx, span := tracing.StartClientSpan(ctx, tracer, "mongodb.find_holder")
+defer span.End()
+// ... a chamada externa ...
+```
+- **Só seta o span kind.** NÃO emite métrica e NÃO impõe contrato de PII — VOCÊ garante nome low-cardinality e sem PII.
+
+### ⚠️ Precedência (ADR-006) — não duplicar instrumentação
+Ordem de preferência por tipo de saída:
+
+| Saída | Use |
+|---|---|
+| SQL | `sqlobs` |
+| Redis/Valkey | `redisobs` |
+| **HTTP client** | **`httpobs`** |
+| mensageria | `messagingobs` |
+| server (entrada) | `middleware` / `grpcmiddleware` |
+| resto sem wrapper (Mongo, RPC custom) | `tracing.StartClientSpan` |
+
+**NUNCA** envolva a mesma chamada com um wrapper (ex: httpobs) **E** abra um `StartClientSpan` em volta — isso instrumenta a operação duas vezes.
+
+---
+
 ## 7. Métricas de NEGÓCIO (manual, opt-in) — `metrics`
 
 A lib tem uma factory + helpers de domínio. NÃO são automáticas — você chama nos pontos de negócio.
@@ -266,9 +317,11 @@ _ = c.WithAttributes(attribute.String("tenant.id", tenantID)).AddOne(ctx)
 3. [ ] SQL: `sqlobs.InstrumentDB` em cada `*sql.DB` (antes do dbresolver), fechar o original, reaplicar pool limits. Remover spans `postgres.*` manuais.
 4. [ ] Redis/Valkey: `redisobs.Instrument(client)`. Remover spans `redis.*` manuais.
 5. [ ] RabbitMQ: envolver produce/consume com `messagingobs`. Remover spans de fila manuais.
-6. [ ] HTTP (SÓ se Fiber v3): `tm := middleware.NewTelemetryMiddleware(tel)` + `app.Use(tm.WithTelemetry(tel))`. Se Fiber v2, pular.
-7. [ ] Negócio: garantir `Record*`/Counter nos pontos-chave (tenant.id explícito).
-8. [ ] Validar no Grafana/Mimir: as métricas `db.client.operation.duration`, `rpc.*.duration`, `messaging.*.duration`, `go.*` aparecem para o `service.name` do serviço.
+6. [ ] HTTP client (saídas): usar `httpobs.NewTransport/NewClient` no `*http.Client` de chamadas externas. Remover spans de saída HTTP manuais.
+7. [ ] Saídas sem wrapper (Mongo, RPC custom): trocar `tracer.Start(...)` por `tracing.StartClientSpan(...)`. NÃO duplicar com outro wrapper.
+8. [ ] HTTP server (Fiber v3): `tm := middleware.NewTelemetryMiddleware(tel)` + `app.Use(tm.WithTelemetry(tel))`.
+9. [ ] Negócio: garantir `Record*`/Counter nos pontos-chave (tenant.id explícito).
+10. [ ] Validar no Grafana/Mimir: `db.client.operation.duration`, `rpc.*.duration`, `messaging.*.duration`, `http.client.request.duration`, `http.server.request.duration`, `go.*` aparecem para o `service.name` do serviço.
 
 ## 9. Regras invioláveis (cardinalidade / PII)
 - Unidade sempre segundos. Nunca ms na app.
@@ -277,5 +330,5 @@ _ = c.WithAttributes(attribute.String("tenant.id", tenantID)).AddOne(ctx)
 - Ao adotar um wrapper de infra, REMOVER o span manual equivalente (senão duplica custo).
 
 ## 10. O que NÃO está disponível ainda
-- **MongoDB**: helper adiado (otelmongo v2 sem release estável). Não instrumentar Mongo via lib por ora.
-- **HTTP nativo em apps Fiber v2**: só após migração Fiber v3.
+- **MongoDB wrapper dedicado** (`mongoobs` estilo sqlobs/redisobs): adiado — otelmongo v2 sem release estável. **Enquanto isso**, instrumente saídas Mongo com `tracing.StartClientSpan` (§6.6) — span CLIENT correto, sem métrica automática.
+- **HTTP server**: exige Fiber v3 (§2). Apps ainda em Fiber v2 não têm a métrica HTTP server nativa até migrarem; todo o resto (DB/cache/fila/HTTP client/gRPC/runtime) funciona independente do Fiber.
