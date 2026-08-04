@@ -130,6 +130,11 @@ func isNilLogger(logger obslog.Logger) bool {
 }
 
 // NewRequestInfo creates RequestInfo from a Fiber context.
+//
+// URI is deliberately left unresolved here: middleware constructs RequestInfo
+// before the downstream chain runs, when Fiber's Route().Path still reports
+// the middleware's own route (typically "/") instead of the final matched
+// template. FinishRequestInfo resolves URI once routing has completed.
 func NewRequestInfo(c fiber.Ctx, obfuscationDisabled bool) *RequestInfo {
 	if c == nil {
 		return &RequestInfo{Date: time.Now().UTC()}
@@ -163,7 +168,6 @@ func NewRequestInfo(c fiber.Ctx, obfuscationDisabled bool) *RequestInfo {
 	return &RequestInfo{
 		TraceID:       c.Get(headerID),
 		Method:        c.Method(),
-		URI:           resolvedHTTPRoute(c, c.Response().StatusCode()),
 		Username:      username,
 		Referer:       referer,
 		UserAgent:     sanitizeLogValue(c.Get(headerUserAgent)),

@@ -75,10 +75,13 @@ func TestNewRequestInfoUsesRouteTemplateAndSanitizesRequestData(t *testing.T) {
 		info := NewRequestInfo(c, false)
 
 		assert.Equal(t, "POST", info.Method)
-		assert.Equal(t, "/charge", info.URI)
+		assert.Empty(t, info.URI, "URI must stay unresolved until FinishRequestInfo runs after routing")
 		assert.Equal(t, "https://example.com/path", info.Referer)
 		assert.Equal(t, "agent", info.UserAgent)
 		assert.JSONEq(t, "{\"nested\":{\"secret\":\"********\"},\"password\":\"********\"}", info.Body)
+
+		info.FinishRequestInfo(&ResponseMetricsWrapper{Context: c, StatusCode: http.StatusNoContent})
+		assert.Equal(t, "/charge", info.URI)
 
 		return c.SendStatus(http.StatusNoContent)
 	})
@@ -138,6 +141,32 @@ func TestWithHTTPLoggingAttachesLoggerAndLogsAccessEntry(t *testing.T) {
 	}
 
 	assert.True(t, latencyFound, "expected http_latency_ms field on access log entry")
+}
+
+// TestWithHTTPLoggingResolvesRouteTemplateFromPreChainMiddleware guards the
+// middleware-ordering contract: WithHTTPLogging constructs RequestInfo before
+// the downstream chain runs, when Fiber's Route().Path still reports the
+// middleware's own route ("/"). The logged path must be the final matched
+// route template, never "/" and never the concrete path.
+func TestWithHTTPLoggingResolvesRouteTemplateFromPreChainMiddleware(t *testing.T) {
+	logger := &captureLogger{}
+	app := fiber.New()
+	app.Use(WithHTTPLogging(WithCustomLogger(logger)))
+	app.Get("/v1/orders/:id", func(c fiber.Ctx) error {
+		return c.SendStatus(http.StatusOK)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/orders/12345", nil)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, resp.Body.Close()) }()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	messages, fields := logger.snapshot()
+	require.Len(t, messages, 1)
+	assert.Contains(t, messages[0], "GET /v1/orders/:id")
+	assert.NotContains(t, messages[0], "/v1/orders/12345")
+	assert.Contains(t, fields, obslog.String("http_path", "/v1/orders/:id"))
 }
 
 func TestWithHTTPLoggingIgnoresTypedNilLogger(t *testing.T) {
