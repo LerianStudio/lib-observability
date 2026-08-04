@@ -69,13 +69,13 @@ func (r grpcRequestWithID) GetRequestId() string {
 	return r.RequestId
 }
 
-func TestNewRequestInfoSanitizesRequestData(t *testing.T) {
+func TestNewRequestInfoUsesRouteTemplateAndSanitizesRequestData(t *testing.T) {
 	app := fiber.New()
 	app.Post("/charge", func(c fiber.Ctx) error {
 		info := NewRequestInfo(c, false)
 
 		assert.Equal(t, "POST", info.Method)
-		assert.Equal(t, "/charge?name=alice&password=%2A%2A%2A%2A%2A%2A%2A%2A", info.URI)
+		assert.Equal(t, "/charge", info.URI)
 		assert.Equal(t, "https://example.com/path", info.Referer)
 		assert.Equal(t, "agent", info.UserAgent)
 		assert.JSONEq(t, "{\"nested\":{\"secret\":\"********\"},\"password\":\"********\"}", info.Body)

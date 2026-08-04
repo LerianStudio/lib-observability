@@ -130,6 +130,13 @@ func isNilLogger(logger obslog.Logger) bool {
 }
 
 // NewRequestInfo creates RequestInfo from a Fiber context.
+//
+// The URI field is resolved from the matched route using the response
+// status code available at call time. When called before c.Next(), the
+// status code is still the default, so 404 catch-all detection in
+// resolvedHTTPRoute may be inaccurate. Callers must invoke
+// FinishRequestInfo after the downstream handler completes to finalize
+// URI with the actual response status, especially for 404 responses.
 func NewRequestInfo(c fiber.Ctx, obfuscationDisabled bool) *RequestInfo {
 	if c == nil {
 		return &RequestInfo{Date: time.Now().UTC()}
@@ -163,7 +170,7 @@ func NewRequestInfo(c fiber.Ctx, obfuscationDisabled bool) *RequestInfo {
 	return &RequestInfo{
 		TraceID:       c.Get(headerID),
 		Method:        c.Method(),
-		URI:           sanitizeURL(c.OriginalURL()),
+		URI:           resolvedHTTPRoute(c, c.Response().StatusCode()),
 		Username:      username,
 		Referer:       referer,
 		UserAgent:     sanitizeLogValue(c.Get(headerUserAgent)),
@@ -203,6 +210,7 @@ func (r *RequestInfo) FinishRequestInfo(rw *ResponseMetricsWrapper) {
 	r.Duration = time.Since(r.Date)
 	r.Status = rw.StatusCode
 	r.Size = rw.Size
+	r.URI = resolvedHTTPRoute(rw.Context, rw.StatusCode)
 }
 
 // WithHTTPLogging logs Fiber HTTP access requests.
@@ -230,17 +238,9 @@ func WithHTTPLogging(opts ...LogMiddlewareOption) fiber.Handler {
 		requestID := c.Get(headerID)
 		ctx := c.Context()
 
-		if tenantID := ResolveTenantIDFromHTTP(c); tenantID != "" {
-			ctx = observability.ContextWithSpanAttributes(ctx, attribute.String(constant.AttrKeyTenantID, tenantID))
-		}
-
 		logger := mid.Logger.
 			With(obslog.String(headerID, info.TraceID)).
 			With(obslog.String("message_prefix", requestID+constant.LoggerDefaultSeparator))
-
-		if tenantID := resolveTenantIDForTelemetry(ctx); tenantID != "" {
-			logger = logger.With(obslog.String(constant.AttrKeyTenantID, tenantID))
-		}
 
 		ctx = observability.ContextWithLogger(ctx, logger)
 		c.SetContext(ctx)

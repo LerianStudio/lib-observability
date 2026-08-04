@@ -92,6 +92,8 @@ defer tel.ShutdownTelemetryWithContext(ctx) // flush/close no shutdown (ou tel.S
 
 Emite: `http.server.request.duration` (s) e `http.server.active_requests`.
 
+Logs de acesso, nome do span SERVER e `url.path` usam somente o template da rota resolvido depois do handler (ex.: `/v1/accounts/:id`). Query string e valores nunca são retidos. Requests sem rota usam `/{unmatched}`; `http.route` fica ausente. `X-Tenant-Id` não entra em logs, spans nem labels das métricas HTTP.
+
 ```go
 import "github.com/LerianStudio/lib-observability/v2/middleware"
 
@@ -127,7 +129,7 @@ conn, _ := grpc.NewClient(target,
 )
 ```
 
-`tenant.id` no server é resolvido automático do header/metadata `tenant-id` / `X-Tenant-Id`.
+`tenant.id` no server gRPC é resolvido automaticamente da metadata `tenant-id`.
 
 ---
 
@@ -328,7 +330,7 @@ _ = c.WithAttributes(attribute.String("tenant.id", tenantID)).AddOne(ctx)
 ## 9. Regras invioláveis (cardinalidade / PII)
 - Unidade sempre segundos. Nunca ms na app.
 - NUNCA como label: query text, SQL, params, routing key, message id, url.path com id, uuid, cpf/cnpj, pix key, email, payload.
-- `tenant.id`: automático em HTTP/gRPC; manual em negócio.
+- `tenant.id`: nunca em métricas HTTP; automático em gRPC server; manual em negócio.
 - Ao adotar um wrapper de infra, REMOVER o span manual equivalente (senão duplica custo).
 
 ## 10. O que NÃO está disponível ainda

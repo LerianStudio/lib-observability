@@ -12,7 +12,7 @@
 2. **Instrumento criado UMA vez** na construção (nunca por request). Record é **no-op** quando o instrumento é nil (telemetria desabilitada) — chamável incondicionalmente, nunca panic, nunca afeta o request path.
 3. **Só labels de baixa cardinalidade bounded.** Ver lista PROIBIDA abaixo. Cada valor distinto de um label multiplica séries.
 4. **Nomes = OTel semconv estável.** Não inventar chaves; reusar `constants/opentelemetry.go`.
-5. **tenant.id** auto em RED (HTTP/gRPC) via resolver existente; MANUAL em métrica de negócio.
+5. **tenant.id** nunca em métricas HTTP; automático apenas em RPC server e manual em métrica de negócio.
 
 ## Buckets advisory (por sinal)
 
@@ -25,7 +25,7 @@
 
 | Métrica | Tipo | Unidade | Labels permitidos | Estabilidade |
 |---|---|---|---|---|
-| `http.server.request.duration` | Histogram | s | http.request.method, http.response.status_code, http.route, error.type, tenant.id | STABLE (já existe) |
+| `http.server.request.duration` | Histogram | s | http.request.method, http.response.status_code, http.route, error.type | STABLE (já existe) |
 | `http.client.request.duration` | Histogram | s | http.request.method, http.response.status_code, server.address, error.type | STABLE (já existe) |
 | `http.server.active_requests` | UpDownCounter | {request} | http.request.method, http.route (opcional) | (T4) |
 | `rpc.server.duration`¹ | Histogram | s | rpc.system, rpc.method, rpc.grpc.status_code, error.type, tenant.id | (T2) |
