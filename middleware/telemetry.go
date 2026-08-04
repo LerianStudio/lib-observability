@@ -18,6 +18,7 @@ import (
 	"github.com/gofiber/fiber/v3"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/baggage"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
@@ -213,7 +214,14 @@ func (tm *TelemetryMiddleware) WithTelemetry(tl *tracing.Telemetry, excludedRout
 			traceCtx = tracing.ExtractHTTPContext(traceCtx, c)
 		}
 
-		ctx, span := tracer.Start(traceCtx, method, trace.WithSpanKind(trace.SpanKindServer))
+		// Start the server span from an identity-filtered context so the
+		// AttrBag span processors cannot copy tenant/customer identity onto
+		// the built-in HTTP server span at start, then restore the full
+		// request context (with the span attached) so downstream application
+		// spans and opted-in business telemetry keep the identity attributes.
+		spanStartCtx := identityFilteredSpanStartContext(traceCtx)
+		_, span := tracer.Start(spanStartCtx, method, trace.WithSpanKind(trace.SpanKindServer))
+		ctx = trace.ContextWithSpan(traceCtx, span)
 		endState := newSpanEndState(span)
 
 		defer endState.End()
@@ -249,6 +257,48 @@ func (tm *TelemetryMiddleware) WithTelemetry(tl *tracing.Telemetry, excludedRout
 
 		return err
 	}
+}
+
+// httpServerSpanIdentityKeys enumerates the request-identity attribute keys
+// that must never appear on the built-in HTTP server span. Infrastructure
+// telemetry may only use stable transport dimensions; identity stays
+// available to application spans via the unfiltered request context.
+var httpServerSpanIdentityKeys = map[attribute.Key]struct{}{
+	attribute.Key(constant.AttrKeyTenantID):  {},
+	attribute.Key(constant.AttrKeyContextID): {},
+}
+
+// identityFilteredSpanStartContext returns a context safe to start the
+// built-in HTTP server span from: request-identity attributes (tenant.id,
+// context.id) are removed from the AttrBag and the tenant.id baggage member
+// is dropped, so the AttrBag span processors cannot copy request identity
+// onto the span at OnStart. Callers must keep using the original, unfiltered
+// context for downstream work so application spans retain identity.
+func identityFilteredSpanStartContext(ctx context.Context) context.Context {
+	if ctx == nil {
+		return ctx
+	}
+
+	attrs := observability.AttributesFromContext(ctx)
+
+	filtered := make([]attribute.KeyValue, 0, len(attrs))
+	for _, attr := range attrs {
+		if _, isIdentity := httpServerSpanIdentityKeys[attr.Key]; isIdentity {
+			continue
+		}
+
+		filtered = append(filtered, attr)
+	}
+
+	if len(filtered) != len(attrs) {
+		ctx = observability.ReplaceAttributes(ctx, filtered...)
+	}
+
+	if bag := baggage.FromContext(ctx); bag.Member(constant.AttrKeyTenantID).Key() != "" {
+		ctx = baggage.ContextWithBaggage(ctx, bag.DeleteMember(constant.AttrKeyTenantID))
+	}
+
+	return ctx
 }
 
 // telemetryRequestAttrs groups the per-request fields needed to apply OTel

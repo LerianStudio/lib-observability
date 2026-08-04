@@ -11,6 +11,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
+	observability "github.com/LerianStudio/lib-observability/v2"
 	constant "github.com/LerianStudio/lib-observability/v2/constants"
 	"github.com/LerianStudio/lib-observability/v2/metrics"
 	"github.com/LerianStudio/lib-observability/v2/tracing"
@@ -18,10 +19,12 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/baggage"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	oteltrace "go.opentelemetry.io/otel/trace"
 )
 
 // newMetricsHarness wires a real OTel SDK ManualReader so tests can assert on
@@ -123,6 +126,80 @@ func getSpanAttr(span tracetest.SpanStub, key string) string {
 	}
 
 	return ""
+}
+
+// TestWithTelemetry_ServerSpanExcludesIdentityFromUpstreamMiddleware guards
+// the middleware-ordering contract: a tenant-resolution middleware registered
+// BEFORE WithTelemetry stores identity in the request AttrBag (and OTel
+// baggage), and the AttrBag span processor copies that context onto every
+// span at OnStart. The built-in HTTP server span must never receive that
+// identity, while downstream application spans started from the request
+// context must retain it.
+func TestWithTelemetry_ServerSpanExcludesIdentityFromUpstreamMiddleware(t *testing.T) {
+	tel, _, spanExp := newTelemetryHarness(t)
+
+	app := fiber.New()
+	mid := NewTelemetryMiddleware(tel)
+
+	// Simulates an upstream tenant-resolution middleware that publishes
+	// authenticated identity for downstream application telemetry.
+	app.Use(func(c fiber.Ctx) error {
+		ctx := observability.ContextWithSpanAttributes(c.Context(),
+			attribute.String(constant.AttrKeyTenantID, "tenant-123"),
+			attribute.String(constant.AttrKeyContextID, "context-456"),
+		)
+
+		member, err := baggage.NewMember(constant.AttrKeyTenantID, "tenant-123")
+		require.NoError(t, err)
+
+		bag, err := baggage.New(member)
+		require.NoError(t, err)
+
+		c.SetContext(baggage.ContextWithBaggage(ctx, bag))
+
+		return c.Next()
+	})
+	app.Use(mid.WithTelemetry(tel))
+
+	app.Get("/api/users/:id", func(c fiber.Ctx) error {
+		// Downstream application span started from the request context.
+		_, appSpan := tel.TracerProvider.Tracer("app").Start(c.Context(), "app-operation")
+		appSpan.End()
+
+		return c.SendStatus(http.StatusOK)
+	})
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/users/42", nil))
+	require.NoError(t, err)
+	defer func() { require.NoError(t, resp.Body.Close()) }()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var serverSpan, appSpan *tracetest.SpanStub
+
+	spans := spanExp.GetSpans()
+	for i := range spans {
+		switch {
+		case spans[i].SpanKind == oteltrace.SpanKindServer:
+			serverSpan = &spans[i]
+		case spans[i].Name == "app-operation":
+			appSpan = &spans[i]
+		}
+	}
+
+	require.NotNil(t, serverSpan, "expected the HTTP server span to be exported")
+	require.NotNil(t, appSpan, "expected the downstream application span to be exported")
+
+	assert.Empty(t, getSpanAttr(*serverSpan, constant.AttrKeyTenantID),
+		"built-in HTTP server span must not inherit tenant identity from upstream middleware")
+	assert.Empty(t, getSpanAttr(*serverSpan, constant.AttrKeyContextID),
+		"built-in HTTP server span must not inherit context identity from upstream middleware")
+	assert.NotEmpty(t, getSpanAttr(*serverSpan, "app.request.request_id"),
+		"non-identity AttrBag entries must still reach the server span")
+
+	assert.Equal(t, "tenant-123", getSpanAttr(*appSpan, constant.AttrKeyTenantID),
+		"downstream application spans must retain tenant identity")
+	assert.Equal(t, "context-456", getSpanAttr(*appSpan, constant.AttrKeyContextID),
+		"downstream application spans must retain context identity")
 }
 
 // TestHTTPServerDurationBuckets_MatchOTelAdvisory locks the bucket layout
