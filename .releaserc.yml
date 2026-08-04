@@ -36,7 +36,9 @@ plugins:
       failCommentCondition: false,
       labels: []
     }]
-  - "@semantic-release/exec"
+  - ["@semantic-release/exec", {
+      verifyReleaseCmd: "node scripts/verify-release-major.cjs ${nextRelease.version}"
+    }]
 
 branches:
   - name: main
