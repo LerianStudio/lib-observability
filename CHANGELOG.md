@@ -1,5 +1,14 @@
 # Lib-observability Changelog
 
+## Unreleased
+
+Fixes:
+- Use matched Fiber route templates for HTTP access-log paths, server span names, `url.path`, and `http.route`; discard query strings and use `/{unmatched}` for unmatched traffic.
+- Remove client-controlled tenant/customer identity from built-in HTTP logs, spans, and metric labels while preserving explicit resolver APIs.
+- Block semantic-release when the release major does not match the Go module import-path major.
+
+---
+
 ## [2.1.0](https://github.com/LerianStudio/lib-observability/releases/tag/v2.1.0)
 
 Features:
@@ -93,4 +102,3 @@ Contributors: @gandalf-at-lerian, @lerian-studio.
 Contributors: @bedatty, @gandalf-at-lerian, @qnen.
 
 [View all changes](https://github.com/LerianStudio/lib-observability/commits/v1.0.0)
-

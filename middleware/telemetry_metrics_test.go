@@ -11,6 +11,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
+	observability "github.com/LerianStudio/lib-observability/v2"
 	constant "github.com/LerianStudio/lib-observability/v2/constants"
 	"github.com/LerianStudio/lib-observability/v2/metrics"
 	"github.com/LerianStudio/lib-observability/v2/tracing"
@@ -18,10 +19,12 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/baggage"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	oteltrace "go.opentelemetry.io/otel/trace"
 )
 
 // newMetricsHarness wires a real OTel SDK ManualReader so tests can assert on
@@ -101,7 +104,10 @@ func newTelemetryHarness(
 	tel, reader := newMetricsHarness(t)
 
 	spanExp := tracetest.NewInMemoryExporter()
-	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(spanExp))
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithSpanProcessor(tracing.AttrBagSpanProcessor{}),
+		sdktrace.WithSyncer(spanExp),
+	)
 	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
 
 	tel.TracerProvider = tp
@@ -120,6 +126,80 @@ func getSpanAttr(span tracetest.SpanStub, key string) string {
 	}
 
 	return ""
+}
+
+// TestWithTelemetry_ServerSpanExcludesIdentityFromUpstreamMiddleware guards
+// the middleware-ordering contract: a tenant-resolution middleware registered
+// BEFORE WithTelemetry stores identity in the request AttrBag (and OTel
+// baggage), and the AttrBag span processor copies that context onto every
+// span at OnStart. The built-in HTTP server span must never receive that
+// identity, while downstream application spans started from the request
+// context must retain it.
+func TestWithTelemetry_ServerSpanExcludesIdentityFromUpstreamMiddleware(t *testing.T) {
+	tel, _, spanExp := newTelemetryHarness(t)
+
+	app := fiber.New()
+	mid := NewTelemetryMiddleware(tel)
+
+	// Simulates an upstream tenant-resolution middleware that publishes
+	// authenticated identity for downstream application telemetry.
+	app.Use(func(c fiber.Ctx) error {
+		ctx := observability.ContextWithSpanAttributes(c.Context(),
+			attribute.String(constant.AttrKeyTenantID, "tenant-123"),
+			attribute.String(constant.AttrKeyContextID, "context-456"),
+		)
+
+		member, err := baggage.NewMember(constant.AttrKeyTenantID, "tenant-123")
+		require.NoError(t, err)
+
+		bag, err := baggage.New(member)
+		require.NoError(t, err)
+
+		c.SetContext(baggage.ContextWithBaggage(ctx, bag))
+
+		return c.Next()
+	})
+	app.Use(mid.WithTelemetry(tel))
+
+	app.Get("/api/users/:id", func(c fiber.Ctx) error {
+		// Downstream application span started from the request context.
+		_, appSpan := tel.TracerProvider.Tracer("app").Start(c.Context(), "app-operation")
+		appSpan.End()
+
+		return c.SendStatus(http.StatusOK)
+	})
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/users/42", nil))
+	require.NoError(t, err)
+	defer func() { require.NoError(t, resp.Body.Close()) }()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var serverSpan, appSpan *tracetest.SpanStub
+
+	spans := spanExp.GetSpans()
+	for i := range spans {
+		switch {
+		case spans[i].SpanKind == oteltrace.SpanKindServer:
+			serverSpan = &spans[i]
+		case spans[i].Name == "app-operation":
+			appSpan = &spans[i]
+		}
+	}
+
+	require.NotNil(t, serverSpan, "expected the HTTP server span to be exported")
+	require.NotNil(t, appSpan, "expected the downstream application span to be exported")
+
+	assert.Empty(t, getSpanAttr(*serverSpan, constant.AttrKeyTenantID),
+		"built-in HTTP server span must not inherit tenant identity from upstream middleware")
+	assert.Empty(t, getSpanAttr(*serverSpan, constant.AttrKeyContextID),
+		"built-in HTTP server span must not inherit context identity from upstream middleware")
+	assert.NotEmpty(t, getSpanAttr(*serverSpan, "app.request.request_id"),
+		"non-identity AttrBag entries must still reach the server span")
+
+	assert.Equal(t, "tenant-123", getSpanAttr(*appSpan, constant.AttrKeyTenantID),
+		"downstream application spans must retain tenant identity")
+	assert.Equal(t, "context-456", getSpanAttr(*appSpan, constant.AttrKeyContextID),
+		"downstream application spans must retain context identity")
 }
 
 // TestHTTPServerDurationBuckets_MatchOTelAdvisory locks the bucket layout
@@ -847,13 +927,9 @@ func TestWithTelemetry_TruncatesUserAgentAtRuneBoundary(t *testing.T) {
 	assert.Equal(t, strings.Repeat("€", 85), ua)
 }
 
-// TestWithTelemetry_RecordsDurationWithTenantID verifies that the
-// http.server.request.duration metric carries the tenant.id attribute when the
-// request supplies the canonical X-Tenant-Id header. This is the contract that
-// lets dashboards and alerts filter/group request volume and latency per
-// tenant — replacing the spanmetrics calls_total{tenant_id} usage previously
-// derived from the trace pipeline.
-func TestWithTelemetry_RecordsDurationWithTenantID(t *testing.T) {
+// TestWithTelemetry_DurationOmitsTenantIDFromHeader verifies that
+// client-controlled identity never becomes an HTTP metric label.
+func TestWithTelemetry_DurationOmitsTenantIDFromHeader(t *testing.T) {
 	tel, reader := newMetricsHarness(t)
 
 	app := fiber.New()
@@ -876,20 +952,14 @@ func TestWithTelemetry_RecordsDurationWithTenantID(t *testing.T) {
 	require.NotNil(t, dp)
 	assert.EqualValues(t, 1, dp.Count)
 
-	tenantVal, ok := attrValue(dp.Attributes, "tenant.id")
-	require.True(t, ok, "tenant.id label must be present when X-Tenant-Id is supplied")
-	assert.Equal(t, "acme", tenantVal)
+	_, ok := attrValue(dp.Attributes, "tenant.id")
+	assert.False(t, ok, "tenant.id must never label HTTP request duration")
 }
 
-// TestWithTelemetry_RecordsDurationWithBaggageTenantID is the regression guard
-// for the metrics-only gap that survived PR #21: tenant.id propagated
-// cross-service via OTel baggage (PR #20) reached spans and logs but NOT the
-// http.server.request.duration metric, because the metric path read the
-// AttrBag only. The request below carries NO X-Tenant-Id header on the local
-// hop; the tenant is present solely in the inbound baggage, exactly as it
-// arrives at a downstream midaz plugin. The duration metric must still carry
-// tenant.id, matching the trace/log pipelines.
-func TestWithTelemetry_RecordsDurationWithBaggageTenantID(t *testing.T) {
+// TestWithTelemetry_DurationOmitsTenantIDFromBaggage verifies that identity is
+// excluded even when it was propagated by a trusted upstream service. HTTP RED
+// metrics retain transport dimensions only.
+func TestWithTelemetry_DurationOmitsTenantIDFromBaggage(t *testing.T) {
 	tel, reader := newMetricsHarness(t)
 
 	app := fiber.New()
@@ -918,9 +988,8 @@ func TestWithTelemetry_RecordsDurationWithBaggageTenantID(t *testing.T) {
 	require.NotNil(t, dp)
 	assert.EqualValues(t, 1, dp.Count)
 
-	tenantVal, ok := attrValue(dp.Attributes, "tenant.id")
-	require.True(t, ok, "tenant.id label must be present when tenant.id arrives via OTel baggage")
-	assert.Equal(t, "acme", tenantVal)
+	_, ok := attrValue(dp.Attributes, "tenant.id")
+	assert.False(t, ok, "tenant.id must never label HTTP request duration")
 }
 
 // TestWithTelemetry_RecordsDurationWithoutTenantID verifies that the
@@ -950,12 +1019,9 @@ func TestWithTelemetry_RecordsDurationWithoutTenantID(t *testing.T) {
 	assert.False(t, ok, "tenant.id must be absent when no X-Tenant-Id header was supplied")
 }
 
-// TestWithTelemetry_RecordsDurationDropsOversizedTenantID verifies that a
-// tenant value exceeding the 128-byte cap enforced by ResolveTenantIDFromHTTP
-// is dropped silently and does NOT become a metric label. This is the
-// cardinality safety guarantee: an attacker that floods X-Tenant-Id with
-// random oversized values cannot inflate the Prometheus series set.
-func TestWithTelemetry_RecordsDurationDropsOversizedTenantID(t *testing.T) {
+// TestWithTelemetry_DurationOmitsOversizedTenantID verifies that even a value
+// outside the compatibility resolver's cap cannot become an HTTP metric label.
+func TestWithTelemetry_DurationOmitsOversizedTenantID(t *testing.T) {
 	tel, reader := newMetricsHarness(t)
 
 	app := fiber.New()

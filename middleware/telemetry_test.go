@@ -7,7 +7,6 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -50,6 +49,7 @@ func TestWithTelemetry(t *testing.T) {
 	tests := []struct {
 		name               string
 		path               string
+		route              string
 		method             string
 		setupHandler       func(c fiber.Ctx) error
 		nilTelemetry       bool
@@ -95,6 +95,7 @@ func TestWithTelemetry(t *testing.T) {
 		{
 			name:               "UUID in path",
 			path:               "/api/users/123e4567-e89b-12d3-a456-426614174000/profile",
+			route:              "/api/users/:id/profile",
 			method:             "GET",
 			setupHandler:       func(c fiber.Ctx) error { return c.SendStatus(http.StatusOK) },
 			expectedStatusCode: http.StatusOK,
@@ -151,7 +152,12 @@ func TestWithTelemetry(t *testing.T) {
 				}
 			}
 
-			app.All(tt.path, func(c fiber.Ctx) error {
+			route := tt.path
+			if tt.route != "" {
+				route = tt.route
+			}
+
+			app.All(route, func(c fiber.Ctx) error {
 				return tt.setupHandler(c)
 			})
 
@@ -172,10 +178,7 @@ func TestWithTelemetry(t *testing.T) {
 			if tt.expectSpan && !tt.nilTelemetry && !tt.swaggerPath {
 				require.GreaterOrEqual(t, len(spans), 1, "Expected at least one span to be created")
 
-				expectedPath := tt.path
-				if strings.Contains(tt.path, "123e4567-e89b-12d3-a456-426614174000") {
-					expectedPath = replaceUUIDWithPlaceholder(tt.path)
-				}
+				expectedPath := route
 
 				spanFound := false
 				for _, span := range spans {
@@ -281,7 +284,7 @@ func TestWithTelemetryExcludedRoutes(t *testing.T) {
 			if tt.expectSpan {
 				require.GreaterOrEqual(t, len(spans), 1, "Expected at least one span to be created")
 
-				expectedSpanName := tt.method + " " + replaceUUIDWithPlaceholder(tt.path)
+				expectedSpanName := tt.method + " " + tt.path
 				spanFound := false
 				for _, span := range spans {
 					if span.Name() == expectedSpanName {
@@ -741,71 +744,6 @@ func TestGetGRPCUserAgent(t *testing.T) {
 			assert.Equal(t, tt.expectedUA, result, tt.description)
 		})
 	}
-}
-
-// ---------------------------------------------------------------------------
-// sanitizeURL tests
-// ---------------------------------------------------------------------------
-
-func TestSanitizeURL_NoQueryParams(t *testing.T) {
-	t.Parallel()
-
-	result := sanitizeURL("https://example.com/api/v1/users")
-	assert.Equal(t, "https://example.com/api/v1/users", result)
-}
-
-func TestSanitizeURL_NoSensitiveParams(t *testing.T) {
-	t.Parallel()
-
-	result := sanitizeURL("https://example.com/api?page=1&limit=20")
-	assert.Equal(t, "https://example.com/api?page=1&limit=20", result)
-}
-
-func TestSanitizeURL_SensitiveTokenParam(t *testing.T) {
-	t.Parallel()
-
-	result := sanitizeURL("https://example.com/callback?token=secret123&state=abc")
-	assert.NotContains(t, result, "secret123")
-	assert.Contains(t, result, "state=abc")
-}
-
-func TestSanitizeURL_SensitivePasswordParam(t *testing.T) {
-	t.Parallel()
-
-	result := sanitizeURL("https://example.com/auth?password=hunter2&username=admin")
-	assert.NotContains(t, result, "hunter2")
-	assert.Contains(t, result, "username=admin")
-}
-
-func TestSanitizeURL_InvalidURL_ReturnedAsIs(t *testing.T) {
-	t.Parallel()
-
-	invalidURL := "://missing-scheme"
-	result := sanitizeURL(invalidURL)
-	assert.Equal(t, invalidURL, result)
-}
-
-func TestSanitizeURL_InvalidURLWithSensitiveQuery_RedactsFallback(t *testing.T) {
-	t.Parallel()
-
-	result := sanitizeURL("://missing-scheme?token=secret123")
-	assert.NotContains(t, result, "secret123")
-	assert.Contains(t, result, "?redacted")
-}
-
-func TestSanitizeURL_EmptyQueryReturnsOriginal(t *testing.T) {
-	t.Parallel()
-
-	original := "https://example.com/path"
-	result := sanitizeURL(original)
-	assert.Equal(t, original, result)
-}
-
-func TestSanitizeURL_RelativePath(t *testing.T) {
-	t.Parallel()
-
-	result := sanitizeURL("/api/v1/users?token=abc123")
-	assert.NotContains(t, result, "abc123")
 }
 
 // TestWithTelemetryInterceptorConditionalTracePropagation tests conditional trace propagation in gRPC interceptor.
