@@ -130,6 +130,13 @@ func isNilLogger(logger obslog.Logger) bool {
 }
 
 // NewRequestInfo creates RequestInfo from a Fiber context.
+//
+// The URI field is resolved from the matched route using the response
+// status code available at call time. When called before c.Next(), the
+// status code is still the default, so 404 catch-all detection in
+// resolvedHTTPRoute may be inaccurate. Callers must invoke
+// FinishRequestInfo after the downstream handler completes to finalize
+// URI with the actual response status, especially for 404 responses.
 func NewRequestInfo(c fiber.Ctx, obfuscationDisabled bool) *RequestInfo {
 	if c == nil {
 		return &RequestInfo{Date: time.Now().UTC()}
