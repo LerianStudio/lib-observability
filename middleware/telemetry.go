@@ -180,10 +180,6 @@ func (tm *TelemetryMiddleware) WithTelemetry(tl *tracing.Telemetry, excludedRout
 		ctx := c.Context()
 		_, _, reqId, _ := observability.NewTrackingFromContext(ctx)
 
-		if tenantID := ResolveTenantIDFromHTTP(c); tenantID != "" {
-			ctx = observability.ContextWithSpanAttributes(ctx, attribute.String(constant.AttrKeyTenantID, tenantID))
-		}
-
 		c.SetContext(observability.ContextWithSpanAttributes(ctx,
 			attribute.String("app.request.request_id", reqId),
 		))
@@ -204,14 +200,11 @@ func (tm *TelemetryMiddleware) WithTelemetry(tl *tracing.Telemetry, excludedRout
 			return err
 		}
 
-		originalURL := string([]byte(c.OriginalURL()))
 		protocol := string([]byte(c.Protocol()))
 		hostname := string([]byte(c.Hostname()))
 		userAgent := string([]byte(c.Get(headerUserAgent)))
 
 		tracer := effectiveTelemetry.TracerProvider.Tracer(effectiveTelemetry.LibraryName)
-		routePathWithMethod := method + " " + replaceUUIDWithPlaceholder(c.Path())
-
 		traceCtx := c.Context()
 		// Compatibility note: trace extraction currently trusts the internal-service
 		// User-Agent heuristic. This is an interoperability hint, not an authenticated
@@ -220,7 +213,7 @@ func (tm *TelemetryMiddleware) WithTelemetry(tl *tracing.Telemetry, excludedRout
 			traceCtx = tracing.ExtractHTTPContext(traceCtx, c)
 		}
 
-		ctx, span := tracer.Start(traceCtx, routePathWithMethod, trace.WithSpanKind(trace.SpanKindServer))
+		ctx, span := tracer.Start(traceCtx, method, trace.WithSpanKind(trace.SpanKindServer))
 		endState := newSpanEndState(span)
 
 		defer endState.End()
@@ -246,7 +239,6 @@ func (tm *TelemetryMiddleware) WithTelemetry(tl *tracing.Telemetry, excludedRout
 			method:         method,
 			methodOriginal: methodOriginal,
 			methodReplaced: methodReplaced,
-			originalURL:    originalURL,
 			protocol:       protocol,
 			hostname:       hostname,
 			userAgent:      userAgent,
@@ -266,7 +258,6 @@ type telemetryRequestAttrs struct {
 	method         string
 	methodOriginal string
 	methodReplaced bool
-	originalURL    string
 	protocol       string
 	hostname       string
 	userAgent      string
@@ -284,9 +275,11 @@ func applyTelemetrySpanAttributes(
 	statusCode int,
 	req telemetryRequestAttrs,
 ) {
+	resolvedRoute := resolvedHTTPRoute(c, statusCode)
+
 	spanAttrs := []attribute.KeyValue{
 		attribute.String("http.request.method", req.method),
-		attribute.String("url.path", sanitizeURL(req.originalURL)),
+		attribute.String("url.path", resolvedRoute),
 		attribute.String("url.scheme", req.protocol),
 		attribute.String("server.address", req.hostname),
 		attribute.String("user_agent.original", truncateUserAgent(req.userAgent)),
@@ -294,6 +287,13 @@ func applyTelemetrySpanAttributes(
 	}
 	if routePath, present := routeAttribute(c, statusCode); present {
 		spanAttrs = append(spanAttrs, attribute.String("http.route", routePath))
+	}
+
+	// Rename only after routing has resolved. Matched traffic uses the route
+	// template; unmatched traffic uses one stable fallback. Neither path can
+	// retain concrete identifiers or query values.
+	if span.IsRecording() {
+		span.SetName(req.method + " " + resolvedRoute)
 	}
 
 	if req.methodReplaced {
@@ -337,16 +337,10 @@ func applyTelemetrySpanAttributes(
 //     used by the logging middleware and avoids reporting 200 for failures.
 //   - error.type: only set when effective status >= 500, using the numeric
 //     status code as a stable, low-cardinality label.
-//   - tenant.id: resolved via resolveTenantIDForTelemetry, the same
-//     AttrBag→baggage precedence used by the logging middleware and span
-//     processor. This covers both the local-hop X-Tenant-Id header (resolved
-//     into the AttrBag) AND tenant.id propagated cross-service via OTel
-//     baggage; reading the AttrBag alone previously dropped the baggage case,
-//     emitting an empty tenant_id label for downstream traffic. Omitted when
-//     neither source carries a value so series for non-tenant traffic do not
-//     gain an empty label. Cardinality is bounded by the 128-byte tenant cap in
-//     middleware/tenant.go, keeping the label safe for use in dashboards and
-//     alerts that filter by tenant.
+//
+// Tenant and customer identity are deliberately excluded. Request duration
+// histograms are infrastructure telemetry and may only use stable transport
+// dimensions; identity would create an unbounded series per customer.
 func recordHTTPServerDuration(
 	c fiber.Ctx,
 	hist metric.Float64Histogram,
@@ -370,10 +364,6 @@ func recordHTTPServerDuration(
 
 	if errType := classifyHTTPErrorType(statusCode); errType != "" {
 		attrs = append(attrs, attribute.String("error.type", errType))
-	}
-
-	if tenantID := resolveTenantIDForTelemetry(c.Context()); tenantID != "" {
-		attrs = append(attrs, attribute.String(constant.AttrKeyTenantID, tenantID))
 	}
 
 	durationSeconds := time.Since(start).Seconds()

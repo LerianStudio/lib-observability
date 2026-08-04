@@ -14,10 +14,10 @@ import (
 // ResolveTenantIDFromHTTP returns the tenant identifier carried by the
 // canonical X-Tenant-Id header, normalized for safe inclusion in telemetry.
 // Returns an empty string when the header is absent, empty after trimming, or
-// longer than MaxTenantIDLen bytes. The header is trusted only as an
-// observability hint: callers MUST authenticate the tenant separately and
-// override via observability.ContextWithSpanAttributes when the real value
-// differs from the header.
+// longer than MaxTenantIDLen bytes. This compatibility API does not make the
+// shared HTTP logging, tracing, or metrics middleware consume the header.
+// Callers MUST authenticate tenant identity before using the returned value in
+// explicit application telemetry.
 func ResolveTenantIDFromHTTP(c fiber.Ctx) string {
 	if c == nil {
 		return ""
@@ -75,8 +75,7 @@ func sanitizeTenantID(raw string) string {
 // values injected directly via observability.ContextWithSpanAttributes (for
 // example, a handler that wants to override the header-supplied tenant with
 // one resolved from a JWT). Without this defense-in-depth step a caller
-// could silently bypass the cap and inflate log fields and metric label
-// cardinality.
+// could silently bypass the cap and inflate telemetry cardinality.
 func tenantIDFromAttrBag(ctx context.Context) string {
 	for _, attr := range observability.AttributesFromContext(ctx) {
 		if attr.Key == attribute.Key(constant.AttrKeyTenantID) {
@@ -99,20 +98,10 @@ func tenantIDFromBaggage(ctx context.Context) string {
 	return sanitizeTenantID(baggage.FromContext(ctx).Member(constant.AttrKeyTenantID).Value())
 }
 
-// resolveTenantIDForTelemetry resolves the tenant.id to attach to a request's
-// telemetry (request logger AND the http.server.request.duration metric) using
-// the same base→override precedence as the span processor: the standard OTel
-// baggage is the base source, and the request AttrBag (header/JWT-resolved)
-// overrides it when present. Returns "" when neither source carries a usable
-// value.
-//
-// Sharing this resolver across logs, spans, and metrics is deliberate: tenant
-// .id frequently arrives cross-service via OTel baggage (see PR #20) rather
-// than the canonical X-Tenant-Id header on the local hop. The metric path
-// previously read the AttrBag only (tenantIDFromAttrBag), so baggage-propagated
-// tenants produced an empty tenant_id label on the duration histogram even
-// though spans and logs carried the value. Routing the metric through this
-// resolver keeps the tenant.id label consistent with the trace/log pipelines.
+// resolveTenantIDForTelemetry resolves the tenant.id used by explicit telemetry
+// paths such as the gRPC request logger. The request AttrBag overrides standard
+// OTel baggage when both carry a usable value. Built-in HTTP telemetry does not
+// call this resolver because infrastructure signals must not carry identity.
 func resolveTenantIDForTelemetry(ctx context.Context) string {
 	if tenantID := tenantIDFromAttrBag(ctx); tenantID != "" {
 		return tenantID

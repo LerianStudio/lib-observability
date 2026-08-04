@@ -7,20 +7,18 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 )
 
-// RequestAttributes returns a copy of the request-scoped attribute bag
-// populated by the HTTP/gRPC middleware (tenant.id, app.request.request_id,
-// etc.). It is intended for explicit, opt-in inclusion of those attributes
-// as metric labels — for example:
+// RequestAttributes returns a copy of the request-scoped attribute bag. HTTP
+// middleware adds transport correlation attributes such as request ID, while
+// authenticated identity must be attached explicitly by the application. The
+// result is intended for opt-in inclusion in business metric labels, for example:
 //
 //	meter.CounterBuilder("orders.created").
 //	    WithAttributes(middleware.RequestAttributes(ctx)...).
 //	    Add(ctx, 1)
 //
-// The middleware does NOT add these attributes to metrics automatically:
+// The middleware does NOT add identity attributes to HTTP metrics automatically:
 // metric labels are a high-impact cardinality decision that must remain in
-// the hands of the caller. Logs and traces already receive the bag via the
-// logging middleware and AttrBagSpanProcessor respectively, so no caller
-// action is required there.
+// the hands of the caller.
 func RequestAttributes(ctx context.Context) []attribute.KeyValue {
 	return observability.AttributesFromContext(ctx)
 }

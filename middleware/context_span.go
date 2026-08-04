@@ -33,13 +33,10 @@ func isNilSpan(span trace.Span) bool {
 // current trace span AND propagates them into the request-wide AttrBag carried
 // by ctx, returning the enriched context.
 //
-// Why both sinks: setting attributes only on the child span (the previous
-// behavior) left the AttrBag empty, so when WithTelemetry read the tenant.id
-// back from the AttrBag after c.Next() to label http.server.request.duration
-// (via tenantIDFromAttrBag) it found nothing, and the metric/root span lost the
-// tenant.id. Funneling the same attributes through ContextWithSpanAttributes
-// fixes that: the AttrBagSpanProcessor copies them onto the root span and the
-// duration metric gains the tenant.id label.
+// Why both sinks: setting attributes only on the current span leaves the
+// request AttrBag empty, so later application spans and explicitly opted-in
+// business metrics cannot reuse the authenticated identity. The built-in HTTP
+// server span and duration metric deliberately exclude tenant identity.
 //
 // Callers MUST use the returned context for downstream work (handler chain,
 // c.SetUserContext) so the propagated attributes are visible; the AttrBag lives

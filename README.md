@@ -44,13 +44,18 @@ A configurable `Redactor` with rule-based field processing supporting mask, hash
 - **Redaction-first** — sensitive fields are masked in spans, logs, and attributes by default
 - **Interface-driven** — `Logger`, `MetricsFactory`, `ErrorReporter`, and `DLQMetrics` are all interface-bound for testability
 
+## HTTP server telemetry safety
+
+`WithHTTPLogging` and `WithTelemetry` resolve the matched Fiber route only after the downstream handler returns. Access logs, server span names, `url.path`, and `http.route` therefore use the route template (for example, `/v1/contracts/:contract_id`) and discard the query string entirely. Unmatched traffic uses the stable `/{unmatched}` fallback for logs, span names, and `url.path`; `http.route` remains absent, as required by OpenTelemetry.
+
+The HTTP middleware never derives tenant or customer identity from `X-Tenant-Id`. That client-controlled value is not added to access logs, server spans, or built-in HTTP metric labels. `http.server.request.duration` is limited to stable transport dimensions.
+
 ## Tenant ID propagation
 
-The HTTP and gRPC middleware automatically read a tenant identifier from the request and propagate it through telemetry as the `tenant.id` attribute / log field.
+The gRPC middleware can still read a tenant identifier from request metadata and propagate it through telemetry as the `tenant.id` attribute / log field. HTTP applications must attach authenticated identity explicitly if their application telemetry requires it.
 
 ### Wire protocol
 
-- **HTTP:** canonical header `X-Tenant-Id`. No aliases.
 - **gRPC:** canonical metadata key `tenant-id`. No aliases.
 
 Values are normalized (trimmed, control chars stripped) and dropped silently when empty or longer than 128 bytes to bound telemetry cardinality.
@@ -59,10 +64,9 @@ Values are normalized (trimmed, control chars stripped) and dropped silently whe
 
 | Signal | How it gets there | Action required by caller |
 |---|---|---|
-| Logs | `WithHTTPLogging` / `WithGrpcLogging` add `tenant.id` as a structured field. | None |
-| Traces | The `AttrBagSpanProcessor` (registered by default in `tracing.NewTelemetry`) copies the request attribute bag onto every span at start. | None |
-| `http.server.request.duration` (built-in metric) | `WithTelemetry` adds `tenant.id` to the histogram when present in the request bag. Label is omitted when no tenant was supplied so non-tenant traffic does not split the time series. | None |
-| Custom application metrics | Not automatic. Metric labels are a high-impact cardinality decision left to the caller. | Use `middleware.RequestAttributes(ctx)` to opt in per metric. |
+| HTTP access logs, server spans, and built-in metrics | Tenant/customer identity is never inferred from `X-Tenant-Id`. | None; the header is deliberately ignored by HTTP telemetry. |
+| gRPC logs and traces | `WithGrpcLogging` and the span processor propagate `tenant.id` from canonical metadata. | None. |
+| Custom application metrics | Not automatic. Metric labels are a high-impact cardinality decision left to the caller. | Attach authenticated identity explicitly; `middleware.RequestAttributes(ctx)` can copy an application-populated request bag. |
 
 Example for custom metrics:
 
@@ -77,10 +81,9 @@ _ = counter.
 
 ### Trust boundary
 
-The header is **client-controlled**. The middleware treats it as an observability hint, not an authenticated identifier:
+`ResolveTenantIDFromHTTP` remains available for source compatibility, but the shared HTTP middleware no longer invokes it automatically. `X-Tenant-Id` is client-controlled and must not become infrastructure telemetry identity.
 
-- Run authentication (JWT, mTLS, etc.) **before** these middlewares apply effects you care about.
-- If your auth layer resolves the real tenant from a signed credential, call `observability.ContextWithSpanAttributes(ctx, attribute.String("tenant.id", real))` from the handler. The attribute bag is deduplicated by key with last-wins semantics, so the override surfaces in subsequent logs/traces and replaces the header-supplied value.
+If an auth layer resolves the real tenant from a signed credential, it can call `observability.ContextWithSpanAttributes(ctx, attribute.String("tenant.id", real))` for explicit application spans or business metrics. The built-in HTTP duration histogram still excludes identity.
 
 ## Relationship to lib-commons
 
