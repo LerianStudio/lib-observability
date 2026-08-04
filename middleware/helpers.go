@@ -2,16 +2,15 @@ package middleware
 
 import (
 	"context"
-	"net/url"
 	"reflect"
 	"regexp"
 	"strings"
 
-	constant "github.com/LerianStudio/lib-observability/v2/constants"
-	"github.com/LerianStudio/lib-observability/v2/redaction"
 	"github.com/gofiber/fiber/v3"
 	"google.golang.org/grpc/metadata"
 )
+
+const unmatchedRouteTemplate = "/{unmatched}"
 
 // internalServicePattern matches Lerian internal service user-agent strings.
 var internalServicePattern = regexp.MustCompile(`^[\w-]+/[\d.]+\s+LerianStudio$`)
@@ -37,7 +36,7 @@ func normalizeHTTPMethod(raw string) (normalized, original string, replaced bool
 }
 
 // routeAttribute returns the route template suitable for the http.route
-// telemetry attribute, plus a present flag. Fiber v2 exposes Route().Path
+// telemetry attribute, plus a present flag. Fiber exposes Route().Path
 // == "/" for unmatched requests (its default catch-all), which would
 // conflate scanner/404 traffic with the actual root handler in dashboards.
 // We detect this case (effective status == 404 AND route == "/" AND the
@@ -59,6 +58,18 @@ func routeAttribute(c fiber.Ctx, effectiveStatus int) (string, bool) {
 	}
 
 	return r.Path, true
+}
+
+// resolvedHTTPRoute returns the matched route template or a stable fallback
+// for unmatched traffic. It must only be used after the downstream Fiber
+// chain has returned, when Route().Path is reliable.
+func resolvedHTTPRoute(c fiber.Ctx, effectiveStatus int) string {
+	routePath, present := routeAttribute(c, effectiveStatus)
+	if !present {
+		return unmatchedRouteTemplate
+	}
+
+	return routePath
 }
 
 // maxUserAgentAttrLen caps the user_agent.original span attribute to avoid
@@ -141,47 +152,6 @@ func isRouteExcludedFromList(c fiber.Ctx, excludedRoutes []string) bool {
 	}
 
 	return false
-}
-
-// sanitizeURL removes or obfuscates sensitive query parameters from URLs
-// to prevent exposing tokens, API keys, and other sensitive data in telemetry.
-func sanitizeURL(rawURL string) string {
-	parsed, err := url.Parse(rawURL)
-	if err != nil {
-		return sanitizeMalformedURL(rawURL)
-	}
-
-	if parsed.RawQuery == "" {
-		return rawURL
-	}
-
-	query := parsed.Query()
-	modified := false
-
-	for key := range query {
-		if redaction.IsSensitiveField(key) {
-			query.Set(key, constant.ObfuscatedValue)
-
-			modified = true
-		}
-	}
-
-	if !modified {
-		return rawURL
-	}
-
-	parsed.RawQuery = query.Encode()
-
-	return parsed.String()
-}
-
-func sanitizeMalformedURL(rawURL string) string {
-	sanitized := sanitizeLogValue(rawURL)
-	if before, _, ok := strings.Cut(sanitized, "?"); ok {
-		return before + "?redacted"
-	}
-
-	return sanitized
 }
 
 // sanitizeLogValue removes control characters (newlines, carriage returns, null bytes)

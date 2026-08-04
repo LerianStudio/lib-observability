@@ -101,7 +101,10 @@ func newTelemetryHarness(
 	tel, reader := newMetricsHarness(t)
 
 	spanExp := tracetest.NewInMemoryExporter()
-	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(spanExp))
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithSpanProcessor(tracing.AttrBagSpanProcessor{}),
+		sdktrace.WithSyncer(spanExp),
+	)
 	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
 
 	tel.TracerProvider = tp
@@ -847,13 +850,9 @@ func TestWithTelemetry_TruncatesUserAgentAtRuneBoundary(t *testing.T) {
 	assert.Equal(t, strings.Repeat("€", 85), ua)
 }
 
-// TestWithTelemetry_RecordsDurationWithTenantID verifies that the
-// http.server.request.duration metric carries the tenant.id attribute when the
-// request supplies the canonical X-Tenant-Id header. This is the contract that
-// lets dashboards and alerts filter/group request volume and latency per
-// tenant — replacing the spanmetrics calls_total{tenant_id} usage previously
-// derived from the trace pipeline.
-func TestWithTelemetry_RecordsDurationWithTenantID(t *testing.T) {
+// TestWithTelemetry_DurationOmitsTenantIDFromHeader verifies that
+// client-controlled identity never becomes an HTTP metric label.
+func TestWithTelemetry_DurationOmitsTenantIDFromHeader(t *testing.T) {
 	tel, reader := newMetricsHarness(t)
 
 	app := fiber.New()
@@ -876,20 +875,14 @@ func TestWithTelemetry_RecordsDurationWithTenantID(t *testing.T) {
 	require.NotNil(t, dp)
 	assert.EqualValues(t, 1, dp.Count)
 
-	tenantVal, ok := attrValue(dp.Attributes, "tenant.id")
-	require.True(t, ok, "tenant.id label must be present when X-Tenant-Id is supplied")
-	assert.Equal(t, "acme", tenantVal)
+	_, ok := attrValue(dp.Attributes, "tenant.id")
+	assert.False(t, ok, "tenant.id must never label HTTP request duration")
 }
 
-// TestWithTelemetry_RecordsDurationWithBaggageTenantID is the regression guard
-// for the metrics-only gap that survived PR #21: tenant.id propagated
-// cross-service via OTel baggage (PR #20) reached spans and logs but NOT the
-// http.server.request.duration metric, because the metric path read the
-// AttrBag only. The request below carries NO X-Tenant-Id header on the local
-// hop; the tenant is present solely in the inbound baggage, exactly as it
-// arrives at a downstream midaz plugin. The duration metric must still carry
-// tenant.id, matching the trace/log pipelines.
-func TestWithTelemetry_RecordsDurationWithBaggageTenantID(t *testing.T) {
+// TestWithTelemetry_DurationOmitsTenantIDFromBaggage verifies that identity is
+// excluded even when it was propagated by a trusted upstream service. HTTP RED
+// metrics retain transport dimensions only.
+func TestWithTelemetry_DurationOmitsTenantIDFromBaggage(t *testing.T) {
 	tel, reader := newMetricsHarness(t)
 
 	app := fiber.New()
@@ -918,9 +911,8 @@ func TestWithTelemetry_RecordsDurationWithBaggageTenantID(t *testing.T) {
 	require.NotNil(t, dp)
 	assert.EqualValues(t, 1, dp.Count)
 
-	tenantVal, ok := attrValue(dp.Attributes, "tenant.id")
-	require.True(t, ok, "tenant.id label must be present when tenant.id arrives via OTel baggage")
-	assert.Equal(t, "acme", tenantVal)
+	_, ok := attrValue(dp.Attributes, "tenant.id")
+	assert.False(t, ok, "tenant.id must never label HTTP request duration")
 }
 
 // TestWithTelemetry_RecordsDurationWithoutTenantID verifies that the

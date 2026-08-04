@@ -163,7 +163,7 @@ func NewRequestInfo(c fiber.Ctx, obfuscationDisabled bool) *RequestInfo {
 	return &RequestInfo{
 		TraceID:       c.Get(headerID),
 		Method:        c.Method(),
-		URI:           sanitizeURL(c.OriginalURL()),
+		URI:           resolvedHTTPRoute(c, c.Response().StatusCode()),
 		Username:      username,
 		Referer:       referer,
 		UserAgent:     sanitizeLogValue(c.Get(headerUserAgent)),
@@ -203,6 +203,7 @@ func (r *RequestInfo) FinishRequestInfo(rw *ResponseMetricsWrapper) {
 	r.Duration = time.Since(r.Date)
 	r.Status = rw.StatusCode
 	r.Size = rw.Size
+	r.URI = resolvedHTTPRoute(rw.Context, rw.StatusCode)
 }
 
 // WithHTTPLogging logs Fiber HTTP access requests.
@@ -230,17 +231,9 @@ func WithHTTPLogging(opts ...LogMiddlewareOption) fiber.Handler {
 		requestID := c.Get(headerID)
 		ctx := c.Context()
 
-		if tenantID := ResolveTenantIDFromHTTP(c); tenantID != "" {
-			ctx = observability.ContextWithSpanAttributes(ctx, attribute.String(constant.AttrKeyTenantID, tenantID))
-		}
-
 		logger := mid.Logger.
 			With(obslog.String(headerID, info.TraceID)).
 			With(obslog.String("message_prefix", requestID+constant.LoggerDefaultSeparator))
-
-		if tenantID := resolveTenantIDForTelemetry(ctx); tenantID != "" {
-			logger = logger.With(obslog.String(constant.AttrKeyTenantID, tenantID))
-		}
 
 		ctx = observability.ContextWithLogger(ctx, logger)
 		c.SetContext(ctx)
