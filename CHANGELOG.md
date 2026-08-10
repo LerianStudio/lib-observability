@@ -1,5 +1,19 @@
 # Lib-observability Changelog
 
+## [2.1.2](https://github.com/LerianStudio/lib-observability/releases/tag/v2.1.2)
+
+Fixes:
+
+- Restored the trusted `tenant.id` baggage member verbatim instead of rebuilding it via `NewMember`. (@fredcamaral)
+- Addressed review findings related to typed-nil `originalErr`, `exception.type`, and nil guards in middleware. (@fredcamaral)
+- Satisfied `dogsled` and `ST1008` lint requirements on error handling helpers in middleware. (@fredcamaral)
+- Implemented typed-nil-safe error handling and ensured streaming-safe access logs as part of the `v2` backport for middleware. (@fredcamaral)
+- Enhanced fiber middleware safety in version `v2`. (@fredcamaral)
+
+[Compare changes](https://github.com/LerianStudio/lib-observability/compare/v2.1.1...v2.1.2)
+
+---
+
 ## [Unreleased]
 
 
