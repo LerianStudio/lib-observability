@@ -38,22 +38,23 @@ func normalizeHTTPMethod(raw string) (normalized, original string, replaced bool
 // routeAttribute returns the route template suitable for the http.route
 // telemetry attribute, plus a present flag. Fiber exposes Route().Path
 // == "/" for unmatched requests (its default catch-all), which would
-// conflate scanner/404 traffic with the actual root handler in dashboards.
-// We detect this case (effective status == 404 AND route == "/" AND the
-// request path is NOT "/") and report the attribute as absent so callers
-// can omit it entirely, matching OTel guidance that http.route SHOULD be
-// absent when no route matched.
-func routeAttribute(c fiber.Ctx, effectiveStatus int) (string, bool) {
+// conflate early refusals and scanner traffic with the actual root handler.
+// c.Matched() is the routing authority independent of the response status -
+// unlike the previous "status == 404 AND route == / AND path != /"
+// heuristic, it does not depend on the handler's chosen status code, so a
+// deliberate non-404 response to an unmatched path (or a 404 the handler
+// itself returns for a MATCHED route) is classified correctly.
+func routeAttribute(c fiber.Ctx) (string, bool) {
 	if c == nil {
+		return "", false
+	}
+
+	if !c.Matched() {
 		return "", false
 	}
 
 	r := c.Route()
 	if r == nil {
-		return "", false
-	}
-
-	if effectiveStatus == fiber.StatusNotFound && r.Path == "/" && c.Path() != "/" {
 		return "", false
 	}
 
@@ -63,8 +64,8 @@ func routeAttribute(c fiber.Ctx, effectiveStatus int) (string, bool) {
 // resolvedHTTPRoute returns the matched route template or a stable fallback
 // for unmatched traffic. It must only be used after the downstream Fiber
 // chain has returned, when Route().Path is reliable.
-func resolvedHTTPRoute(c fiber.Ctx, effectiveStatus int) string {
-	routePath, present := routeAttribute(c, effectiveStatus)
+func resolvedHTTPRoute(c fiber.Ctx) string {
+	routePath, present := routeAttribute(c)
 	if !present {
 		return unmatchedRouteTemplate
 	}
@@ -193,9 +194,57 @@ func isNilOrEmptyString(s *string) bool {
 	return s == nil || strings.TrimSpace(*s) == "" || strings.TrimSpace(*s) == "null" || strings.TrimSpace(*s) == "nil"
 }
 
-// normalizeRequestID trims whitespace and control characters from a raw request ID.
+// maxRequestIDLength bounds a correlation ID so an unbounded caller-supplied
+// value cannot inflate headers/log lines/span attributes indefinitely.
+const maxRequestIDLength = 128
+
+// normalizeRequestID returns a bounded, injection-safe identifier suitable
+// for headers and telemetry.
+//
+// It rejects-and-regenerates rather than rewriting: only control bytes (CR,
+// LF, tab, NUL, and the rest of printable ASCII's complement) are stripped,
+// because those enable header/log injection (CWE-113/CWE-117). Every other
+// printable ASCII character - including ':', '/', '+', '=' - passes through
+// unchanged, so an existing cross-service ID format (namespaced identifiers,
+// URL-safe base64, ULIDs with a service prefix) survives intact instead of
+// being rewritten into a different string that breaks log correlation joins
+// between services. Idempotent: running an already-clean ID through this
+// function a second time returns the same value, since it has nothing left
+// to strip or truncate.
+//
+// The caller regenerates a UUID when this returns "" - this function only
+// ever strips or truncates, never substitutes.
 func normalizeRequestID(raw string) string {
-	return strings.TrimSpace(sanitizeLogValue(raw))
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+
+	var normalized strings.Builder
+
+	normalized.Grow(min(len(raw), maxRequestIDLength))
+
+	for _, char := range raw {
+		if !isSafeRequestIDCharacter(char) {
+			continue
+		}
+
+		if normalized.Len() >= maxRequestIDLength {
+			break
+		}
+
+		normalized.WriteRune(char)
+	}
+
+	return strings.TrimSpace(normalized.String())
+}
+
+// isSafeRequestIDCharacter reports whether a rune is safe to carry in a
+// correlation ID: printable ASCII (0x20-0x7E), which by construction
+// excludes CR, LF, tab, NUL and every other control byte - the actual
+// injection vector - without narrowing the allowed punctuation set.
+func isSafeRequestIDCharacter(char rune) bool {
+	return char >= 0x20 && char <= 0x7E
 }
 
 // normalizeGRPCContext returns a non-nil context, falling back to context.Background().

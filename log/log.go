@@ -43,7 +43,17 @@ const (
 	levelErrorString = "error"
 
 	errorFieldKey = "error"
+)
 
+// This MUST be its own const block: iota counts every ConstSpec in the block
+// it appears in, not just the ones that use it. Sharing a block with the
+// four string constants above previously put LevelError at iota=5 (not 0),
+// silently contradicting the doc comment below and breaking every ordering
+// comparison against it - GoLogger.Enabled's `l.Level >= level` in
+// particular, which made the Level-0 zero value (an uninitialized
+// &GoLogger{}, e.g. WithHTTPLogging's default with no WithCustomLogger)
+// enabled for NOTHING, since 0 >= 5 is false for every defined level.
+const (
 	LevelError Level = iota
 	LevelWarn
 	LevelInfo

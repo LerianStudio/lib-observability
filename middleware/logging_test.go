@@ -69,16 +69,27 @@ func (r grpcRequestWithID) GetRequestId() string {
 	return r.RequestId
 }
 
-func TestNewRequestInfoUsesRouteTemplateAndSanitizesRequestData(t *testing.T) {
+// TestNewRequestInfoNeverCapturesRequestBody guards the fix for a body-capture
+// bug that broke multi-GB streaming uploads: NewRequestInfo used to call
+// c.Body() unconditionally, which consumes/buffers the request body before
+// the downstream handler can read it as a stream (RequestBodyStream() then
+// returns nil). Access logging must never touch the body at all; Referer and
+// Username are fixed "-" placeholders rather than parsed from the request.
+func TestNewRequestInfoNeverCapturesRequestBody(t *testing.T) {
 	app := fiber.New()
 	app.Post("/charge", func(c fiber.Ctx) error {
 		info := NewRequestInfo(c, false)
 
 		assert.Equal(t, "POST", info.Method)
 		assert.Empty(t, info.URI, "URI must stay unresolved until FinishRequestInfo runs after routing")
-		assert.Equal(t, "https://example.com/path", info.Referer)
+		assert.Equal(t, "-", info.Referer)
+		assert.Equal(t, "-", info.Username)
 		assert.Equal(t, "agent", info.UserAgent)
-		assert.JSONEq(t, "{\"nested\":{\"secret\":\"********\"},\"password\":\"********\"}", info.Body)
+		assert.Empty(t, info.Body, "request bodies are never captured by access logging")
+
+		// The downstream handler must still be able to read the full body
+		// afterward: proves NewRequestInfo did not consume or buffer it.
+		assert.Equal(t, "{\"password\":\"secret\"}", string(c.Body()))
 
 		info.FinishRequestInfo(&ResponseMetricsWrapper{Context: c, StatusCode: http.StatusNoContent})
 		assert.Equal(t, "/charge", info.URI)
@@ -86,8 +97,7 @@ func TestNewRequestInfoUsesRouteTemplateAndSanitizesRequestData(t *testing.T) {
 		return c.SendStatus(http.StatusNoContent)
 	})
 
-	req := httptest.NewRequest(http.MethodPost, "/charge?name=alice&password=secret", strings.NewReader("{\"password\":\"secret\",\"nested\":{\"secret\":\"value\"}}"))
-	req.Header.Set(headerContentType, "Application/JSON")
+	req := httptest.NewRequest(http.MethodPost, "/charge?name=alice&password=secret", strings.NewReader("{\"password\":\"secret\"}"))
 	req.Header.Set(headerReferer, "https://user:pass@example.com/path?token=secret#fragment")
 	req.Header.Set(headerUserAgent, "agent")
 
