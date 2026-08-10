@@ -1,5 +1,112 @@
 # Lib-observability Changelog
 
+## [Unreleased]
+
+Features:
+
+- **`WithHTTPErrorHandling`**: finalizes a Fiber handler's error before outer
+  logging/telemetry middleware inspect the response, invoking the app's
+  effective `ErrorHandler` exactly once. Registering it is a correctness
+  requirement, not an optional add-on - without it, a valid, non-nil error
+  whose `Unwrap` chain hits a typed-nil (`errors.Join(fiber.NewError(400,
+  ...), typedNil)` is the reproduced case) reaches Fiber's own default
+  `ErrorHandler`, which panics calling `err.Error()` unconditionally,
+  underneath any panic-recovery middleware registered above it. Two ordering
+  rules apply: (1) no middleware that can return a non-nil error after
+  `c.Next()` may sit between the observability middleware
+  (`WithHTTPLogging`/`WithTelemetry`) and this one, or the app `ErrorHandler`
+  runs a second time; (2) panic recovery must be present somewhere in the
+  chain (either side of this middleware works) - it normalizes returned
+  errors, it does not recover panics itself.
+
+BREAKING BEHAVIOR (not yet released):
+
+- **`http.route` on pre-routing refusals**: a request that never matches a
+  registered route (Fiber's catch-all 404, and any middleware that rejects
+  before routing) no longer reports `http.route="/"` on spans - the attribute
+  is omitted entirely, and the HTTP access log's `http_path` field reports
+  `/{unmatched}` instead. Update dashboards/alerts that group or filter on
+  `http.route="/"` to also account for the missing-attribute and
+  `/{unmatched}` cases.
+- **`WithObfuscationDisabled` / `LOG_OBFUSCATION_DISABLED` are now no-ops**:
+  HTTP request bodies are never captured by access logging, so there is
+  nothing left to obfuscate or to disable obfuscation for. Callers still
+  passing this option or setting this env var see no effect; safe to remove.
+- **`RequestInfo.Body`, `.Referer`, `.Username` are always empty/`"-"`**:
+  these fields are retained for source compatibility but never populated
+  from the request. Code reading them for anything beyond the CLF access-log
+  line must be updated.
+- **A 5xx handler error now records the OTel semconv `exception` event**
+  (`exception.type`/`exception.message`) via `span.RecordError`, instead of
+  the custom `http.handler.error` event - Tempo/Jaeger and other APM
+  backends index specifically on the semconv keys, so the earlier
+  custom-named event with the same information was invisible to them. The
+  custom `http.handler.error` event is unchanged for <500 responses (a
+  mapped 4xx must never produce an `exception` event or ERROR span status,
+  per semconv). Span status itself is still gated on status code >=500
+  either way.
+- **HTTP correlation IDs (`X-Request-Id`) are now capped at 128 characters
+  and non-ASCII bytes are stripped**, both new relative to the last release:
+  an ID longer than 128 characters is silently truncated, and an ID that is
+  entirely non-ASCII (or reduces to empty after stripping) is replaced with a
+  generated UUID rather than passed through. Punctuation such as `:`, `/`,
+  `+`, `=` is preserved untouched.
+- **Inbound trace-context extraction is now opt-in, for BOTH HTTP and gRPC**:
+  set `TelemetryConfig.TrustInboundTraceContext = true` to have `WithTelemetry`
+  (HTTP) and `WithTelemetryInterceptor` (gRPC) honor an inbound
+  `traceparent`/`tracestate` header/metadata; the default is `false`
+  (fail-closed) for both. Previously, HTTP honored inbound trace context
+  unconditionally, and gRPC honored it whenever the caller's User-Agent
+  matched an internal-Lerian-service pattern - a spoofable heuristic, not an
+  authenticated trust boundary, so it never actually restricted anything a
+  malicious caller couldn't bypass. **A service on an internal mesh that
+  relied on that gRPC User-Agent heuristic to join traces must now set
+  `TrustInboundTraceContext = true` explicitly, or its gRPC spans silently
+  become trace roots instead of joining the caller's trace.** The `tenant.id`
+  baggage member is always stripped on extraction regardless of this setting
+  or transport (HTTP, gRPC, or queue) - see "Known limitations" below for the
+  one caller-controlled tenant field this does NOT cover. As part of this
+  fix, gRPC baggage propagation itself - previously a complete no-op due to a
+  key-casing mismatch between grpc-go's lowercased metadata and the
+  propagation library's canonicalizing lookup - now actually works for every
+  baggage member.
+- **The HTTP access logger's default `Level` changed from `LevelError` to
+  `LevelInfo`**: a caller of `WithHTTPLogging()`/`WithGrpcLogging()` with no
+  `WithCustomLogger` option previously logged only 5xx responses (a
+  pre-existing bug: the zero-value default emitted nothing else); it now
+  logs every request, consistent with the documented behavior a custom
+  logger set to `LevelInfo` always had. Expect access-log volume to increase
+  for any caller relying on the old default.
+
+Known limitations (documented, not addressed by this release):
+
+- **`grpcmiddleware.ResolveTenantIDFromGRPC` still reads a caller-controlled
+  `tenant-id` gRPC metadata field directly** and stamps it onto spans and
+  the `rpc.server.duration` metric's `tenant.id` label - unlike the
+  `tenant.id` OTel baggage member, which is now unconditionally stripped
+  from every inbound carrier (see above). This is a pre-existing mechanism;
+  closing it is a separate, deliberately deferred product decision (some
+  internal consumers may depend on it as a cross-service hint), not a gap
+  introduced by this release.
+
+API-stability notes for consumers pinning to internals (both from this
+release, neither part of the documented public contract but worth flagging
+explicitly since they can silently change behavior or fail to compile):
+
+- **`log.Level` constant VALUES changed** (`LevelError` was `5`, is now `0`;
+  `LevelWarn`/`LevelInfo`/`LevelDebug` shift the same way) - a pre-existing
+  bug where the four `Level` constants shared an `iota` block with five
+  unrelated string constants declared before them is fixed, restoring the
+  values the doc comment always claimed. Any consumer that persisted a
+  `Level` as a bare integer, or compared against a numeric literal instead
+  of the named constant, has its meaning silently flipped. Named-constant
+  usage (`log.LevelError`, etc.) is unaffected.
+- **`middleware.RequestInfo` gained an unexported field (`start`)**: a
+  positional (unkeyed) struct literal for `RequestInfo` from outside the
+  package no longer compiles (Go requires every field, in order, for an
+  unkeyed literal, and an external package cannot supply an unexported one).
+  Construct it via `NewRequestInfo` instead, as intended.
+
 ## [2.0.0](https://github.com/LerianStudio/lib-observability/releases/tag/v2.0.0)
 
 Features:

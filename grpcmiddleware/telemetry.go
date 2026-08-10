@@ -14,13 +14,13 @@ import (
 	"context"
 	"errors"
 	"reflect"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
 
 	observability "github.com/LerianStudio/lib-observability/v2"
 	constant "github.com/LerianStudio/lib-observability/v2/constants"
+	"github.com/LerianStudio/lib-observability/v2/log"
 	"github.com/LerianStudio/lib-observability/v2/telemetrycore"
 	"github.com/LerianStudio/lib-observability/v2/tracing"
 	"github.com/google/uuid"
@@ -55,14 +55,8 @@ const rpcSystemGRPC = "grpc"
 // metadataID is the gRPC metadata key that carries the request context identifier.
 const metadataID = "metadata_id"
 
-// headerUserAgent is the HTTP/gRPC User-Agent header key.
-const headerUserAgent = "User-Agent"
-
 // ErrContextNotFound is returned when a required context is nil.
 var ErrContextNotFound = errors.New("context not found")
-
-// internalServicePattern matches Lerian internal service user-agent strings.
-var internalServicePattern = regexp.MustCompile(`^[\w-]+/[\d.]+\s+LerianStudio$`)
 
 // rpcDurationBuckets follows the current OpenTelemetry advisory layout shared by
 // the HTTP and RPC signals (docs/metrics-contract.md). Update only in lockstep
@@ -106,6 +100,36 @@ func classifyGRPCErrorType(code grpccodes.Code) string {
 	}
 
 	return code.String()
+}
+
+// NormalizeGRPCError proves the error value returned by a gRPC
+// handler or invoker is safe to stringify, rather than inspecting its shape.
+//
+// google.golang.org/grpc/status.FromError - and therefore status.Code, called
+// throughout this file for telemetry - calls err.Error() unconditionally on
+// its fallback path for any error that does not already carry a grpc Status.
+// A shape check like log.IsNil alone only catches a bare top-level typed-nil
+// (var err *MyError; return nil, err); it misses a VALID, non-nil error whose
+// Unwrap chain hits an unguarded typed-nil - errors.Join(real, typedNil), or
+// a custom wrapper whose Error() blindly delegates to a nil field - both of
+// which are also not caught by IsNil and both panic on Error(). Unlike an
+// HTTP handler panic, which Fiber can isolate to one request/response, a
+// panic here runs in the goroutine servicing the RPC with nothing above it to
+// recover: unrecovered, it takes down the whole process. The same raw error
+// is also what this interceptor returns to grpc-go's own dispatch, which
+// performs the identical status.FromError conversion one level up - so the
+// value must be normalized here, not only read defensively for our own
+// telemetry.
+func NormalizeGRPCError(err error) error {
+	if err == nil {
+		return nil
+	}
+
+	if !log.IsSafeToStringify(err) {
+		return status.Error(grpccodes.Unknown, "internal error")
+	}
+
+	return err
 }
 
 type spanEndStateKey struct{}
@@ -204,6 +228,13 @@ func (tm *TelemetryMiddleware) WithTelemetryInterceptor(tl *tracing.Telemetry) g
 		)
 	}
 
+	// Same hoisting rationale as the histogram above: read once at
+	// construction time rather than on every request. Shared with HTTP's
+	// WithTelemetry - see TrustInboundTraceContext's doc comment - so a
+	// service configures inbound trust once per Telemetry instance,
+	// consistently across both transports.
+	trustInboundTraceContext := bootstrapTelemetry != nil && bootstrapTelemetry.TrustInboundTraceContext
+
 	return func(
 		ctx context.Context,
 		req any,
@@ -232,6 +263,7 @@ func (tm *TelemetryMiddleware) WithTelemetryInterceptor(tl *tracing.Telemetry) g
 		if effectiveTelemetry.TracerProvider == nil {
 			start := time.Now()
 			resp, err := handler(ctx, req)
+			err = NormalizeGRPCError(err)
 
 			recordRPCDuration(ctx, serverDurationHistogram, methodName, start, err,
 				ResolveTenantIDFromGRPC(ctx))
@@ -251,11 +283,16 @@ func (tm *TelemetryMiddleware) WithTelemetryInterceptor(tl *tracing.Telemetry) g
 			attribute.String("grpc.method", methodName),
 		)
 
+		// Fail-closed by default (TrustInboundTraceContext's zero value),
+		// same posture and same flag as the HTTP middleware: an untrusted
+		// caller cannot choose this service's trace ID or force a sampling
+		// decision via a forged traceparent. The previous gate - the
+		// caller's User-Agent matching an internal-Lerian-service pattern -
+		// was an interoperability hint, not an authenticated trust boundary
+		// (spoofable by any caller that sets the header), so it never
+		// actually restricted anything a malicious caller couldn't bypass.
 		traceCtx := ctx
-		// Compatibility note: trace extraction currently trusts the internal-service
-		// User-Agent heuristic. This is an interoperability hint, not an authenticated
-		// trust boundary, and is preserved to avoid changing existing caller behavior.
-		if isInternalLerianService(getGRPCUserAgent(ctx)) {
+		if trustInboundTraceContext {
 			md, _ := metadata.FromIncomingContext(ctx)
 			traceCtx = tracing.ExtractGRPCContext(ctx, md)
 		}
@@ -285,6 +322,17 @@ func (tm *TelemetryMiddleware) WithTelemetryInterceptor(tl *tracing.Telemetry) g
 		// reflects the handler chain, then record after the status is known.
 		start := time.Now()
 		resp, err := handler(ctx, req)
+		// Guard against a handler returning an error status.Code below (via
+		// status.FromError) cannot safely stringify: err != nil is true even
+		// for a bare typed-nil (var err *MyError; return nil, err), and
+		// status.FromError calls err.Error() unconditionally on its fallback
+		// path for anything that is not already a grpc Status - a
+		// nil-receiver method call that panics the serving goroutine and,
+		// unrecovered, kills the whole process. NormalizeGRPCError
+		// proves stringifiability directly (see its own doc comment); it is
+		// NOT limited to the top-level value the way
+		// middleware.normalizeHTTPHandlerError is.
+		err = NormalizeGRPCError(err)
 
 		grpcStatusCode := status.Code(err)
 		span.SetAttributes(
@@ -432,6 +480,7 @@ func (tm *TelemetryMiddleware) UnaryClientInterceptor(tl *tracing.Telemetry) grp
 
 		start := time.Now()
 		err := invoker(ctx, method, req, reply, cc, opts...)
+		err = NormalizeGRPCError(err)
 
 		// Client metric carries no tenant.id (empty string omits the label).
 		recordRPCDuration(ctx, clientDurationHistogram, method, start, err, "")
@@ -555,36 +604,33 @@ func getMetadataID(ctx context.Context) string {
 	return ""
 }
 
-// getGRPCUserAgent extracts the User-Agent from incoming gRPC metadata.
-// Returns empty string if the metadata is not present or doesn't contain user-agent.
-func getGRPCUserAgent(ctx context.Context) string {
-	if ctx == nil {
-		return ""
-	}
-
-	md, ok := metadata.FromIncomingContext(ctx)
-	if !ok || md == nil {
-		return ""
-	}
-
-	userAgents := md.Get(strings.ToLower(headerUserAgent))
-	if len(userAgents) == 0 {
-		return ""
-	}
-
-	return userAgents[0]
-}
-
-// isInternalLerianService reports whether a user-agent belongs to a Lerian internal service.
-func isInternalLerianService(userAgent string) bool {
-	return internalServicePattern.MatchString(userAgent)
-}
-
 // ResolveTenantIDFromGRPC returns the tenant identifier carried by the
 // canonical tenant-id gRPC metadata key, normalized for safe inclusion in
 // telemetry. Returns an empty string when the metadata is absent, empty, or
 // longer than MaxTenantIDLen bytes. The metadata is trusted only as an
 // observability hint: callers MUST authenticate the tenant separately.
+//
+// Known gap (tracked, not yet closed): unlike the tenant.id OTel baggage
+// member - which tracing.ExtractTraceContext strips unconditionally from
+// every inbound carrier, see its doc comment - this function reads a
+// caller-controlled `tenant-id` gRPC metadata field DIRECTLY, with no
+// equivalent strip, and its result is stamped onto spans and the
+// rpc.server.duration metric's tenant.id label. The gap is twofold:
+// attribution forgery (a caller can claim any tenant), and metric label
+// cardinality - sanitizeTenantID caps each value's LENGTH but not the number
+// of DISTINCT values, so a caller sending unlimited distinct tenant-id
+// values mints new rpc.server.duration series in the metrics backend (the
+// span attribute is bounded per trace and unaffected; the metric label is
+// the exposed surface). In-SDK, go.opentelemetry.io/otel/sdk/metric applies
+// its default 2,000 attribute-set limit per collection cycle and aggregates
+// the excess into otel.metric.overflow=true - this library does not override
+// that - so SDK aggregation-state growth is a risk only for a provider
+// explicitly configured as unlimited (WithCardinalityLimit(0) or the env
+// override); the backend-cardinality and overflow-induced data-loss risks
+// remain for everyone. Whether to close this the same way (and what that
+// breaks for callers that already rely on it as a deliberate cross-service
+// hint) is a separate, pending product decision covering both risks - not
+// addressed by this fix.
 func ResolveTenantIDFromGRPC(ctx context.Context) string {
 	if ctx == nil {
 		return ""

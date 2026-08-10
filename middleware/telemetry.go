@@ -10,7 +10,6 @@ package middleware
 import (
 	"context"
 	"errors"
-	"fmt"
 	"reflect"
 	"strconv"
 	"strings"
@@ -18,6 +17,7 @@ import (
 	"time"
 
 	observability "github.com/LerianStudio/lib-observability/v2"
+	obslog "github.com/LerianStudio/lib-observability/v2/log"
 	"github.com/LerianStudio/lib-observability/v2/tracing"
 	"github.com/gofiber/fiber/v3"
 	"github.com/google/uuid"
@@ -35,6 +35,8 @@ const httpServerRequestDurationMetric = "http.server.request.duration"
 // name for the number of in-flight HTTP server requests. Recorded as an Int64
 // UpDownCounter in the unitless "{request}" dimension.
 const httpServerActiveRequestsMetric = "http.server.active_requests"
+
+const httpHandlerErrorEvent = "http.handler.error"
 
 // httpServerDurationBuckets follows the current OpenTelemetry HTTP semantic
 // conventions advisory layout for http.server.request.duration. Update only
@@ -199,6 +201,10 @@ func (tm *TelemetryMiddleware) WithTelemetry(tl *tracing.Telemetry, excludedRout
 		activeRequests = newActiveRequestsCounter(meter)
 	}
 
+	// Same hoisting rationale as the histogram above: read once at
+	// construction time rather than on every request.
+	trustInboundTraceContext := bootstrapTelemetry != nil && bootstrapTelemetry.TrustInboundTraceContext
+
 	return func(c fiber.Ctx) error {
 		effectiveTelemetry := tl
 		if effectiveTelemetry == nil && tm != nil {
@@ -206,11 +212,11 @@ func (tm *TelemetryMiddleware) WithTelemetry(tl *tracing.Telemetry, excludedRout
 		}
 
 		if effectiveTelemetry == nil {
-			return c.Next()
+			return nextWithNormalizedHTTPError(c)
 		}
 
 		if len(excludedRoutes) > 0 && isRouteExcludedFromList(c, excludedRoutes) {
-			return c.Next()
+			return nextWithNormalizedHTTPError(c)
 		}
 
 		setRequestHeaderID(c)
@@ -227,7 +233,7 @@ func (tm *TelemetryMiddleware) WithTelemetry(tl *tracing.Telemetry, excludedRout
 			attribute.String("app.request.request_id", reqId),
 		))
 
-		// Capture all Fiber context string values BEFORE c.Next(). Fiber v2 uses
+		// Capture all Fiber context string values BEFORE c.Next(). Fiber uses
 		// utils.UnsafeString which returns pointers into fasthttp's request buffer.
 		// After c.Next() returns, fasthttp may recycle the underlying RequestCtx
 		// for the next connection, corrupting any previously returned string slices.
@@ -243,11 +249,12 @@ func (tm *TelemetryMiddleware) WithTelemetry(tl *tracing.Telemetry, excludedRout
 		defer activeDone()
 
 		if effectiveTelemetry.TracerProvider == nil {
-			err := c.Next()
+			returnedErr := c.Next()
+			statusCode, _, chainErr := resolveHTTPResponse(c, returnedErr)
 
-			recordHTTPServerDuration(c, durationHistogram, method, requestStart, err)
+			recordHTTPServerDuration(c, durationHistogram, method, requestStart, statusCode)
 
-			return err
+			return chainErr
 		}
 
 		protocol := string([]byte(c.Protocol()))
@@ -264,11 +271,15 @@ func (tm *TelemetryMiddleware) WithTelemetry(tl *tracing.Telemetry, excludedRout
 		// "{method} {route template}" once the route is known.
 		spanName := method
 
+		// Fail-closed by default (TrustInboundTraceContext's zero value):
+		// inbound trace context is only extracted for a deployment that opted
+		// in, so an untrusted caller cannot choose this service's trace ID or
+		// force a sampling decision via a forged traceparent header. When
+		// extraction does run, ExtractHTTPContext always strips the tenant.id
+		// baggage member regardless of this flag - tenant identity never comes
+		// from a header.
 		traceCtx := c.Context()
-		// Compatibility note: trace extraction currently trusts the internal-service
-		// User-Agent heuristic. This is an interoperability hint, not an authenticated
-		// trust boundary, and is preserved to avoid changing existing caller behavior.
-		if isInternalLerianService(userAgent) {
+		if trustInboundTraceContext {
 			traceCtx = ExtractHTTPContext(traceCtx, c)
 		}
 
@@ -292,12 +303,8 @@ func (tm *TelemetryMiddleware) WithTelemetry(tl *tracing.Telemetry, excludedRout
 			tracing.HandleSpanError(span, "Failed to collect metrics", err)
 		}
 
-		err = c.Next()
-
-		// Reconcile the effective status the client will observe (same helper
-		// the metric uses) so the span's status code, error.type, and
-		// error.type_original stay consistent with the duration metric.
-		statusCode := httpStatusCode(c, err)
+		returnedErr := c.Next()
+		statusCode, handlerErr, chainErr := resolveHTTPResponse(c, returnedErr)
 
 		applyTelemetrySpanAttributes(span, c, statusCode, telemetryRequestAttrs{
 			method:         method,
@@ -306,12 +313,12 @@ func (tm *TelemetryMiddleware) WithTelemetry(tl *tracing.Telemetry, excludedRout
 			protocol:       protocol,
 			hostname:       hostname,
 			userAgent:      userAgent,
-			handlerErr:     err,
+			handlerErr:     handlerErr,
 		})
 
-		recordHTTPServerDuration(c, durationHistogram, method, requestStart, err)
+		recordHTTPServerDuration(c, durationHistogram, method, requestStart, statusCode)
 
-		return err
+		return chainErr
 	}
 }
 
@@ -339,7 +346,7 @@ func applyTelemetrySpanAttributes(
 	statusCode int,
 	req telemetryRequestAttrs,
 ) {
-	resolvedRoute := resolvedHTTPRoute(c, statusCode)
+	resolvedRoute := resolvedHTTPRoute(c)
 
 	spanAttrs := []attribute.KeyValue{
 		attribute.String("http.request.method", req.method),
@@ -349,7 +356,7 @@ func applyTelemetrySpanAttributes(
 		attribute.String("user_agent.original", truncateUserAgent(req.userAgent)),
 		attribute.Int("http.response.status_code", statusCode),
 	}
-	if routePath, present := routeAttribute(c, statusCode); present {
+	if routePath, present := routeAttribute(c); present {
 		spanAttrs = append(spanAttrs, attribute.String("http.route", routePath))
 	}
 
@@ -374,13 +381,35 @@ func applyTelemetrySpanAttributes(
 
 	span.SetAttributes(spanAttrs...)
 
-	if req.handlerErr != nil {
-		tracing.HandleSpanError(span, "handler error", req.handlerErr)
-		return
+	// The error-recording mechanism is status-driven, status itself stays
+	// gated on statusCode below regardless of which branch runs, so a 4xx
+	// handler error never flips the span to Error per OTel semconv:
+	//   - >=500: span.RecordError produces the OTel semconv "exception" event
+	//     (exception.type/exception.message), which APM backends (Tempo,
+	//     Jaeger) index on - a custom-named event does not surface there.
+	//   - <500: the custom http.handler.error event (unaffected by this
+	//     split; kept for handler errors that don't warrant "exception"
+	//     status, e.g. a mapped 4xx).
+	// tracing.ErrorMessage is unconditionally safe to call - it routes
+	// through log.SafeErrorMessage, which never panics regardless of
+	// req.handlerErr's shape (nil, typed-nil, or a valid-but-unsafe-to
+	// -stringify error).
+	// obslog.IsNil, not != nil: a typed-nil handler error would otherwise
+	// record an exception event whose message is just "<nil>" on the >=500
+	// branch, while the <500 branch (HandleSpanBusinessErrorEvent) already
+	// skips it via the same IsNil check. Aligning them means a typed-nil
+	// produces no event on either branch; error.type_original above still
+	// carries the concrete type for diagnosis.
+	if !obslog.IsNil(req.handlerErr) {
+		if statusCode >= 500 {
+			span.RecordError(errors.New(tracing.ErrorMessage(req.handlerErr)))
+		} else {
+			tracing.HandleSpanBusinessErrorEvent(span, httpHandlerErrorEvent, req.handlerErr)
+		}
 	}
 
 	if statusCode >= 500 {
-		span.SetStatus(codes.Error, fmt.Sprintf("HTTP %d", statusCode))
+		span.SetStatus(codes.Error, "HTTP "+strconv.Itoa(statusCode))
 	}
 }
 
@@ -410,19 +439,17 @@ func recordHTTPServerDuration(
 	hist metric.Float64Histogram,
 	method string,
 	start time.Time,
-	handlerErr error,
+	statusCode int,
 ) {
 	if hist == nil || c == nil {
 		return
 	}
 
-	statusCode := httpStatusCode(c, handlerErr)
-
 	attrs := []attribute.KeyValue{
 		attribute.String("http.request.method", method),
 		attribute.Int("http.response.status_code", statusCode),
 	}
-	if routePath, present := routeAttribute(c, statusCode); present {
+	if routePath, present := routeAttribute(c); present {
 		attrs = append(attrs, attribute.String("http.route", routePath))
 	}
 
@@ -477,7 +504,7 @@ func (tm *TelemetryMiddleware) EndTracingSpans(c fiber.Ctx) error {
 	}
 
 	originalCtx := c.Context()
-	err := c.Next()
+	err := normalizeHTTPHandlerError(c.Next())
 
 	endCtx := c.Context()
 	if endCtx == nil {

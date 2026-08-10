@@ -22,6 +22,7 @@ import (
 	otelruntime "go.opentelemetry.io/contrib/instrumentation/runtime"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/baggage"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
@@ -79,9 +80,43 @@ type TelemetryConfig struct {
 	// zero-value off avoids surprising callers who construct TelemetryConfig
 	// partially and inheriting a background collector they did not request.
 	EnableRuntimeMetrics bool
-	Logger               log.Logger
-	Propagator           propagation.TextMapPropagator
-	Redactor             *Redactor
+	// TrustInboundTraceContext controls whether inbound trace-context
+	// extraction (a W3C traceparent/tracestate header, over HTTP or gRPC)
+	// continues that trace, instead of starting a fresh root span for every
+	// request. It follows the Go zero-value convention: default false
+	// (fail-closed), opt-in true. Shared, not per-transport: setting it once
+	// on a Telemetry instance governs both the HTTP middleware
+	// (middleware.WithTelemetry) and the gRPC server interceptor
+	// (grpcmiddleware.WithTelemetryInterceptor) consistently. Earlier, gRPC
+	// had its own, separate gate (a User-Agent heuristic, spoofable by any
+	// caller that set the header, so never a real trust boundary) - it has
+	// been replaced by this flag; a service behind a trusted internal mesh
+	// that relied on that heuristic now needs to opt in here explicitly to
+	// keep joining inbound gRPC traces.
+	//
+	// With an untrusted caller able to set traceparent, extracting it
+	// unconditionally lets that caller choose the trace ID this service
+	// records under and, depending on the configured sampler, force a
+	// sampling decision via the header's sampled flag - both are ways an
+	// external request can manipulate this service's own telemetry. Set this
+	// to true only for a service that sits behind a trusted boundary which
+	// itself generates or validates the header (an internal service mesh, a
+	// trusted API gateway) - never for a service directly reachable by
+	// external clients.
+	//
+	// The tenant.id BAGGAGE member extracted alongside trace context is
+	// ALWAYS stripped regardless of this flag, and regardless of transport -
+	// the strip lives in the shared ExtractTraceContext funnel every
+	// extraction path (HTTP, gRPC, queue) goes through, see its doc comment.
+	// This is narrower than "tenant identity never comes from a
+	// caller-controlled field" - it covers baggage specifically.
+	// grpcmiddleware.ResolveTenantIDFromGRPC is a separate, pre-existing
+	// mechanism that DOES read a caller-controlled `tenant-id` gRPC metadata
+	// field for span/metric labeling; see its own doc comment for that gap.
+	TrustInboundTraceContext bool
+	Logger                   log.Logger
+	Propagator               propagation.TextMapPropagator
+	Redactor                 *Redactor
 }
 
 // Telemetry holds configured OpenTelemetry providers and lifecycle handlers.
@@ -97,7 +132,7 @@ type Telemetry struct {
 
 // NewTelemetry builds telemetry providers and exporters from configuration.
 func NewTelemetry(cfg TelemetryConfig) (*Telemetry, error) {
-	if cfg.Logger == nil {
+	if log.IsNil(cfg.Logger) {
 		return nil, ErrNilTelemetryLogger
 	}
 
@@ -523,6 +558,12 @@ func isNilShutdownable(s shutdownable) bool {
 }
 
 func buildShutdownHandlers(l log.Logger, components ...shutdownable) (func(), func(context.Context) error) {
+	// Normalize once at entry rather than re-checking log.IsNil(l) on every
+	// component in the loop below.
+	if log.IsNil(l) {
+		l = log.NewNop()
+	}
+
 	shutdown := func() {
 		ctx := context.Background()
 
@@ -606,11 +647,11 @@ func sanitizeSpanMessage(msg string) string {
 
 // HandleSpanBusinessErrorEvent records a business-error event on a span.
 func HandleSpanBusinessErrorEvent(span trace.Span, eventName string, err error) {
-	if isNilSpan(span) || err == nil {
+	if isNilSpan(span) || log.IsNil(err) {
 		return
 	}
 
-	span.AddEvent(eventName, trace.WithAttributes(attribute.String("error", sanitizeSpanMessage(err.Error()))))
+	span.AddEvent(eventName, trace.WithAttributes(attribute.String("error", ErrorMessage(err))))
 }
 
 // HandleSpanEvent records a generic event with optional attributes on a span.
@@ -624,18 +665,31 @@ func HandleSpanEvent(span trace.Span, eventName string, attributes ...attribute.
 
 // HandleSpanError marks a span as failed and records the error.
 func HandleSpanError(span trace.Span, message string, err error) {
-	if isNilSpan(span) || err == nil {
+	if isNilSpan(span) || log.IsNil(err) {
 		return
 	}
 
 	// Build status message: avoid malformed ": <err>" when message is empty
-	statusMsg := sanitizeSpanMessage(err.Error())
+	statusMsg := ErrorMessage(err)
 	if message != "" {
 		statusMsg = sanitizeSpanMessage(message + ": " + statusMsg)
 	}
 
 	span.SetStatus(codes.Error, statusMsg)
 	span.RecordError(errors.New(statusMsg))
+}
+
+// ErrorMessage returns a version of err's message that is always safe to
+// record on a span or log line: log.SafeErrorMessage recovers from a panic
+// in err.Error() itself (a valid, non-nil error can still panic when
+// stringified - see its doc comment for why, errors.Join with a typed-nil
+// member is the canonical example), then sanitizeSpanMessage applies the
+// same Bearer/Basic-token redaction and length cap every span error field
+// already carries. Exported so a caller outside this package that needs an
+// error rendered identically to how a span renders it - the HTTP access log
+// field in particular - doesn't duplicate the redaction/cap rules.
+func ErrorMessage(err error) string {
+	return sanitizeSpanMessage(log.SafeErrorMessage(err))
 }
 
 // SetSpanAttributesFromValue flattens a value and sets resulting attributes on a span.
@@ -807,12 +861,98 @@ func InjectTraceContext(ctx context.Context, carrier propagation.TextMapCarrier)
 }
 
 // ExtractTraceContext extracts trace context from a generic text map carrier.
+//
+// This is the single funnel every inbound-extraction path in this library
+// goes through - directly for HTTP (middleware.ExtractHTTPContext), and
+// transitively for gRPC (ExtractGRPCContext) and queue consumers
+// (ExtractQueueTraceContext, ExtractTraceContextFromQueueHeaders) - so the
+// tenant.id strip below applies uniformly regardless of transport, with no
+// per-transport copy to fall out of sync.
 func ExtractTraceContext(ctx context.Context, carrier propagation.TextMapCarrier) context.Context {
 	if carrier == nil {
 		return ctx
 	}
 
-	return otel.GetTextMapPropagator().Extract(ctx, carrier)
+	// Captured BEFORE extraction: propagation.Baggage.Extract does not merge
+	// into the existing baggage, it REPLACES the whole value on ctx with
+	// whatever it parses from the carrier (or leaves ctx untouched if the
+	// carrier had no baggage header at all - see its own source). So an
+	// inbound baggage header that carries other members but no tenant.id -
+	// not just one that forges a tenant.id - silently wipes an
+	// already-seeded, legitimate tenant.id (the one lib-commons seeds from a
+	// validated JWT claim before this middleware ever runs; see
+	// AttrBagSpanProcessor's doc comment on baggageBaseAttributes). Measured:
+	// `baggage: region=sa-east-1` with no tenant.id member erased an
+	// in-process tenant.id that survives fine when the carrier has no
+	// baggage header at all.
+	preExistingTenantID := baggage.FromContext(ctx).Member(constant.AttrKeyTenantID).Value()
+
+	extracted := stripTenantIDBaggage(otel.GetTextMapPropagator().Extract(ctx, carrier))
+
+	if preExistingTenantID != "" {
+		extracted = restoreTenantIDBaggage(extracted, preExistingTenantID)
+	}
+
+	return extracted
+}
+
+// restoreTenantIDBaggage re-applies a tenant.id member captured from ctx
+// BEFORE extraction, merging it into whatever baggage extraction (plus the
+// strip above) left behind - SetMember adds/replaces one member without
+// touching the others, unlike Extract's own full replacement. This is what
+// makes an already in-process tenant.id always win over anything an inbound
+// carrier claims, whether the carrier stayed silent on tenant.id (wiped by
+// Extract's replacement) or tried to forge one (removed by the strip): the
+// third rail is that tenant identity never comes from the carrier, so the
+// trusted, pre-extraction value is the only one that may survive here.
+// NewMemberRaw, not NewMember: the captured value comes from Member.Value(),
+// which is the DECODED (raw) string - baggage extraction percent-decodes on
+// parse. NewMember expects a percent-ENCODED input and rejects raw values
+// containing characters like ';', which would silently drop a legitimate
+// in-process tenant.id right here.
+func restoreTenantIDBaggage(ctx context.Context, tenantID string) context.Context {
+	member, err := baggage.NewMemberRaw(constant.AttrKeyTenantID, tenantID)
+	if err != nil {
+		return ctx
+	}
+
+	bag, err := baggage.FromContext(ctx).SetMember(member)
+	if err != nil {
+		return ctx
+	}
+
+	return baggage.ContextWithBaggage(ctx, bag)
+}
+
+// stripTenantIDBaggage removes the tenant.id member from the OTel BAGGAGE
+// just extracted from an inbound carrier (HTTP headers, gRPC metadata, or
+// queue headers) - this is narrower than "tenant identity never comes from a
+// caller-controlled field": it covers the baggage propagation path
+// specifically. The composite propagator configured in NewTelemetry extracts
+// standard W3C baggage alongside trace context, so an external caller
+// sending `baggage: tenant.id=acme-corp` (over any transport) would
+// otherwise forge the tenant.id stamped on every span by
+// AttrBagSpanProcessor - before auth ever runs. Called unconditionally by
+// ExtractTraceContext (a no-op when there is no baggage to strip - see
+// bag.Len() below), with no enable/disable knob: unlike inbound
+// trace-context trust (see TelemetryConfig.TrustInboundTraceContext), there
+// is no deployment topology where trusting a caller-supplied tenant.id is
+// correct. Trace-context propagation itself (and any other baggage member)
+// is left untouched. ExtractTraceContext restores a pre-existing, trusted
+// tenant.id after this runs - see restoreTenantIDBaggage.
+//
+// This does NOT close every tenant-from-caller-controlled-field surface:
+// grpcmiddleware.ResolveTenantIDFromGRPC is a separate, pre-existing
+// mechanism that reads a caller-controlled `tenant-id` gRPC metadata field
+// directly (not via baggage) for span/metric labeling. See its own doc
+// comment - closing that gap is a distinct, not-yet-made decision.
+func stripTenantIDBaggage(ctx context.Context) context.Context {
+	bag := baggage.FromContext(ctx)
+	if bag.Len() == 0 {
+		return ctx
+	}
+
+	return baggage.ContextWithBaggage(ctx, bag.DeleteMember(constant.AttrKeyTenantID))
 }
 
 // InjectHTTPContext injects trace headers into HTTP headers.
@@ -824,6 +964,23 @@ func InjectHTTPContext(ctx context.Context, headers http.Header) {
 	InjectTraceContext(ctx, propagation.HeaderCarrier(headers))
 }
 
+// grpcMetadataHeaderPairs lists the (lowercase gRPC metadata key, canonical
+// PascalCase header key) pairs that must be remapped in both directions when
+// crossing between metadata.MD (grpc-go always lowercases metadata keys -
+// mandated by HTTP/2, which requires lowercase header field names on the
+// wire - so no real gRPC client can send anything else) and
+// propagation.HeaderCarrier, whose Get/Set canonicalize via textproto (e.g.
+// "traceparent" -> "Traceparent"). Without this remapping the canonicalizing
+// Get looks up a key that is never present, so the affected field silently
+// fails to extract - reproduced for baggage specifically: propagation.Baggage
+// found nothing in gRPC metadata, so a gRPC-propagated tenant.id (or any
+// other baggage member) never reached a span at all until this fix.
+var grpcMetadataHeaderPairs = [...][2]string{
+	{constant.MetadataTraceparent, constant.HeaderTraceparentPascal},
+	{constant.MetadataTracestate, constant.HeaderTracestatePascal},
+	{constant.MetadataBaggage, constant.HeaderBaggagePascal},
+}
+
 // InjectGRPCContext injects trace context into gRPC metadata.
 func InjectGRPCContext(ctx context.Context, md metadata.MD) metadata.MD {
 	if md == nil {
@@ -832,14 +989,12 @@ func InjectGRPCContext(ctx context.Context, md metadata.MD) metadata.MD {
 
 	InjectTraceContext(ctx, propagation.HeaderCarrier(md))
 
-	if traceparentValues, exists := md[constant.HeaderTraceparentPascal]; exists && len(traceparentValues) > 0 {
-		md[constant.MetadataTraceparent] = traceparentValues
-		delete(md, constant.HeaderTraceparentPascal)
-	}
-
-	if tracestateValues, exists := md[constant.HeaderTracestatePascal]; exists && len(tracestateValues) > 0 {
-		md[constant.MetadataTracestate] = tracestateValues
-		delete(md, constant.HeaderTracestatePascal)
+	for _, pair := range grpcMetadataHeaderPairs {
+		lower, pascal := pair[0], pair[1]
+		if values, exists := md[pascal]; exists && len(values) > 0 {
+			md[lower] = values
+			delete(md, pascal)
+		}
 	}
 
 	return md
@@ -853,14 +1008,12 @@ func ExtractGRPCContext(ctx context.Context, md metadata.MD) context.Context {
 
 	mdCopy := md.Copy()
 
-	if traceparentValues, exists := mdCopy[constant.MetadataTraceparent]; exists && len(traceparentValues) > 0 {
-		mdCopy[constant.HeaderTraceparentPascal] = traceparentValues
-		delete(mdCopy, constant.MetadataTraceparent)
-	}
-
-	if tracestateValues, exists := mdCopy[constant.MetadataTracestate]; exists && len(tracestateValues) > 0 {
-		mdCopy[constant.HeaderTracestatePascal] = tracestateValues
-		delete(mdCopy, constant.MetadataTracestate)
+	for _, pair := range grpcMetadataHeaderPairs {
+		lower, pascal := pair[0], pair[1]
+		if values, exists := mdCopy[lower]; exists && len(values) > 0 {
+			mdCopy[pascal] = values
+			delete(mdCopy, lower)
+		}
 	}
 
 	return ExtractTraceContext(ctx, propagation.HeaderCarrier(mdCopy))
