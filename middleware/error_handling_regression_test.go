@@ -59,6 +59,25 @@ func TestWithHTTPErrorHandling_UnsafeChains_NeverPanic(t *testing.T) {
 			wantBody:   "bad request payload",
 		},
 		{
+			// errors.As stops at the FIRST type match, so the typed-nil
+			// sibling used to shadow the valid fiber error behind it and
+			// downgrade the mapped 400 to a generic 500; asFiberError skips
+			// nil matches and keeps searching.
+			name:       "typed-nil fiber error preceding a valid fiber error keeps code and message",
+			handlerErr: errors.Join(error(typedNilFiber), fiber.NewError(fiber.StatusBadRequest, "bad request payload")),
+			wantStatus: fiber.StatusBadRequest,
+			wantBody:   "bad request payload",
+		},
+		{
+			name: "typed-nil fiber error nested in an earlier subtree preceding a valid fiber error keeps code and message",
+			handlerErr: errors.Join(
+				errors.Join(error(typedNilFiber), errors.New("boom")),
+				fiber.NewError(fiber.StatusConflict, "conflict"),
+			),
+			wantStatus: fiber.StatusConflict,
+			wantBody:   "conflict",
+		},
+		{
 			name:       "delegating wrapper with nil cause and no fiber error",
 			handlerErr: &delegatingProbeError{},
 			wantStatus: fiber.StatusInternalServerError,
@@ -111,6 +130,27 @@ func TestHTTPStatusCode_TypedNilFiberErrorInChain_DoesNotPanic(t *testing.T) {
 			status := httpStatusCode(c, joined)
 			assert.Equal(t, fiber.StatusInternalServerError, status)
 		})
+
+		return nil
+	})
+
+	req := httptest.NewRequest(fiber.MethodGet, "/probe", nil)
+	res, err := app.Test(req)
+	require.NoError(t, err)
+	defer res.Body.Close()
+}
+
+// A typed-nil *fiber.Error earlier in a joined chain must not shadow a
+// valid one sitting later in it: errors.As stopped at the first type match
+// and made httpStatusCode fall back to 500, discarding the mapped code.
+func TestHTTPStatusCode_TypedNilFiberErrorPrecedingValid_ReturnsMappedCode(t *testing.T) {
+	t.Parallel()
+
+	app := fiber.New()
+	joined := errors.Join(error((*fiber.Error)(nil)), fiber.NewError(fiber.StatusConflict, "conflict"))
+
+	app.Get("/probe", func(c fiber.Ctx) error {
+		assert.Equal(t, fiber.StatusConflict, httpStatusCode(c, joined))
 
 		return nil
 	})

@@ -2,7 +2,6 @@ package middleware
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	observability "github.com/LerianStudio/lib-observability/v3"
@@ -90,19 +89,15 @@ func WithHTTPErrorHandling() fiber.Handler {
 			// downgrades that mapped 4xx to a generic 500. Substitute a
 			// guaranteed-safe error before handing anything to the
 			// ErrorHandler, so the code survives even when the chain isn't
-			// stringifiable. errors.As never calls Error(), and *fiber.Error's
-			// own Message field is a plain string, so when the chain DOES
-			// contain one, both its status AND its original message survive
-			// intact - only a chain with no *fiber.Error at all falls back to
-			// a generic message (there is nothing safe to recover: the status
-			// itself already came from httpStatusCode's own fallback).
+			// stringifiable. asFiberError never calls Error(), and
+			// *fiber.Error's own Message field is a plain string, so when the
+			// chain DOES contain a valid one, both its status AND its original
+			// message survive intact - only a chain with no non-nil
+			// *fiber.Error at all falls back to a generic message (there is
+			// nothing safe to recover: the status itself already came from
+			// httpStatusCode's own fallback).
 			if !obslog.IsSafeToStringify(normalizedErr) {
-				// errors.As also matches a typed-nil *fiber.Error inside the
-				// chain (errors.Join((*fiber.Error)(nil), ...)) and leaves
-				// fiberErr nil - reading .Code would panic, the very defect
-				// this branch exists to close.
-				var fiberErr *fiber.Error
-				if errors.As(normalizedErr, &fiberErr) && fiberErr != nil {
+				if fiberErr := asFiberError(normalizedErr); fiberErr != nil {
 					normalizedErr = fiber.NewError(fiberErr.Code, fiberErr.Message)
 				} else {
 					normalizedErr = fiber.NewError(httpStatusCode(c, normalizedErr), "internal error")
@@ -117,6 +112,46 @@ func WithHTTPErrorHandling() fiber.Handler {
 
 		return nil
 	}
+}
+
+// asFiberError returns the first non-nil *fiber.Error in err's tree, or nil
+// when the tree contains none. It exists because errors.As is not enough
+// here: errors.As stops at the FIRST value whose type matches the target,
+// and a typed-nil *fiber.Error ((*fiber.Error)(nil) inside errors.Join, or
+// behind a wrapper's Unwrap) matches by type just as well as a valid one -
+// errors.As then reports true with a nil target, masking a valid
+// *fiber.Error sitting LATER in the same chain. This walker mirrors
+// errors.As's traversal (the value itself, then As(any) bool, then
+// Unwrap() error / Unwrap() []error, depth-first in join order) but skips
+// nil matches and keeps searching, so a typed-nil sibling can never shadow
+// a real mapped status. Like errors.As, it never calls Error(), so it is
+// safe on trees that are not safely stringifiable.
+func asFiberError(err error) *fiber.Error {
+	if err == nil {
+		return nil
+	}
+
+	if fiberErr, ok := err.(*fiber.Error); ok && fiberErr != nil {
+		return fiberErr
+	}
+
+	var target *fiber.Error
+	if as, ok := err.(interface{ As(any) bool }); ok && as.As(&target) && target != nil {
+		return target
+	}
+
+	switch unwrapped := err.(type) {
+	case interface{ Unwrap() error }:
+		return asFiberError(unwrapped.Unwrap())
+	case interface{ Unwrap() []error }:
+		for _, child := range unwrapped.Unwrap() {
+			if fiberErr := asFiberError(child); fiberErr != nil {
+				return fiberErr
+			}
+		}
+	}
+
+	return nil
 }
 
 // invokeErrorHandlerSafely calls the app's configured ErrorHandler for err,

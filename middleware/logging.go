@@ -2,7 +2,6 @@ package middleware
 
 import (
 	"context"
-	"errors"
 	"strconv"
 	"strings"
 	"time"
@@ -287,8 +286,9 @@ func httpStatusCode(c fiber.Ctx, err error) int {
 		return statusCode
 	}
 
-	var fiberErr *fiber.Error
-	if errors.As(err, &fiberErr) && fiberErr != nil {
+	// asFiberError rather than errors.As: a typed-nil *fiber.Error earlier in
+	// a joined chain must not shadow a valid one sitting later in it.
+	if fiberErr := asFiberError(err); fiberErr != nil {
 		return fiberErr.Code
 	}
 
