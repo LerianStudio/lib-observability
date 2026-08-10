@@ -905,8 +905,13 @@ func ExtractTraceContext(ctx context.Context, carrier propagation.TextMapCarrier
 // Extract's replacement) or tried to forge one (removed by the strip): the
 // third rail is that tenant identity never comes from the carrier, so the
 // trusted, pre-extraction value is the only one that may survive here.
+// NewMemberRaw, not NewMember: the captured value comes from Member.Value(),
+// which is the DECODED (raw) string - baggage extraction percent-decodes on
+// parse. NewMember expects a percent-ENCODED input and rejects raw values
+// containing characters like ';', which would silently drop a legitimate
+// in-process tenant.id right here.
 func restoreTenantIDBaggage(ctx context.Context, tenantID string) context.Context {
-	member, err := baggage.NewMember(constant.AttrKeyTenantID, tenantID)
+	member, err := baggage.NewMemberRaw(constant.AttrKeyTenantID, tenantID)
 	if err != nil {
 		return ctx
 	}

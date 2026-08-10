@@ -26,11 +26,13 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
-type nonStringifiableError struct {
+// countingError is a perfectly stringifiable error that counts its Error()
+// calls, so tests can assert the message reached a sink via exactly one call.
+type countingError struct {
 	calls *atomic.Int32
 }
 
-func (e nonStringifiableError) Error() string {
+func (e countingError) Error() string {
 	e.calls.Add(1)
 
 	return "handler detail"
@@ -345,7 +347,7 @@ func TestWithTelemetry_5xxHandlerErrorRecordsSemconvException(t *testing.T) {
 	})
 	app.Use(NewTelemetryMiddleware(tel).WithTelemetry(tel))
 	app.Get("/error", func(fiber.Ctx) error {
-		return nonStringifiableError{calls: &errorCalls}
+		return countingError{calls: &errorCalls}
 	})
 
 	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/error", nil))
@@ -359,7 +361,7 @@ func TestWithTelemetry_5xxHandlerErrorRecordsSemconvException(t *testing.T) {
 	require.Len(t, spans, 1)
 	assert.Equal(t, codes.Error, spans[0].Status.Code)
 	assert.Equal(t, "HTTP 500", spans[0].Status.Description)
-	assert.Equal(t, "middleware.nonStringifiableError", getSpanAttr(spans[0], "error.type_original"))
+	assert.Equal(t, "middleware.countingError", getSpanAttr(spans[0], "error.type_original"))
 
 	msg, found := findEventAttr(spans, "exception", "exception.message")
 	require.True(t, found, "span must record the OTel semconv exception event on a 5xx")

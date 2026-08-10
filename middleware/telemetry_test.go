@@ -501,7 +501,13 @@ func TestExtractHTTPContext(t *testing.T) {
 // a validated JWT claim. Other baggage members, and trace-context
 // propagation itself, are left untouched.
 func TestExtractHTTPContext_StripsTenantIDBaggage(t *testing.T) {
-	t.Parallel()
+	// Not parallel: mutates the process-global OTel propagator, which
+	// ExtractHTTPContext reads. The traceparent and baggage assertions below
+	// require TraceContext and Baggage propagation to actually be installed,
+	// not inherited from whichever test happened to run before.
+	prevPropagator := otel.GetTextMapPropagator()
+	t.Cleanup(func() { otel.SetTextMapPropagator(prevPropagator) })
+	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}))
 
 	app := fiber.New()
 

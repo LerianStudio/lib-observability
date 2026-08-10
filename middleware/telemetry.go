@@ -17,6 +17,7 @@ import (
 	"time"
 
 	observability "github.com/LerianStudio/lib-observability/v2"
+	obslog "github.com/LerianStudio/lib-observability/v2/log"
 	"github.com/LerianStudio/lib-observability/v2/tracing"
 	"github.com/gofiber/fiber/v3"
 	"github.com/google/uuid"
@@ -393,7 +394,13 @@ func applyTelemetrySpanAttributes(
 	// through log.SafeErrorMessage, which never panics regardless of
 	// req.handlerErr's shape (nil, typed-nil, or a valid-but-unsafe-to
 	// -stringify error).
-	if req.handlerErr != nil {
+	// obslog.IsNil, not != nil: a typed-nil handler error would otherwise
+	// record an exception event whose message is just "<nil>" on the >=500
+	// branch, while the <500 branch (HandleSpanBusinessErrorEvent) already
+	// skips it via the same IsNil check. Aligning them means a typed-nil
+	// produces no event on either branch; error.type_original above still
+	// carries the concrete type for diagnosis.
+	if !obslog.IsNil(req.handlerErr) {
 		if statusCode >= 500 {
 			span.RecordError(errors.New(tracing.ErrorMessage(req.handlerErr)))
 		} else {

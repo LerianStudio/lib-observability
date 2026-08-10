@@ -607,6 +607,38 @@ func seedTenantIDBaggage(t *testing.T, ctx context.Context, tenantID string) con
 	return baggage.ContextWithBaggage(ctx, bag)
 }
 
+// TestExtractTraceContext_RestoresTenantIDWithDecodedCharacters covers the
+// encoding asymmetry in the restore path: the pre-extraction tenant.id is
+// captured via Member.Value(), which returns the DECODED string, but
+// baggage.NewMember expects a percent-ENCODED input and rejects raw values
+// containing characters like ';'. restoreTenantIDBaggage must use
+// NewMemberRaw so such a legitimate in-process tenant.id survives instead of
+// being silently dropped.
+func TestExtractTraceContext_RestoresTenantIDWithDecodedCharacters(t *testing.T) {
+	// Not parallel: mutates the process-global OTel propagator.
+	prev := otel.GetTextMapPropagator()
+	t.Cleanup(func() { otel.SetTextMapPropagator(prev) })
+	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}))
+
+	// Seed with the raw constructor: ";" is what Member.Value() yields after
+	// extraction percent-decodes an inbound "tenant%3Bid" value.
+	member, err := baggage.NewMemberRaw("tenant.id", "acme;corp")
+	require.NoError(t, err)
+
+	bag, err := baggage.New(member)
+	require.NoError(t, err)
+
+	ctx := baggage.ContextWithBaggage(context.Background(), bag)
+
+	carrier := propagation.HeaderCarrier{}
+	carrier.Set("baggage", "region=sa-east-1") // wipes ctx baggage on Extract
+
+	got := ExtractTraceContext(ctx, carrier)
+
+	assert.Equal(t, "acme;corp", baggage.FromContext(got).Member("tenant.id").Value(),
+		"a decoded tenant.id containing characters NewMember rejects must still be restored")
+}
+
 // TestExtractTraceContext_SeededTenantIDSurvivesBaggageWithoutTenantMember
 // covers the case the carrierHasBaggage skip alone did not: propagation.
 // Baggage.Extract does not merge into the existing baggage, it REPLACES the
