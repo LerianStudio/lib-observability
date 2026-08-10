@@ -619,13 +619,18 @@ func getMetadataID(ctx context.Context) string {
 // attribution forgery (a caller can claim any tenant), and metric label
 // cardinality - sanitizeTenantID caps each value's LENGTH but not the number
 // of DISTINCT values, so a caller sending unlimited distinct tenant-id
-// values creates unbounded rpc.server.duration series, growing memory in the
-// SDK's aggregation store and in the metrics backend (the span attribute is
-// bounded per trace and unaffected; the metric label is the exposed
-// surface). Whether to close this the same way (and what that breaks for
-// callers that already rely on it as a deliberate cross-service hint) is a
-// separate, pending product decision covering both risks - not addressed by
-// this fix.
+// values mints new rpc.server.duration series in the metrics backend (the
+// span attribute is bounded per trace and unaffected; the metric label is
+// the exposed surface). In-SDK, go.opentelemetry.io/otel/sdk/metric applies
+// its default 2,000 attribute-set limit per collection cycle and aggregates
+// the excess into otel.metric.overflow=true - this library does not override
+// that - so SDK aggregation-state growth is a risk only for a provider
+// explicitly configured as unlimited (WithCardinalityLimit(0) or the env
+// override); the backend-cardinality and overflow-induced data-loss risks
+// remain for everyone. Whether to close this the same way (and what that
+// breaks for callers that already rely on it as a deliberate cross-service
+// hint) is a separate, pending product decision covering both risks - not
+// addressed by this fix.
 func ResolveTenantIDFromGRPC(ctx context.Context) string {
 	if ctx == nil {
 		return ""
