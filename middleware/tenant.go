@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"context"
+	"strings"
 
 	observability "github.com/LerianStudio/lib-observability/v2"
 	constant "github.com/LerianStudio/lib-observability/v2/constants"
@@ -48,16 +49,23 @@ func ResolveTenantIDFromGRPC(ctx context.Context) string {
 	return sanitizeTenantID(vals[0])
 }
 
-// sanitizeTenantID trims whitespace and control bytes from raw, then enforces
-// the MaxTenantIDLen cap. Returns "" for any value that fails normalization or
-// exceeds the cap, so callers can use it as a presence check.
+// sanitizeTenantID enforces the MaxTenantIDLen cap on the trimmed raw value,
+// then trims whitespace and control bytes. The length check MUST run before
+// normalizeRequestID: that helper truncates (rather than rejects) input
+// longer than its own, separate cap, so checking length afterward would let
+// an oversized tenant ID silently survive as a truncated - and therefore
+// wrong - value instead of being dropped outright. An oversized tenant
+// identifier must never partially resolve, since tenant.id feeds telemetry
+// cardinality and (via callers that trust it further) authorization context.
+// Returns "" for any value that fails normalization or exceeds the cap, so
+// callers can use it as a presence check.
 func sanitizeTenantID(raw string) string {
-	value := normalizeRequestID(raw)
-	if isNilOrEmptyString(&value) {
+	if len(strings.TrimSpace(raw)) > constant.MaxTenantIDLen {
 		return ""
 	}
 
-	if len(value) > constant.MaxTenantIDLen {
+	value := normalizeRequestID(raw)
+	if isNilOrEmptyString(&value) {
 		return ""
 	}
 

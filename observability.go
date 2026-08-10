@@ -48,7 +48,7 @@ func NewLoggerFromContext(ctx context.Context) log.Logger {
 		ctx = context.Background()
 	}
 
-	if cv, ok := ctx.Value(ContextKey).(*ContextValue); ok && cv.Logger != nil {
+	if cv, ok := ctx.Value(ContextKey).(*ContextValue); ok && cv != nil && !log.IsNil(cv.Logger) {
 		return cv.Logger
 	}
 
@@ -159,7 +159,7 @@ func extractTrackingComponents(ctx context.Context) TrackingComponents {
 // resolveLogger applies the Null Object Pattern for logger resolution.
 // Returns a functional logger instance in all cases, eliminating nil checks downstream.
 func resolveLogger(logger log.Logger) log.Logger {
-	if logger != nil {
+	if !log.IsNil(logger) {
 		return logger
 	}
 

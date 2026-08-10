@@ -2,10 +2,7 @@ package middleware
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"net/url"
-	"os"
 	"reflect"
 	"strconv"
 	"strings"
@@ -14,19 +11,16 @@ import (
 	observability "github.com/LerianStudio/lib-observability/v2"
 	constant "github.com/LerianStudio/lib-observability/v2/constants"
 	obslog "github.com/LerianStudio/lib-observability/v2/log"
+	"github.com/LerianStudio/lib-observability/v2/tracing"
 	"github.com/gofiber/fiber/v3"
 	"go.opentelemetry.io/otel/attribute"
 	"google.golang.org/grpc"
 )
 
 const (
-	headerReferer     = "Referer"
-	headerContentType = "Content-Type"
-
-	maxObfuscationDepth = 32
+	headerReferer           = "Referer"
+	unknownResponseBodySize = -1
 )
-
-var logObfuscationDisabled = os.Getenv("LOG_OBFUSCATION_DISABLED") == "true"
 
 // RequestInfo stores HTTP access log data.
 type RequestInfo struct {
@@ -42,7 +36,8 @@ type RequestInfo struct {
 	TraceID       string
 	Protocol      string
 	Size          int
-	Body          string
+	// Deprecated: HTTP request bodies are never captured by access logging.
+	Body string
 }
 
 // ResponseMetricsWrapper stores response metadata used to finish RequestInfo.
@@ -61,9 +56,8 @@ type ResponseMetricsWrapper struct {
 var defaultLogExcludedRoutes = []string{"/health", "/readyz", "/metrics"}
 
 type logMiddleware struct {
-	Logger              obslog.Logger
-	ObfuscationDisabled bool
-	ExcludedRoutes      []string
+	Logger         obslog.Logger
+	ExcludedRoutes []string
 }
 
 // LogMiddlewareOption configures HTTP and gRPC logging middleware.
@@ -78,11 +72,11 @@ func WithCustomLogger(logger obslog.Logger) LogMiddlewareOption {
 	}
 }
 
-// WithObfuscationDisabled disables request body obfuscation.
-func WithObfuscationDisabled(disabled bool) LogMiddlewareOption {
-	return func(l *logMiddleware) {
-		l.ObfuscationDisabled = disabled
-	}
+// WithObfuscationDisabled is retained for source compatibility.
+//
+// Deprecated: HTTP request bodies are never captured by access logging.
+func WithObfuscationDisabled(_ bool) LogMiddlewareOption {
+	return func(*logMiddleware) {}
 }
 
 // WithExcludedRoutes suppresses access logs for any request whose path is
@@ -103,9 +97,12 @@ func WithExcludedRoutes(routes ...string) LogMiddlewareOption {
 
 func buildOpts(opts ...LogMiddlewareOption) *logMiddleware {
 	mid := &logMiddleware{
-		Logger:              &obslog.GoLogger{},
-		ObfuscationDisabled: logObfuscationDisabled,
-		ExcludedRoutes:      append([]string(nil), defaultLogExcludedRoutes...),
+		// LevelInfo, not the zero value: an uninitialized GoLogger{} defaults
+		// to LevelError, so the access log would emit only 5xx responses -
+		// silently dropping every 2xx/3xx/4xx line - for any caller that
+		// doesn't supply WithCustomLogger.
+		Logger:         &obslog.GoLogger{Level: obslog.LevelInfo},
+		ExcludedRoutes: append([]string(nil), defaultLogExcludedRoutes...),
 	}
 
 	for _, opt := range opts {
@@ -135,46 +132,21 @@ func isNilLogger(logger obslog.Logger) bool {
 // before the downstream chain runs, when Fiber's Route().Path still reports
 // the middleware's own route (typically "/") instead of the final matched
 // template. FinishRequestInfo resolves URI once routing has completed.
-func NewRequestInfo(c fiber.Ctx, obfuscationDisabled bool) *RequestInfo {
+// The second argument is retained for source compatibility and has no effect.
+func NewRequestInfo(c fiber.Ctx, _ bool) *RequestInfo {
 	if c == nil {
 		return &RequestInfo{Date: time.Now().UTC()}
-	}
-
-	username, referer := "-", "-"
-	rawURL := string(c.Request().URI().FullURI())
-
-	parsedURL, err := url.Parse(rawURL)
-	if err == nil && parsedURL.User != nil {
-		if name := parsedURL.User.Username(); name != "" {
-			username = name
-		}
-	}
-
-	if c.Get(headerReferer) != "" {
-		referer = sanitizeReferer(c.Get(headerReferer))
-	}
-
-	body := ""
-	bodyBytes := c.Body()
-
-	if len(bodyBytes) > 0 {
-		if !obfuscationDisabled {
-			body = getBodyObfuscatedString(c, bodyBytes)
-		} else {
-			body = string(bodyBytes)
-		}
 	}
 
 	return &RequestInfo{
 		TraceID:       c.Get(headerID),
 		Method:        c.Method(),
-		Username:      username,
-		Referer:       referer,
+		Username:      "-",
+		Referer:       "-",
 		UserAgent:     sanitizeLogValue(c.Get(headerUserAgent)),
 		RemoteAddress: c.IP(),
 		Protocol:      c.Protocol(),
 		Date:          time.Now().UTC(),
-		Body:          body,
 	}
 }
 
@@ -188,10 +160,22 @@ func (r *RequestInfo) CLFString() string {
 		r.Date.Format("[02/Jan/2006:15:04:05 -0700]"),
 		`"` + sanitizeLogValue(r.Method) + " " + sanitizeLogValue(r.URI) + `"`,
 		strconv.Itoa(r.Status),
-		strconv.Itoa(r.Size),
+		clfBodySize(r.Size),
 		sanitizeLogValue(r.Referer),
 		sanitizeLogValue(r.UserAgent),
 	}, " ")
+}
+
+// clfBodySize renders the response body size field per CLF convention: "-"
+// for an unknown size (unknownResponseBodySize, e.g. a streamed response with
+// no declared Content-Length), the byte count otherwise. A literal "-1" is
+// not a CLF convention and reads as a negative byte count to any log parser.
+func clfBodySize(size int) string {
+	if size == unknownResponseBodySize {
+		return "-"
+	}
+
+	return strconv.Itoa(size)
 }
 
 func (r *RequestInfo) String() string {
@@ -207,7 +191,7 @@ func (r *RequestInfo) FinishRequestInfo(rw *ResponseMetricsWrapper) {
 	r.Duration = time.Since(r.Date)
 	r.Status = rw.StatusCode
 	r.Size = rw.Size
-	r.URI = resolvedHTTPRoute(rw.Context, rw.StatusCode)
+	r.URI = resolvedHTTPRoute(rw.Context)
 }
 
 // WithHTTPLogging logs Fiber HTTP access requests.
@@ -221,16 +205,16 @@ func WithHTTPLogging(opts ...LogMiddlewareOption) fiber.Handler {
 		mid := buildOpts(opts...)
 
 		if isRouteExcludedFromList(c, mid.ExcludedRoutes) {
-			return c.Next()
+			return nextWithNormalizedHTTPError(c)
 		}
 
 		if strings.Contains(c.Path(), "swagger") && c.Path() != "/swagger/index.html" {
-			return c.Next()
+			return nextWithNormalizedHTTPError(c)
 		}
 
 		setRequestHeaderID(c)
 
-		info := NewRequestInfo(c, mid.ObfuscationDisabled)
+		info := NewRequestInfo(c, false)
 
 		requestID := c.Get(headerID)
 		ctx := c.Context()
@@ -242,25 +226,73 @@ func WithHTTPLogging(opts ...LogMiddlewareOption) fiber.Handler {
 		ctx = observability.ContextWithLogger(ctx, logger)
 		c.SetContext(ctx)
 
-		err := c.Next()
-		statusCode := httpStatusCode(c, err)
+		returnedErr := c.Next()
+		statusCode, chainErr, handlerErr := resolveHTTPResponse(c, returnedErr)
 
 		rw := ResponseMetricsWrapper{
 			Context:    c,
 			StatusCode: statusCode,
-			Size:       len(c.Response().Body()),
+			Size:       responseBodySize(c),
 		}
 
 		info.FinishRequestInfo(&rw)
-		logger.With(
+
+		fields := []obslog.Field{
 			obslog.Int("http_status_code", info.Status),
 			obslog.String("http_method", info.Method),
 			obslog.String("http_path", info.URI),
 			obslog.Int("http_latency_ms", int(info.Duration.Milliseconds())),
-		).Log(c.Context(), obslog.LevelInfo, info.CLFString())
+		}
+		if handlerErr != nil {
+			// tracing.ErrorMessage, not obslog.Err(handlerErr) storing the raw
+			// error: the access log's error text must match what the span
+			// records - same Bearer/Basic redaction, same length cap - and
+			// must never hand a raw error straight to a log sink that a
+			// different backend might stringify unguarded.
+			fields = append(fields, obslog.String("error", tracing.ErrorMessage(handlerErr)))
+		}
 
-		return err
+		logger.With(fields...).Log(c.Context(), httpAccessLogLevel(info.Status), info.CLFString())
+
+		return chainErr
 	}
+}
+
+// httpAccessLogLevel derives the access-log entry's severity from the
+// effective HTTP status, so a 5xx line is actually findable at Error level
+// instead of blending into Info-level traffic - the same status-driven
+// convention http.route/error.type telemetry attribution already follows.
+func httpAccessLogLevel(statusCode int) obslog.Level {
+	switch {
+	case statusCode >= fiber.StatusInternalServerError:
+		return obslog.LevelError
+	case statusCode >= fiber.StatusBadRequest:
+		return obslog.LevelWarn
+	default:
+		return obslog.LevelInfo
+	}
+}
+
+// responseBodySize returns the response body size for the access log's CLF
+// size field. A streamed response (large file download, proxied upload
+// passthrough) must never be forced into memory just to measure it via
+// response.Body() - IsBodyStream guards that, falling back to the declared
+// Content-Length, or unknownResponseBodySize when even that is absent.
+func responseBodySize(c fiber.Ctx) int {
+	response := c.Response()
+	if !response.IsBodyStream() {
+		return len(response.Body())
+	}
+
+	if size := response.Header.ContentLength(); size >= 0 {
+		return size
+	}
+
+	return unknownResponseBodySize
+}
+
+func nextWithNormalizedHTTPError(c fiber.Ctx) error {
+	return normalizeHTTPHandlerError(c.Next())
 }
 
 func httpStatusCode(c fiber.Ctx, err error) int {
@@ -279,6 +311,30 @@ func httpStatusCode(c fiber.Ctx, err error) int {
 	}
 
 	return statusCode
+}
+
+// normalizeHTTPHandlerError checks ONLY the top-level error value, mirroring
+// Fiber v3's own internal nil-error check on the value a handler returns.
+//
+// It deliberately does NOT walk Unwrap()/Unwrap() []error: a valid, non-nil
+// wrapper whose Unwrap() chain happens to bottom out on a typed-nil (e.g. a
+// domain error struct with a nil Cause, or errors.Join pairing a real error
+// with an unrelated nil one) is not itself unsafe to hand to the rest of the
+// pipeline - the wrapper's own Error() is what gets called, and a well-formed
+// wrapper does not blindly delegate to a nil child. Recursing into the chain
+// would mean one nil-chained error anywhere below a perfectly good top-level
+// error collapses the whole response to a 500, discarding a correctly mapped
+// 4xx.
+func normalizeHTTPHandlerError(err error) error {
+	if err == nil {
+		return nil
+	}
+
+	if obslog.IsNil(err) {
+		return fiber.ErrInternalServerError
+	}
+
+	return err
 }
 
 // WithGrpcLogging logs gRPC unary requests and attaches a request-scoped logger to context.
@@ -343,27 +399,4 @@ func WithGrpcLogging(opts ...LogMiddlewareOption) grpc.UnaryServerInterceptor {
 
 		return resp, err
 	}
-}
-
-func handleJSONBody(bodyBytes []byte) string {
-	var bodyData any
-	if err := json.Unmarshal(bodyBytes, &bodyData); err != nil {
-		return redactedBody
-	}
-
-	switch v := bodyData.(type) {
-	case map[string]any:
-		obfuscateMapRecursively(v, 0)
-	case []any:
-		obfuscateSliceRecursively(v, 0)
-	default:
-		return redactedBody
-	}
-
-	updatedBody, err := json.Marshal(bodyData)
-	if err != nil {
-		return redactedBody
-	}
-
-	return string(updatedBody)
 }

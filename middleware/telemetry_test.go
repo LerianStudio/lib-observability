@@ -21,6 +21,7 @@ import (
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	semconv "go.opentelemetry.io/otel/semconv/v1.34.0"
 	oteltrace "go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
@@ -193,6 +194,71 @@ func TestWithTelemetry(t *testing.T) {
 			}
 		})
 	}
+}
+
+// stubTypedHandlerError is a distinctly-typed handler error so the exception
+// event assertions below can prove the ORIGINAL type survives onto the span.
+type stubTypedHandlerError struct{ msg string }
+
+func (e *stubTypedHandlerError) Error() string { return e.msg }
+
+// TestWithTelemetryRecordsOriginalExceptionType asserts the >=500 exception
+// event carries the handler error's original Go type and sanitized message,
+// not the type of an internal substitute error (errors.errorString).
+func TestWithTelemetryRecordsOriginalExceptionType(t *testing.T) {
+	ctx := context.Background()
+
+	tp, spanRecorder := setupTestTracer(t)
+	defer func() { _ = tp.Shutdown(ctx) }()
+
+	tel := &tracing.Telemetry{
+		TelemetryConfig: tracing.TelemetryConfig{
+			LibraryName:     "test-library",
+			EnableTelemetry: true,
+		},
+		TracerProvider: tp,
+	}
+
+	mid := NewTelemetryMiddleware(tel)
+
+	app := fiber.New(fiber.Config{
+		ErrorHandler: func(c fiber.Ctx, _ error) error {
+			return c.Status(http.StatusInternalServerError).SendString("boom")
+		},
+	})
+	app.Use(mid.WithTelemetry(tel))
+	app.Get("/api/resource", func(fiber.Ctx) error {
+		return &stubTypedHandlerError{msg: "handler exploded"}
+	})
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/resource", nil))
+	require.NoError(t, err)
+
+	defer func() { require.NoError(t, resp.Body.Close()) }()
+
+	require.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+
+	var exceptionType, exceptionMessage string
+
+	for _, span := range spanRecorder.Ended() {
+		for _, event := range span.Events() {
+			if event.Name != semconv.ExceptionEventName {
+				continue
+			}
+
+			for _, attr := range event.Attributes {
+				switch attr.Key {
+				case semconv.ExceptionTypeKey:
+					exceptionType = attr.Value.AsString()
+				case semconv.ExceptionMessageKey:
+					exceptionMessage = attr.Value.AsString()
+				}
+			}
+		}
+	}
+
+	assert.Equal(t, "middleware.stubTypedHandlerError", exceptionType)
+	assert.Equal(t, "handler exploded", exceptionMessage)
 }
 
 // TestWithTelemetryExcludedRoutes tests the WithTelemetry middleware with excluded routes.
@@ -607,35 +673,53 @@ func TestExtractHTTPContext(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp2.StatusCode)
 }
 
-// TestWithTelemetryConditionalTracePropagation tests the conditional trace propagation based on UserAgent.
+// TestWithTelemetryConditionalTracePropagation tests conditional trace
+// propagation gated by TrustInboundTraceContext. Trust is a fail-closed
+// opt-in flag, not a User-Agent heuristic: a User-Agent pattern is set by
+// the caller and proves nothing about trust, so extraction must be governed
+// by explicit configuration instead. TrustInboundTraceContext defaults to
+// false, so a Telemetry instance that never sets it - regardless of the
+// caller's User-Agent - always starts a fresh root span.
 func TestWithTelemetryConditionalTracePropagation(t *testing.T) {
 	tests := []struct {
-		name                 string
-		userAgent            string
-		traceparent          string
-		shouldPropagateTrace bool
-		description          string
+		name                     string
+		userAgent                string
+		traceparent              string
+		trustInboundTraceContext bool
+		shouldPropagateTrace     bool
+		description              string
 	}{
 		{
-			name:                 "Internal Lerian service - should propagate trace",
-			userAgent:            "midaz/1.0.0 LerianStudio",
-			traceparent:          "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
-			shouldPropagateTrace: true,
-			description:          "Internal service with valid UserAgent pattern should propagate trace context",
+			name:                     "Trust enabled - should propagate trace",
+			userAgent:                "midaz/1.0.0 LerianStudio",
+			traceparent:              "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+			trustInboundTraceContext: true,
+			shouldPropagateTrace:     true,
+			description:              "TrustInboundTraceContext=true should extract and continue the inbound trace",
 		},
 		{
-			name:                 "External service - should NOT propagate trace",
-			userAgent:            "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-			traceparent:          "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
-			shouldPropagateTrace: false,
-			description:          "External browser UserAgent should create new root span",
+			name:                     "Trust disabled with internal-looking User-Agent - should NOT propagate trace",
+			userAgent:                "midaz/1.0.0 LerianStudio",
+			traceparent:              "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+			trustInboundTraceContext: false,
+			shouldPropagateTrace:     false,
+			description:              "A User-Agent alone must never grant trust; fail-closed default creates a new root span",
 		},
 		{
-			name:                 "No UserAgent - should NOT propagate trace",
-			userAgent:            "",
-			traceparent:          "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
-			shouldPropagateTrace: false,
-			description:          "Missing UserAgent should create new root span",
+			name:                     "Trust disabled, external service - should NOT propagate trace",
+			userAgent:                "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+			traceparent:              "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+			trustInboundTraceContext: false,
+			shouldPropagateTrace:     false,
+			description:              "External browser UserAgent should create new root span",
+		},
+		{
+			name:                     "Trust disabled, no UserAgent - should NOT propagate trace",
+			userAgent:                "",
+			traceparent:              "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+			trustInboundTraceContext: false,
+			shouldPropagateTrace:     false,
+			description:              "Missing UserAgent should create new root span",
 		},
 	}
 
@@ -654,8 +738,9 @@ func TestWithTelemetryConditionalTracePropagation(t *testing.T) {
 
 			tel := &tracing.Telemetry{
 				TelemetryConfig: tracing.TelemetryConfig{
-					LibraryName:     "test-library",
-					EnableTelemetry: true,
+					LibraryName:              "test-library",
+					EnableTelemetry:          true,
+					TrustInboundTraceContext: tt.trustInboundTraceContext,
 				},
 				TracerProvider: tp,
 			}

@@ -196,7 +196,11 @@ func sanitizeFieldValue(value any) any {
 	case string:
 		return sanitizeLogString(v)
 	case error:
-		return sanitizeLogString(v.Error())
+		// SafeErrorMessage, not v.Error() directly: a valid, non-nil error
+		// (e.g. errors.Join with a typed-nil member) can still panic when
+		// stringified even past the isTypedNil guard above, since that guard
+		// only inspects the top-level value.
+		return sanitizeLogString(SafeErrorMessage(v))
 	case fmt.Stringer:
 		return sanitizeLogString(v.String())
 	case bool, int, int8, int16, int32, int64,

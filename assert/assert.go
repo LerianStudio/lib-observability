@@ -75,6 +75,10 @@ func New(ctx context.Context, logger Logger, component, operation string) *Asser
 		ctx = context.Background()
 	}
 
+	if log.IsNil(logger) {
+		logger = nil
+	}
+
 	return &Asserter{
 		ctx:       ctx,
 		logger:    logger,
@@ -146,8 +150,12 @@ func (asserter *Asserter) NoError(ctx context.Context, err error, msg string, kv
 	// errorKVPairs: 2 pairs added (error + error_type), each pair = 2 elements
 	const errorKVPairs = 4
 
+	// A valid, non-nil err can still panic when stringified if its own
+	// Unwrap chain contains an unguarded typed-nil (errors.Join is the
+	// standard-library example). log.SafeErrorMessage recovers from that; %T
+	// never calls a method, so it is safe regardless.
 	kvWithError := make([]any, 0, len(kv)+errorKVPairs)
-	kvWithError = append(kvWithError, "error", err.Error())
+	kvWithError = append(kvWithError, "error", log.SafeErrorMessage(err))
 	kvWithError = append(kvWithError, "error_type", fmt.Sprintf("%T", err))
 	kvWithError = append(kvWithError, kv...)
 

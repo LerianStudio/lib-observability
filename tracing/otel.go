@@ -23,6 +23,7 @@ import (
 	"github.com/gofiber/fiber/v3"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/baggage"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
@@ -69,9 +70,38 @@ type TelemetryConfig struct {
 	CollectorExporterEndpoint string
 	EnableTelemetry           bool
 	InsecureExporter          bool
-	Logger                    log.Logger
-	Propagator                propagation.TextMapPropagator
-	Redactor                  *Redactor
+	// TrustInboundTraceContext controls whether inbound HTTP trace-context
+	// extraction (a W3C traceparent/tracestate header) continues that trace,
+	// instead of starting a fresh root span for every request. It follows
+	// the Go zero-value convention: default false (fail-closed), opt-in
+	// true. It replaces the previous internal-service User-Agent heuristic
+	// in middleware.WithTelemetry, which was spoofable by any caller that
+	// set the header and never a real trust boundary. This flag governs the
+	// HTTP path only - the gRPC server interceptor keeps its own,
+	// pre-existing User-Agent gate untouched.
+	//
+	// With an untrusted caller able to set traceparent, extracting it
+	// unconditionally lets that caller choose the trace ID this service
+	// records under and, depending on the configured sampler, force a
+	// sampling decision via the header's sampled flag - both are ways an
+	// external request can manipulate this service's own telemetry. Set this
+	// to true only for a service that sits behind a trusted boundary which
+	// itself generates or validates the header (an internal service mesh, a
+	// trusted API gateway) - never for a service directly reachable by
+	// external clients.
+	//
+	// The tenant.id BAGGAGE member extracted alongside trace context is
+	// ALWAYS stripped regardless of this flag - the strip lives in the
+	// shared ExtractTraceContext funnel every extraction path (HTTP, gRPC,
+	// queue) goes through, see its doc comment. This is narrower than
+	// "tenant identity never comes from a caller-controlled field" - it
+	// covers baggage specifically. middleware.ResolveTenantIDFromGRPC is a
+	// separate, pre-existing mechanism that DOES read a caller-controlled
+	// `tenant-id` gRPC metadata field for span/metric labeling.
+	TrustInboundTraceContext bool
+	Logger                   log.Logger
+	Propagator               propagation.TextMapPropagator
+	Redactor                 *Redactor
 }
 
 // Telemetry holds configured OpenTelemetry providers and lifecycle handlers.
@@ -545,11 +575,11 @@ func sanitizeSpanMessage(msg string) string {
 
 // HandleSpanBusinessErrorEvent records a business-error event on a span.
 func HandleSpanBusinessErrorEvent(span trace.Span, eventName string, err error) {
-	if isNilSpan(span) || err == nil {
+	if isNilSpan(span) || log.IsNil(err) {
 		return
 	}
 
-	span.AddEvent(eventName, trace.WithAttributes(attribute.String("error", sanitizeSpanMessage(err.Error()))))
+	span.AddEvent(eventName, trace.WithAttributes(attribute.String("error", ErrorMessage(err))))
 }
 
 // HandleSpanEvent records a generic event with optional attributes on a span.
@@ -563,18 +593,31 @@ func HandleSpanEvent(span trace.Span, eventName string, attributes ...attribute.
 
 // HandleSpanError marks a span as failed and records the error.
 func HandleSpanError(span trace.Span, message string, err error) {
-	if isNilSpan(span) || err == nil {
+	if isNilSpan(span) || log.IsNil(err) {
 		return
 	}
 
 	// Build status message: avoid malformed ": <err>" when message is empty
-	statusMsg := sanitizeSpanMessage(err.Error())
+	statusMsg := ErrorMessage(err)
 	if message != "" {
 		statusMsg = sanitizeSpanMessage(message + ": " + statusMsg)
 	}
 
 	span.SetStatus(codes.Error, statusMsg)
 	span.RecordError(errors.New(statusMsg))
+}
+
+// ErrorMessage returns a version of err's message that is always safe to
+// record on a span or log line: log.SafeErrorMessage recovers from a panic
+// in err.Error() itself (a valid, non-nil error can still panic when
+// stringified - see its doc comment for why, errors.Join with a typed-nil
+// member is the canonical example), then sanitizeSpanMessage applies the
+// same Bearer/Basic-token redaction and length cap every span error field
+// already carries. Exported so a caller outside this package that needs an
+// error rendered identically to how a span renders it - the HTTP access log
+// field in particular - doesn't duplicate the redaction/cap rules.
+func ErrorMessage(err error) string {
+	return sanitizeSpanMessage(log.SafeErrorMessage(err))
 }
 
 // SetSpanAttributesFromValue flattens a value and sets resulting attributes on a span.
@@ -767,12 +810,97 @@ func InjectTraceContext(ctx context.Context, carrier propagation.TextMapCarrier)
 }
 
 // ExtractTraceContext extracts trace context from a generic text map carrier.
+//
+// This is the single funnel every inbound-extraction path in this library
+// goes through - directly for HTTP (ExtractHTTPContext), and transitively
+// for gRPC (ExtractGRPCContext) and queue consumers (ExtractQueueTraceContext)
+// - so the tenant.id strip below applies uniformly regardless of transport,
+// with no per-transport copy to fall out of sync.
 func ExtractTraceContext(ctx context.Context, carrier propagation.TextMapCarrier) context.Context {
 	if carrier == nil {
 		return ctx
 	}
 
-	return otel.GetTextMapPropagator().Extract(ctx, carrier)
+	// Captured BEFORE extraction: propagation.Baggage.Extract does not merge
+	// into the existing baggage, it REPLACES the whole value on ctx with
+	// whatever it parses from the carrier (or leaves ctx untouched if the
+	// carrier had no baggage header at all - see its own source). So an
+	// inbound baggage header that carries other members but no tenant.id -
+	// not just one that forges a tenant.id - silently wipes an
+	// already-seeded, legitimate tenant.id (the one seeded from a validated
+	// JWT claim before this middleware ever runs).
+	// The whole Member is captured (not just its decoded Value) so the
+	// restore below can re-apply it verbatim via SetMember: rebuilding it
+	// with baggage.NewMember would treat the DECODED value as
+	// percent-encoded input, so a legitimate tenant.id containing a
+	// character like ";" would fail validation and silently drop the
+	// trusted value.
+	preExistingTenantID := baggage.FromContext(ctx).Member(constant.AttrKeyTenantID)
+
+	extracted := stripTenantIDBaggage(otel.GetTextMapPropagator().Extract(ctx, carrier))
+
+	if preExistingTenantID.Value() != "" {
+		extracted = restoreTenantIDBaggage(extracted, preExistingTenantID)
+	}
+
+	return extracted
+}
+
+// restoreTenantIDBaggage re-applies a tenant.id member captured from ctx
+// BEFORE extraction, merging it into whatever baggage extraction (plus the
+// strip above) left behind - SetMember adds/replaces one member without
+// touching the others, unlike Extract's own full replacement. This is what
+// makes an already in-process tenant.id always win over anything an inbound
+// carrier claims, whether the carrier stayed silent on tenant.id (wiped by
+// Extract's replacement) or tried to forge one (removed by the strip): the
+// third rail is that tenant identity never comes from the carrier, so the
+// trusted, pre-extraction value is the only one that may survive here.
+//
+// The original Member is re-applied as-is - never rebuilt through
+// baggage.NewMember, whose percent-encoding validation would reject (and
+// so drop) a decoded value containing characters like ";". A member that
+// came out of a parsed Baggage is already valid, so SetMember failing is
+// unexpected; when it does, the failure is logged rather than swallowed,
+// since it means a trusted tenant.id was lost.
+func restoreTenantIDBaggage(ctx context.Context, member baggage.Member) context.Context {
+	bag, err := baggage.FromContext(ctx).SetMember(member)
+	if err != nil {
+		observability.NewLoggerFromContext(ctx).Log(ctx, log.LevelWarn,
+			"failed to restore trusted tenant.id baggage member after inbound extraction",
+			log.Err(err))
+
+		return ctx
+	}
+
+	return baggage.ContextWithBaggage(ctx, bag)
+}
+
+// stripTenantIDBaggage removes the tenant.id member from the OTel BAGGAGE
+// just extracted from an inbound carrier (HTTP headers, gRPC metadata, or
+// queue headers) - this is narrower than "tenant identity never comes from a
+// caller-controlled field": it covers the baggage propagation path
+// specifically. An external caller sending `baggage: tenant.id=acme-corp`
+// (over any transport) would otherwise forge the tenant.id stamped on every
+// span - before auth ever runs. Called unconditionally by
+// ExtractTraceContext (a no-op when there is no baggage to strip - see
+// bag.Len() below), with no enable/disable knob: unlike inbound
+// trace-context trust (see TelemetryConfig.TrustInboundTraceContext), there
+// is no deployment topology where trusting a caller-supplied tenant.id is
+// correct. Trace-context propagation itself (and any other baggage member)
+// is left untouched. ExtractTraceContext restores a pre-existing, trusted
+// tenant.id after this runs - see restoreTenantIDBaggage.
+//
+// This does NOT close every tenant-from-caller-controlled-field surface:
+// middleware.ResolveTenantIDFromGRPC is a separate, pre-existing mechanism
+// that reads a caller-controlled `tenant-id` gRPC metadata field directly
+// (not via baggage) for span/metric labeling.
+func stripTenantIDBaggage(ctx context.Context) context.Context {
+	bag := baggage.FromContext(ctx)
+	if bag.Len() == 0 {
+		return ctx
+	}
+
+	return baggage.ContextWithBaggage(ctx, bag.DeleteMember(constant.AttrKeyTenantID))
 }
 
 // InjectHTTPContext injects trace headers into HTTP headers.
