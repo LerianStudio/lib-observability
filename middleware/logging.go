@@ -301,8 +301,10 @@ func httpStatusCode(c fiber.Ctx, err error) int {
 		return statusCode
 	}
 
+	// errors.As also matches a typed-nil *fiber.Error inside a joined
+	// chain and leaves fiberErr nil - reading .Code would panic.
 	var fiberErr *fiber.Error
-	if errors.As(err, &fiberErr) {
+	if errors.As(err, &fiberErr) && fiberErr != nil {
 		return fiberErr.Code
 	}
 
