@@ -131,16 +131,19 @@ func asFiberError(err error) *fiber.Error {
 		return nil
 	}
 
-	if fiberErr, ok := err.(*fiber.Error); ok && fiberErr != nil {
+	// The per-node type assertion (not errors.As) is the whole point of this
+	// walker: errors.As would stop at a typed-nil match, and unwrapping is
+	// handled manually below.
+	if fiberErr, ok := err.(*fiber.Error); ok && fiberErr != nil { //nolint:errorlint // deliberate single-node check; traversal is manual
 		return fiberErr
 	}
 
 	var target *fiber.Error
-	if as, ok := err.(interface{ As(any) bool }); ok && as.As(&target) && target != nil {
+	if as, ok := err.(interface{ As(target any) bool }); ok && as.As(&target) && target != nil {
 		return target
 	}
 
-	switch unwrapped := err.(type) {
+	switch unwrapped := err.(type) { //nolint:errorlint // deliberate single-node check; traversal is manual
 	case interface{ Unwrap() error }:
 		return asFiberError(unwrapped.Unwrap())
 	case interface{ Unwrap() []error }:
