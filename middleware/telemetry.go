@@ -217,7 +217,7 @@ func (tm *TelemetryMiddleware) WithTelemetry(tl *tracing.Telemetry, excludedRout
 
 		if effectiveTelemetry.TracerProvider == nil {
 			returnedErr := c.Next()
-			chainErr, _, statusCode := resolveHTTPResponse(c, returnedErr)
+			statusCode, chainErr, _ := resolveHTTPResponse(c, returnedErr)
 
 			recordHTTPServerDuration(c, durationHistogram, method, requestStart, statusCode)
 
@@ -273,7 +273,7 @@ func (tm *TelemetryMiddleware) WithTelemetry(tl *tracing.Telemetry, excludedRout
 		}
 
 		returnedErr := c.Next()
-		chainErr, handlerErr, statusCode := resolveHTTPResponse(c, returnedErr)
+		statusCode, chainErr, handlerErr := resolveHTTPResponse(c, returnedErr)
 
 		applyTelemetrySpanAttributes(span, c, statusCode, telemetryRequestAttrs{
 			method:         method,

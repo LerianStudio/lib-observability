@@ -126,7 +126,7 @@ func invokeErrorHandlerSafely(c fiber.Ctx, err error) {
 			// HandlePanicValue logs it (with stack trace) AND records it on
 			// the request's active span (still reachable from c.Context() -
 			// the same span WithTelemetry started earlier in the chain).
-			logger, _, _, _ := observability.NewTrackingFromContext(c.Context())
+			logger := observability.NewLoggerFromContext(c.Context())
 			runtime.HandlePanicValue(c.Context(), logger, r, "middleware", "http_error_handler")
 			forceInternalServerError(c)
 		}
@@ -153,14 +153,14 @@ func httpResponseStateFromContext(ctx context.Context) *httpResponseState {
 	return state
 }
 
-// resolveHTTPResponse resolves the (error to return, error for telemetry,
-// status code) triple for a completed request. Every middleware that
+// resolveHTTPResponse resolves the (status code, error to return, error
+// for telemetry) triple for a completed request. Every middleware that
 // inspects the outcome of c.Next() on the HTTP path (WithHTTPLogging,
 // WithTelemetry) must call this instead of deriving the values itself, so
 // they observe the SAME resolved outcome regardless of whether
 // WithHTTPErrorHandling already finalized the response further down the
 // chain.
-func resolveHTTPResponse(c fiber.Ctx, returnedErr error) (chainErr, handlerErr error, statusCode int) {
+func resolveHTTPResponse(c fiber.Ctx, returnedErr error) (statusCode int, chainErr, handlerErr error) {
 	if state := httpResponseStateFromContext(c.Context()); state != nil && state.finalized {
 		// The response is already fully decided: WithHTTPErrorHandling either
 		// ran the app's ErrorHandler or the original handler succeeded, and the
@@ -180,12 +180,12 @@ func resolveHTTPResponse(c fiber.Ctx, returnedErr error) (chainErr, handlerErr e
 			diagnoseDiscardedRogueError(c, returnedErr)
 		}
 
-		return nil, state.originalErr, state.statusCode
+		return state.statusCode, nil, state.originalErr
 	}
 
 	normalizedErr := normalizeHTTPHandlerError(returnedErr)
 
-	return normalizedErr, normalizedErr, httpStatusCode(c, normalizedErr)
+	return httpStatusCode(c, normalizedErr), normalizedErr, normalizedErr
 }
 
 // diagnoseDiscardedRogueError logs the error a middleware above the
@@ -194,7 +194,7 @@ func resolveHTTPResponse(c fiber.Ctx, returnedErr error) (chainErr, handlerErr e
 // purpose (see the finalized branch above), but a documented contract
 // violation still needs to be diagnosable, not silently swallowed.
 func diagnoseDiscardedRogueError(c fiber.Ctx, returnedErr error) {
-	logger, _, _, _ := observability.NewTrackingFromContext(c.Context())
+	logger := observability.NewLoggerFromContext(c.Context())
 	logger.Log(c.Context(), obslog.LevelWarn,
 		"discarded an error a middleware returned above the already-finalized response",
 		// error_type via %T (safe regardless of shape - reflect only, no

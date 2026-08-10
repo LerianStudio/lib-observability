@@ -227,7 +227,7 @@ func WithHTTPLogging(opts ...LogMiddlewareOption) fiber.Handler {
 		c.SetContext(ctx)
 
 		returnedErr := c.Next()
-		chainErr, handlerErr, statusCode := resolveHTTPResponse(c, returnedErr)
+		statusCode, chainErr, handlerErr := resolveHTTPResponse(c, returnedErr)
 
 		rw := ResponseMetricsWrapper{
 			Context:    c,
