@@ -97,8 +97,12 @@ func WithHTTPErrorHandling() fiber.Handler {
 			// a generic message (there is nothing safe to recover: the status
 			// itself already came from httpStatusCode's own fallback).
 			if !obslog.IsSafeToStringify(normalizedErr) {
+				// errors.As also matches a typed-nil *fiber.Error inside the
+				// chain (errors.Join((*fiber.Error)(nil), ...)) and leaves
+				// fiberErr nil - reading .Code would panic, the very defect
+				// this branch exists to close.
 				var fiberErr *fiber.Error
-				if errors.As(normalizedErr, &fiberErr) {
+				if errors.As(normalizedErr, &fiberErr) && fiberErr != nil {
 					normalizedErr = fiber.NewError(fiberErr.Code, fiberErr.Message)
 				} else {
 					normalizedErr = fiber.NewError(httpStatusCode(c, normalizedErr), "internal error")
