@@ -153,51 +153,6 @@ func TestWithTelemetryInterceptor_StripsInboundTenantIDBaggage(t *testing.T) {
 	require.NotEmpty(t, spanExp.GetSpans(), "a span must still be recorded")
 }
 
-// TestGetGRPCUserAgent tests the getGRPCUserAgent helper function.
-func TestGetGRPCUserAgent(t *testing.T) {
-	tests := []struct {
-		name          string
-		setupMetadata func() context.Context
-		expectedUA    string
-		description   string
-	}{
-		{
-			name: "Valid user-agent in metadata",
-			setupMetadata: func() context.Context {
-				md := metadata.Pairs("user-agent", "midaz/1.0.0 LerianStudio")
-				return metadata.NewIncomingContext(context.Background(), md)
-			},
-			expectedUA:  "midaz/1.0.0 LerianStudio",
-			description: "Should extract user-agent from gRPC metadata",
-		},
-		{
-			name: "No metadata in context",
-			setupMetadata: func() context.Context {
-				return context.Background()
-			},
-			expectedUA:  "",
-			description: "Should return empty string when no metadata present",
-		},
-		{
-			name: "Metadata without user-agent",
-			setupMetadata: func() context.Context {
-				md := metadata.Pairs("authorization", "Bearer token")
-				return metadata.NewIncomingContext(context.Background(), md)
-			},
-			expectedUA:  "",
-			description: "Should return empty string when user-agent key not present",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			ctx := tt.setupMetadata()
-			result := getGRPCUserAgent(ctx)
-			assert.Equal(t, tt.expectedUA, result, tt.description)
-		})
-	}
-}
-
 // TestEndTracingSpansInterceptor_EndsUnownedSpan verifies the end interceptor
 // ends a span that is present in the context but not owned by
 // WithTelemetryInterceptor.

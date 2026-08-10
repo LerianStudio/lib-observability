@@ -182,6 +182,7 @@ func (r *RequestInfo) FinishRequestInfo(rw *ResponseMetricsWrapper) {
 	} else if !r.Date.IsZero() {
 		r.Duration = time.Since(r.Date)
 	}
+
 	r.Status = rw.StatusCode
 	r.Size = rw.Size
 	r.URI = resolvedHTTPRoute(rw.Context)
@@ -220,7 +221,7 @@ func WithHTTPLogging(opts ...LogMiddlewareOption) fiber.Handler {
 		c.SetContext(ctx)
 
 		returnedErr := c.Next()
-		chainErr, handlerErr, statusCode := resolveHTTPResponse(c, returnedErr)
+		statusCode, handlerErr, chainErr := resolveHTTPResponse(c, returnedErr)
 
 		rw := ResponseMetricsWrapper{
 			Context:    c,

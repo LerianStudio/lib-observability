@@ -126,7 +126,7 @@ func invokeErrorHandlerSafely(c fiber.Ctx, err error) {
 			// HandlePanicValue logs it (with stack trace) AND records it on
 			// the request's active span (still reachable from c.Context() -
 			// the same span WithTelemetry started earlier in the chain).
-			logger, _, _, _ := observability.NewTrackingFromContext(c.Context())
+			logger := observability.NewLoggerFromContext(c.Context())
 			runtime.HandlePanicValue(c.Context(), logger, r, "middleware", "http_error_handler")
 			forceInternalServerError(c)
 		}
@@ -153,7 +153,7 @@ func httpResponseStateFromContext(ctx context.Context) *httpResponseState {
 	return state
 }
 
-func resolveHTTPResponse(c fiber.Ctx, returnedErr error) (error, error, int) {
+func resolveHTTPResponse(c fiber.Ctx, returnedErr error) (statusCode int, handlerErr, chainErr error) {
 	if state := httpResponseStateFromContext(c.Context()); state != nil && state.finalized {
 		// The response is already fully decided: WithHTTPErrorHandling either
 		// ran the app's ErrorHandler or the original handler succeeded, and the
@@ -173,12 +173,12 @@ func resolveHTTPResponse(c fiber.Ctx, returnedErr error) (error, error, int) {
 			diagnoseDiscardedRogueError(c, returnedErr)
 		}
 
-		return nil, state.originalErr, state.statusCode
+		return state.statusCode, state.originalErr, nil
 	}
 
 	normalizedErr := normalizeHTTPHandlerError(returnedErr)
 
-	return normalizedErr, normalizedErr, httpStatusCode(c, normalizedErr)
+	return httpStatusCode(c, normalizedErr), normalizedErr, normalizedErr
 }
 
 // diagnoseDiscardedRogueError logs the error a middleware above the
@@ -187,7 +187,7 @@ func resolveHTTPResponse(c fiber.Ctx, returnedErr error) (error, error, int) {
 // purpose (see the finalized branch above), but a documented contract
 // violation still needs to be diagnosable, not silently swallowed.
 func diagnoseDiscardedRogueError(c fiber.Ctx, returnedErr error) {
-	logger, _, _, _ := observability.NewTrackingFromContext(c.Context())
+	logger := observability.NewLoggerFromContext(c.Context())
 	logger.Log(c.Context(), obslog.LevelWarn,
 		"discarded an error a middleware returned above the already-finalized response",
 		// error_type via %T (safe regardless of shape - reflect only, no

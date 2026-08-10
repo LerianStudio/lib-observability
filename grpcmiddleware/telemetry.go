@@ -55,9 +55,6 @@ const rpcSystemGRPC = "grpc"
 // metadataID is the gRPC metadata key that carries the request context identifier.
 const metadataID = "metadata_id"
 
-// headerUserAgent is the HTTP/gRPC User-Agent header key.
-const headerUserAgent = "User-Agent"
-
 // ErrContextNotFound is returned when a required context is nil.
 var ErrContextNotFound = errors.New("context not found")
 
@@ -605,26 +602,6 @@ func getMetadataID(ctx context.Context) string {
 	}
 
 	return ""
-}
-
-// getGRPCUserAgent extracts the User-Agent from incoming gRPC metadata.
-// Returns empty string if the metadata is not present or doesn't contain user-agent.
-func getGRPCUserAgent(ctx context.Context) string {
-	if ctx == nil {
-		return ""
-	}
-
-	md, ok := metadata.FromIncomingContext(ctx)
-	if !ok || md == nil {
-		return ""
-	}
-
-	userAgents := md.Get(strings.ToLower(headerUserAgent))
-	if len(userAgents) == 0 {
-		return ""
-	}
-
-	return userAgents[0]
 }
 
 // ResolveTenantIDFromGRPC returns the tenant identifier carried by the
