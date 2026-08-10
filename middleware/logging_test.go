@@ -17,9 +17,9 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	observability "github.com/LerianStudio/lib-observability/v2"
-	obslog "github.com/LerianStudio/lib-observability/v2/log"
-	"github.com/LerianStudio/lib-observability/v2/tracing"
+	observability "github.com/LerianStudio/lib-observability/v3"
+	obslog "github.com/LerianStudio/lib-observability/v3/log"
+	"github.com/LerianStudio/lib-observability/v3/tracing"
 	"github.com/gofiber/fiber/v3"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"

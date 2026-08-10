@@ -15,9 +15,9 @@ import (
 	"sync"
 	"time"
 
-	observability "github.com/LerianStudio/lib-observability/v2"
-	"github.com/LerianStudio/lib-observability/v2/runtime"
-	"github.com/LerianStudio/lib-observability/v2/tracing"
+	observability "github.com/LerianStudio/lib-observability/v3"
+	"github.com/LerianStudio/lib-observability/v3/runtime"
+	"github.com/LerianStudio/lib-observability/v3/tracing"
 )
 
 // DefaultMetricsCollectionInterval is the default interval for collecting system metrics.

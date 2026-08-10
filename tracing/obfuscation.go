@@ -10,8 +10,8 @@ import (
 	"fmt"
 	"regexp"
 
-	cn "github.com/LerianStudio/lib-observability/v2/constants"
-	"github.com/LerianStudio/lib-observability/v2/redaction"
+	cn "github.com/LerianStudio/lib-observability/v3/constants"
+	"github.com/LerianStudio/lib-observability/v3/redaction"
 )
 
 // RedactionAction defines how sensitive values are transformed.

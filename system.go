@@ -4,8 +4,8 @@ import (
 	"context"
 	"time"
 
-	"github.com/LerianStudio/lib-observability/v2/log"
-	"github.com/LerianStudio/lib-observability/v2/metrics"
+	"github.com/LerianStudio/lib-observability/v3/log"
+	"github.com/LerianStudio/lib-observability/v3/metrics"
 	"github.com/shirou/gopsutil/cpu"
 	"github.com/shirou/gopsutil/mem"
 )

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/LerianStudio/lib-observability/v2/log"
+	"github.com/LerianStudio/lib-observability/v3/log"
 )
 
 // ErrorReporter defines an interface for external error reporting services.

@@ -6,8 +6,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/LerianStudio/lib-observability/v2/metrics"
-	"github.com/LerianStudio/lib-observability/v2/tracing"
+	"github.com/LerianStudio/lib-observability/v3/metrics"
+	"github.com/LerianStudio/lib-observability/v3/tracing"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"

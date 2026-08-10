@@ -5,8 +5,8 @@ import (
 	"reflect"
 	"time"
 
-	constant "github.com/LerianStudio/lib-observability/v2/constants"
-	"github.com/LerianStudio/lib-observability/v2/tracing"
+	constant "github.com/LerianStudio/lib-observability/v3/constants"
+	"github.com/LerianStudio/lib-observability/v3/tracing"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"

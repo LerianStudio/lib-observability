@@ -6,7 +6,7 @@ import (
 	"context"
 	"testing"
 
-	logpkg "github.com/LerianStudio/lib-observability/v2/log"
+	logpkg "github.com/LerianStudio/lib-observability/v3/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"

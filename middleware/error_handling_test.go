@@ -12,7 +12,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	obslog "github.com/LerianStudio/lib-observability/v2/log"
+	obslog "github.com/LerianStudio/lib-observability/v3/log"
 	"github.com/gofiber/fiber/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

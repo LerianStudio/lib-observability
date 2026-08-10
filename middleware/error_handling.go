@@ -5,10 +5,10 @@ import (
 	"errors"
 	"fmt"
 
-	observability "github.com/LerianStudio/lib-observability/v2"
-	obslog "github.com/LerianStudio/lib-observability/v2/log"
-	"github.com/LerianStudio/lib-observability/v2/runtime"
-	"github.com/LerianStudio/lib-observability/v2/tracing"
+	observability "github.com/LerianStudio/lib-observability/v3"
+	obslog "github.com/LerianStudio/lib-observability/v3/log"
+	"github.com/LerianStudio/lib-observability/v3/runtime"
+	"github.com/LerianStudio/lib-observability/v3/tracing"
 	"github.com/gofiber/fiber/v3"
 )
 

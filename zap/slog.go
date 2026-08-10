@@ -4,7 +4,7 @@ import (
 	"io"
 	"log/slog"
 
-	logpkg "github.com/LerianStudio/lib-observability/v2/log"
+	logpkg "github.com/LerianStudio/lib-observability/v3/log"
 	"go.uber.org/zap/exp/zapslog"
 )
 

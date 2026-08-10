@@ -7,8 +7,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	observability "github.com/LerianStudio/lib-observability/v2"
-	obslog "github.com/LerianStudio/lib-observability/v2/log"
+	observability "github.com/LerianStudio/lib-observability/v3"
+	obslog "github.com/LerianStudio/lib-observability/v3/log"
 	"github.com/gofiber/fiber/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

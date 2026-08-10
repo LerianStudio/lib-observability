@@ -7,7 +7,7 @@ import (
 	"reflect"
 	"strings"
 
-	"github.com/LerianStudio/lib-observability/v2/redaction"
+	"github.com/LerianStudio/lib-observability/v3/redaction"
 )
 
 var logControlCharReplacer = strings.NewReplacer(
