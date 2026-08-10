@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	observability "github.com/LerianStudio/lib-observability/v2"
@@ -19,8 +20,7 @@ import (
 	constant "github.com/LerianStudio/lib-observability/v2/constants"
 	"github.com/LerianStudio/lib-observability/v2/log"
 	"github.com/LerianStudio/lib-observability/v2/metrics"
-	"github.com/LerianStudio/lib-observability/v2/redaction"
-	"github.com/gofiber/fiber/v3"
+	otelruntime "go.opentelemetry.io/contrib/instrumentation/runtime"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/baggage"
@@ -70,15 +70,30 @@ type TelemetryConfig struct {
 	CollectorExporterEndpoint string
 	EnableTelemetry           bool
 	InsecureExporter          bool
-	// TrustInboundTraceContext controls whether inbound HTTP trace-context
-	// extraction (a W3C traceparent/tracestate header) continues that trace,
-	// instead of starting a fresh root span for every request. It follows
-	// the Go zero-value convention: default false (fail-closed), opt-in
-	// true. It replaces the previous internal-service User-Agent heuristic
-	// in middleware.WithTelemetry, which was spoofable by any caller that
-	// set the header and never a real trust boundary. This flag governs the
-	// HTTP path only - the gRPC server interceptor keeps its own,
-	// pre-existing User-Agent gate untouched.
+	// EnableRuntimeMetrics turns on the Go runtime instrumentation
+	// (go.opentelemetry.io/contrib/instrumentation/runtime), emitting go.*
+	// runtime metrics (heap, GC, goroutines) through this instance's
+	// MeterProvider. It follows the Go zero-value convention: default false,
+	// opt-in true. It is honored only when EnableTelemetry is also true and a
+	// real MeterProvider exists; with telemetry disabled or a noop provider it
+	// degrades to a no-op. Applications that want runtime metrics on by default
+	// should set this to true explicitly at their bootstrap - keeping the
+	// zero-value off avoids surprising callers who construct TelemetryConfig
+	// partially and inheriting a background collector they did not request.
+	EnableRuntimeMetrics bool
+	// TrustInboundTraceContext controls whether inbound trace-context
+	// extraction (a W3C traceparent/tracestate header, over HTTP or gRPC)
+	// continues that trace, instead of starting a fresh root span for every
+	// request. It follows the Go zero-value convention: default false
+	// (fail-closed), opt-in true. Shared, not per-transport: setting it once
+	// on a Telemetry instance governs both the HTTP middleware
+	// (middleware.WithTelemetry) and the gRPC server interceptor
+	// (grpcmiddleware.WithTelemetryInterceptor) consistently. Earlier, gRPC
+	// had its own, separate gate (a User-Agent heuristic, spoofable by any
+	// caller that set the header, so never a real trust boundary) - it has
+	// been replaced by this flag; a service behind a trusted internal mesh
+	// that relied on that heuristic now needs to opt in here explicitly to
+	// keep joining inbound gRPC traces.
 	//
 	// With an untrusted caller able to set traceparent, extracting it
 	// unconditionally lets that caller choose the trace ID this service
@@ -91,13 +106,14 @@ type TelemetryConfig struct {
 	// external clients.
 	//
 	// The tenant.id BAGGAGE member extracted alongside trace context is
-	// ALWAYS stripped regardless of this flag - the strip lives in the
-	// shared ExtractTraceContext funnel every extraction path (HTTP, gRPC,
-	// queue) goes through, see its doc comment. This is narrower than
-	// "tenant identity never comes from a caller-controlled field" - it
-	// covers baggage specifically. middleware.ResolveTenantIDFromGRPC is a
-	// separate, pre-existing mechanism that DOES read a caller-controlled
-	// `tenant-id` gRPC metadata field for span/metric labeling.
+	// ALWAYS stripped regardless of this flag, and regardless of transport -
+	// the strip lives in the shared ExtractTraceContext funnel every
+	// extraction path (HTTP, gRPC, queue) goes through, see its doc comment.
+	// This is narrower than "tenant identity never comes from a
+	// caller-controlled field" - it covers baggage specifically.
+	// grpcmiddleware.ResolveTenantIDFromGRPC is a separate, pre-existing
+	// mechanism that DOES read a caller-controlled `tenant-id` gRPC metadata
+	// field for span/metric labeling; see its own doc comment for that gap.
 	TrustInboundTraceContext bool
 	Logger                   log.Logger
 	Propagator               propagation.TextMapPropagator
@@ -117,7 +133,7 @@ type Telemetry struct {
 
 // NewTelemetry builds telemetry providers and exporters from configuration.
 func NewTelemetry(cfg TelemetryConfig) (*Telemetry, error) {
-	if cfg.Logger == nil {
+	if log.IsNil(cfg.Logger) {
 		return nil, ErrNilTelemetryLogger
 	}
 
@@ -280,6 +296,12 @@ func initExporters(ctx context.Context, cfg TelemetryConfig) (*Telemetry, error)
 		return nil, err
 	}
 
+	// Start Go runtime instrumentation on the real MeterProvider when opted in.
+	// Best-effort: a failure here is logged inside the helper and never aborts
+	// telemetry bring-up, since runtime metrics are auxiliary to request-path
+	// observability.
+	startRuntimeMetrics(cfg, mp)
+
 	shutdown, shutdownCtx := buildShutdownHandlers(cfg.Logger, mp, tp, lp, tExp, mExp, lExp)
 
 	return &Telemetry{
@@ -291,6 +313,51 @@ func initExporters(ctx context.Context, cfg TelemetryConfig) (*Telemetry, error)
 		shutdown:        shutdown,
 		shutdownCtx:     shutdownCtx,
 	}, nil
+}
+
+// runtimeMinReadMemStatsInterval is the minimum interval between the relatively
+// expensive runtime.ReadMemStats() calls made by the Go runtime instrumentation.
+const runtimeMinReadMemStatsInterval = 15 * time.Second
+
+// startRuntimeMetrics registers the Go runtime instrumentation
+// (go.opentelemetry.io/contrib/instrumentation/runtime) against the supplied
+// MeterProvider when cfg.EnableRuntimeMetrics is set. It returns true when the
+// instrumentation was started, false when it was skipped (toggle off, nil
+// MeterProvider) or failed to register.
+//
+// It is best-effort and never panics: a nil MeterProvider or a Start error is
+// logged (when a logger is available) and reported via the false return, so
+// telemetry bring-up proceeds regardless. The contrib instrumentation registers
+// asynchronous callbacks on the MeterProvider's meter; there is no separate
+// goroutine to shut down, so teardown follows the MeterProvider's own shutdown.
+func startRuntimeMetrics(cfg TelemetryConfig, mp *sdkmetric.MeterProvider) bool {
+	if !cfg.EnableRuntimeMetrics {
+		return false
+	}
+
+	if mp == nil {
+		if cfg.Logger != nil {
+			cfg.Logger.Log(context.Background(), log.LevelWarn,
+				"runtime metrics requested but MeterProvider is nil; skipping")
+		}
+
+		return false
+	}
+
+	err := otelruntime.Start(
+		otelruntime.WithMeterProvider(mp),
+		otelruntime.WithMinimumReadMemStatsInterval(runtimeMinReadMemStatsInterval),
+	)
+	if err != nil {
+		if cfg.Logger != nil {
+			cfg.Logger.Log(context.Background(), log.LevelError,
+				"failed to start Go runtime metrics", log.Err(err))
+		}
+
+		return false
+	}
+
+	return true
 }
 
 // newNoopTelemetry creates a Telemetry instance with no-op providers (no exporters).
@@ -492,6 +559,12 @@ func isNilShutdownable(s shutdownable) bool {
 }
 
 func buildShutdownHandlers(l log.Logger, components ...shutdownable) (func(), func(context.Context) error) {
+	// Normalize once at entry rather than re-checking log.IsNil(l) on every
+	// component in the loop below.
+	if log.IsNil(l) {
+		l = log.NewNop()
+	}
+
 	shutdown := func() {
 		ctx := context.Background()
 
@@ -779,27 +852,6 @@ func truncateUTF8(s string, maxBytes int) string {
 	return s
 }
 
-// SetSpanAttributeForParam adds a request parameter attribute to the current context bag.
-// Sensitive parameter names (as determined by redaction.IsSensitiveField) are masked.
-func SetSpanAttributeForParam(c fiber.Ctx, param, value, entityName string) {
-	if c == nil {
-		return
-	}
-
-	spanAttrKey := "app.request." + param
-	if entityName != "" && param == "id" {
-		spanAttrKey = "app.request." + entityName + "_id"
-	}
-
-	// Mask value if the parameter name is considered sensitive
-	attrValue := value
-	if redaction.IsSensitiveField(param) {
-		attrValue = "[REDACTED]"
-	}
-
-	c.SetContext(observability.ContextWithSpanAttributes(c.Context(), attribute.String(spanAttrKey, attrValue)))
-}
-
 // InjectTraceContext injects trace context into a generic text map carrier.
 func InjectTraceContext(ctx context.Context, carrier propagation.TextMapCarrier) {
 	if carrier == nil {
@@ -812,10 +864,11 @@ func InjectTraceContext(ctx context.Context, carrier propagation.TextMapCarrier)
 // ExtractTraceContext extracts trace context from a generic text map carrier.
 //
 // This is the single funnel every inbound-extraction path in this library
-// goes through - directly for HTTP (ExtractHTTPContext), and transitively
-// for gRPC (ExtractGRPCContext) and queue consumers (ExtractQueueTraceContext)
-// - so the tenant.id strip below applies uniformly regardless of transport,
-// with no per-transport copy to fall out of sync.
+// goes through - directly for HTTP (middleware.ExtractHTTPContext), and
+// transitively for gRPC (ExtractGRPCContext) and queue consumers
+// (ExtractQueueTraceContext, ExtractTraceContextFromQueueHeaders) - so the
+// tenant.id strip below applies uniformly regardless of transport, with no
+// per-transport copy to fall out of sync.
 func ExtractTraceContext(ctx context.Context, carrier propagation.TextMapCarrier) context.Context {
 	if carrier == nil {
 		return ctx
@@ -879,9 +932,11 @@ func restoreTenantIDBaggage(ctx context.Context, member baggage.Member) context.
 // just extracted from an inbound carrier (HTTP headers, gRPC metadata, or
 // queue headers) - this is narrower than "tenant identity never comes from a
 // caller-controlled field": it covers the baggage propagation path
-// specifically. An external caller sending `baggage: tenant.id=acme-corp`
-// (over any transport) would otherwise forge the tenant.id stamped on every
-// span - before auth ever runs. Called unconditionally by
+// specifically. The composite propagator configured in NewTelemetry extracts
+// standard W3C baggage alongside trace context, so an external caller
+// sending `baggage: tenant.id=acme-corp` (over any transport) would
+// otherwise forge the tenant.id stamped on every span by
+// AttrBagSpanProcessor - before auth ever runs. Called unconditionally by
 // ExtractTraceContext (a no-op when there is no baggage to strip - see
 // bag.Len() below), with no enable/disable knob: unlike inbound
 // trace-context trust (see TelemetryConfig.TrustInboundTraceContext), there
@@ -891,9 +946,10 @@ func restoreTenantIDBaggage(ctx context.Context, member baggage.Member) context.
 // tenant.id after this runs - see restoreTenantIDBaggage.
 //
 // This does NOT close every tenant-from-caller-controlled-field surface:
-// middleware.ResolveTenantIDFromGRPC is a separate, pre-existing mechanism
-// that reads a caller-controlled `tenant-id` gRPC metadata field directly
-// (not via baggage) for span/metric labeling.
+// grpcmiddleware.ResolveTenantIDFromGRPC is a separate, pre-existing
+// mechanism that reads a caller-controlled `tenant-id` gRPC metadata field
+// directly (not via baggage) for span/metric labeling. See its own doc
+// comment - closing that gap is a distinct, not-yet-made decision.
 func stripTenantIDBaggage(ctx context.Context) context.Context {
 	bag := baggage.FromContext(ctx)
 	if bag.Len() == 0 {
@@ -912,18 +968,21 @@ func InjectHTTPContext(ctx context.Context, headers http.Header) {
 	InjectTraceContext(ctx, propagation.HeaderCarrier(headers))
 }
 
-// ExtractHTTPContext extracts trace headers from a Fiber request.
-func ExtractHTTPContext(ctx context.Context, c fiber.Ctx) context.Context {
-	if c == nil {
-		return ctx
-	}
-
-	carrier := propagation.HeaderCarrier{}
-	for key, value := range c.Request().Header.All() {
-		carrier.Set(string(key), string(value))
-	}
-
-	return ExtractTraceContext(ctx, carrier)
+// grpcMetadataHeaderPairs lists the (lowercase gRPC metadata key, canonical
+// PascalCase header key) pairs that must be remapped in both directions when
+// crossing between metadata.MD (grpc-go always lowercases metadata keys -
+// mandated by HTTP/2, which requires lowercase header field names on the
+// wire - so no real gRPC client can send anything else) and
+// propagation.HeaderCarrier, whose Get/Set canonicalize via textproto (e.g.
+// "traceparent" -> "Traceparent"). Without this remapping the canonicalizing
+// Get looks up a key that is never present, so the affected field silently
+// fails to extract - reproduced for baggage specifically: propagation.Baggage
+// found nothing in gRPC metadata, so a gRPC-propagated tenant.id (or any
+// other baggage member) never reached a span at all until this fix.
+var grpcMetadataHeaderPairs = [...][2]string{
+	{constant.MetadataTraceparent, constant.HeaderTraceparentPascal},
+	{constant.MetadataTracestate, constant.HeaderTracestatePascal},
+	{constant.MetadataBaggage, constant.HeaderBaggagePascal},
 }
 
 // InjectGRPCContext injects trace context into gRPC metadata.
@@ -934,14 +993,12 @@ func InjectGRPCContext(ctx context.Context, md metadata.MD) metadata.MD {
 
 	InjectTraceContext(ctx, propagation.HeaderCarrier(md))
 
-	if traceparentValues, exists := md[constant.HeaderTraceparentPascal]; exists && len(traceparentValues) > 0 {
-		md[constant.MetadataTraceparent] = traceparentValues
-		delete(md, constant.HeaderTraceparentPascal)
-	}
-
-	if tracestateValues, exists := md[constant.HeaderTracestatePascal]; exists && len(tracestateValues) > 0 {
-		md[constant.MetadataTracestate] = tracestateValues
-		delete(md, constant.HeaderTracestatePascal)
+	for _, pair := range grpcMetadataHeaderPairs {
+		lower, pascal := pair[0], pair[1]
+		if values, exists := md[pascal]; exists && len(values) > 0 {
+			md[lower] = values
+			delete(md, pascal)
+		}
 	}
 
 	return md
@@ -955,14 +1012,12 @@ func ExtractGRPCContext(ctx context.Context, md metadata.MD) context.Context {
 
 	mdCopy := md.Copy()
 
-	if traceparentValues, exists := mdCopy[constant.MetadataTraceparent]; exists && len(traceparentValues) > 0 {
-		mdCopy[constant.HeaderTraceparentPascal] = traceparentValues
-		delete(mdCopy, constant.MetadataTraceparent)
-	}
-
-	if tracestateValues, exists := mdCopy[constant.MetadataTracestate]; exists && len(tracestateValues) > 0 {
-		mdCopy[constant.HeaderTracestatePascal] = tracestateValues
-		delete(mdCopy, constant.MetadataTracestate)
+	for _, pair := range grpcMetadataHeaderPairs {
+		lower, pascal := pair[0], pair[1]
+		if values, exists := mdCopy[lower]; exists && len(values) > 0 {
+			mdCopy[pascal] = values
+			delete(mdCopy, lower)
+		}
 	}
 
 	return ExtractTraceContext(ctx, propagation.HeaderCarrier(mdCopy))

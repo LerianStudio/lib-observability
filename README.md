@@ -12,6 +12,14 @@ Full OpenTelemetry SDK lifecycle management: OTLP/gRPC exporter setup for traces
 
 Thread-safe `MetricsFactory` with lazy instrument caching and a fluent builder API for Counters, Gauges, and Histograms. Provides `.WithLabels()` / `.WithAttributes()` chaining followed by `.Add()`, `.Set()`, or `.Record()` — all with explicit error returns. Includes pre-configured domain metric recorders (accounts, transactions, routes, operations) and system infrastructure gauges (CPU, memory). Ships a `NewNopFactory()` for tests and disabled-metrics environments.
 
+### Outbound HTTP client instrumentation (`httpobs`)
+
+A thin, nil-safe wrapper over `otelhttp` that turns an outbound HTTP transport into an instrumented one: every outbound request is classified as a call to an external dependency (span kind `CLIENT`) and emits `http.client.request.duration` (seconds). `NewTransport(base, opts...)` wraps the transport the app already built (preserving its TLS/timeout/proxy config); `NewClient(base, opts...)` is a convenience returning a ready `*http.Client`. Bounded span name by default (`HTTP <METHOD>`), no-op when telemetry is off. See "Outbound call instrumentation" below.
+
+### Manual client-span helper (`tracing.StartClientSpan`)
+
+For outbound calls that have **no** dedicated wrapper (e.g. the document database, custom RPC/SDK), `tracing.StartClientSpan(ctx, tracer, name, opts...)` starts a span already classified as `CLIENT`, so hand-rolled network hops stop defaulting to `INTERNAL`. The `CLIENT` kind is an overridable default. See "Outbound call instrumentation" below.
+
 ### Structured logging (`log`)
 
 A minimal, implementation-agnostic `Logger` interface with five methods (`Log`, `With`, `WithGroup`, `Enabled`, `Sync`), four severity levels, and typed `Field` constructors (`String`, `Int`, `Bool`, `Err`, `Any`). Includes a stdlib-based `GoLogger` with CWE-117 log-injection prevention, a `NopLogger` for tests, production-aware error sanitization (`SafeError`, `SanitizeExternalResponse`), and a generated mock for unit testing.
@@ -44,11 +52,74 @@ A configurable `Redactor` with rule-based field processing supporting mask, hash
 - **Redaction-first** — sensitive fields are masked in spans, logs, and attributes by default
 - **Interface-driven** — `Logger`, `MetricsFactory`, `ErrorReporter`, and `DLQMetrics` are all interface-bound for testability
 
+## Outbound call instrumentation — span kind precedence
+
+Outbound calls (crossing a process/network boundary: DB, cache, HTTP, another service) must be classified as `CLIENT` in telemetry. Inbound requests are `SERVER`; purely in-process work is `INTERNAL`. A raw `tracer.Start(ctx, name)` defaults to `INTERNAL`, so an outbound call instrumented by hand is **mis-classified** — which hides the latency/error of your external dependencies and inflates the `INTERNAL` series.
+
+**Rule of precedence — for humans and AI assistants:**
+
+1. **Always prefer the dedicated wrapper.** It sets the correct span kind (and metric) automatically, so you never have to remember `WithSpanKind`.
+
+   | Outbound call type | Use this | Span kind |
+   |---|---|---|
+   | SQL database | `sqlobs` | CLIENT |
+   | Redis / Valkey | `redisobs` | CLIENT |
+   | HTTP client | `httpobs` | CLIENT |
+   | Messaging (produce/consume) | `messagingobs` | PRODUCER / CONSUMER |
+   | Inbound HTTP / gRPC (server) | `middleware` / `grpcmiddleware` | SERVER |
+
+2. **Only when no wrapper exists**, use `tracing.StartClientSpan` by hand — e.g. the document database (no stable driver instrumentation today) or a custom RPC/SDK call.
+
+3. **Never double-instrument.** Do not wrap a call with a wrapper **and** also open a manual `StartClientSpan` around the same call — that produces two spans for one operation. Use the wrapper for wrapped call types; use `StartClientSpan` only for the rest.
+
+### Example — HTTP client (use the wrapper)
+
+Wrap the transport your app already built so its custom TLS/timeout/proxy config is preserved. `WithTracerProvider` is required for the CLIENT span (otherwise only the metric is emitted).
+
+```go
+import (
+    "net/http"
+
+    "github.com/LerianStudio/lib-observability/v2/httpobs"
+)
+
+func newInstrumentedClient(baseTransport http.RoundTripper) *http.Client {
+    return httpobs.NewClient(baseTransport,
+        httpobs.WithMeterProvider(meterProvider),
+        httpobs.WithTracerProvider(tracerProvider), // required for the CLIENT span
+    )
+}
+
+// When the app builds its own *http.Client, wrap only the transport:
+//   client.Transport = httpobs.NewTransport(baseTransport,
+//       httpobs.WithMeterProvider(meterProvider),
+//       httpobs.WithTracerProvider(tracerProvider))
+```
+
+Migration note: once the transport is wrapped, remove any manual `tracer.Start(...)` you previously opened around the HTTP call (no double-instrumentation). The caller must fully read and close the response body — the span ends on body close.
+
+### Example — no wrapper (use StartClientSpan)
+
+For an outbound call with no wrapper — e.g. the document database — replace the hand-rolled `tracer.Start(...)` so the span is `CLIENT`:
+
+```go
+import "github.com/LerianStudio/lib-observability/v2/tracing"
+
+// Before: outbound Mongo call rendered as INTERNAL
+//   ctx, span := tracer.Start(ctx, "mongodb.find_holder")
+// After: classified as an external-dependency call (CLIENT)
+ctx, span := tracing.StartClientSpan(ctx, tracer, "mongodb.find_holder")
+defer span.End()
+// ... perform the document-database call ...
+```
+
+> **PII in outbound URLs:** `httpobs` keeps the duration metric labels and the span name bounded and PII-free. However `otelhttp` always records `url.full` (the raw request URL, including path and query) as a standard attribute on the client span, and OpenTelemetry-Go offers no supported hook to strip it. If your outbound URLs can carry identifiers/PII in the path or query, redact `url.full` in the OTel Collector (transform processor) — that is where span-attribute PII/cardinality redaction belongs.
+
 ## HTTP server telemetry safety
 
-`WithHTTPLogging` and `WithTelemetry` resolve the matched Fiber route only after the downstream handler returns. Access logs, server span names, `url.path`, and `http.route` therefore use the route template (for example, `/v1/contracts/:contract_id`) and discard the query string entirely. Unmatched traffic uses the stable `/{unmatched}` fallback for logs, span names, and `url.path`; `http.route` remains absent, as required by OpenTelemetry.
+`WithHTTPLogging` and `WithTelemetry` resolve the matched Fiber route only after the downstream handler returns. Access logs, server span names, and `url.path` therefore use the route template (for example, `/v1/contracts/:contract_id`) and omit the query string entirely. Unmatched traffic uses the stable `/{unmatched}` fallback; `http.route` remains absent, as required by OpenTelemetry.
 
-The HTTP middleware never derives tenant or customer identity from `X-Tenant-Id`. That client-controlled value is not added to access logs, server spans, or built-in HTTP metric labels. `http.server.request.duration` is limited to stable transport dimensions.
+The HTTP middleware never derives tenant or customer identity from `X-Tenant-Id`. That client-controlled value is not added to access logs, server spans, or the built-in HTTP metrics. `http.server.request.duration` is limited to method, route template, response status, and error class.
 
 ## Tenant ID propagation
 

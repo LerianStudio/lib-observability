@@ -7,4 +7,6 @@ const (
 	HeaderTraceparentPascal = "Traceparent"
 	// HeaderTracestatePascal is the PascalCase variant of the Tracestate header for gRPC metadata.
 	HeaderTracestatePascal = "Tracestate"
+	// HeaderBaggagePascal is the PascalCase variant of the Baggage header for gRPC metadata.
+	HeaderBaggagePascal = "Baggage"
 )

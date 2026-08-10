@@ -33,7 +33,10 @@ const safeErrorMessageFallback = "error message unavailable: panic calling Error
 // non-nil top-level error.
 //
 // Every sink that stringifies an arbitrary error for logs, spans, or
-// assertions should call this instead of err.Error() directly.
+// assertions should call this instead of err.Error() directly - the
+// package's own code paths, plus tracing.ErrorMessage and assert.NoError,
+// route through it for exactly that reason. Observability code must never be
+// the reason a request panics, however the upstream error was assembled.
 func SafeErrorMessage(err error) string {
 	msg, _ := safeStringify(err)
 
@@ -45,9 +48,10 @@ func SafeErrorMessage(err error) string {
 //
 // Use this - not a shape check like IsNil alone - whenever a caller must
 // PROVE an error is safe before handing it to third-party code with an
-// unguarded Error() call. IsNil alone misses a valid, non-nil error whose
-// Unwrap chain hits an unguarded typed-nil (errors.Join(real, typedNil)) or
-// a custom wrapper that blindly delegates to a nil field - both are safe by
+// unguarded Error() call, such as google.golang.org/grpc/status.FromError's
+// fallback path. IsNil alone misses a valid, non-nil error whose Unwrap
+// chain hits an unguarded typed-nil (errors.Join(real, typedNil)) or a
+// custom wrapper that blindly delegates to a nil field - both are safe by
 // IsNil's shape check and both panic on Error(). Proving stringifiability
 // directly, rather than inspecting the error's shape, catches every form.
 func IsSafeToStringify(err error) bool {

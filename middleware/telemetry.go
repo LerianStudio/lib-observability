@@ -1,11 +1,15 @@
-// Package middleware provides Fiber HTTP and gRPC telemetry middleware that
-// integrates with the lib-observability tracing and metrics packages.
+// Package middleware provides Fiber HTTP telemetry middleware that integrates
+// with the lib-observability tracing and metrics packages.
+//
+// The gRPC telemetry interceptors live in the sibling grpcmiddleware package,
+// which is Fiber-free so Fiber-v2 applications can consume them without pulling
+// in Fiber v3. Both packages share the single process-wide system-metrics
+// collector via telemetrycore.
 package middleware
 
 import (
 	"context"
 	"errors"
-	"fmt"
 	"reflect"
 	"strconv"
 	"strings"
@@ -23,14 +27,16 @@ import (
 	"go.opentelemetry.io/otel/metric"
 	semconv "go.opentelemetry.io/otel/semconv/v1.34.0"
 	"go.opentelemetry.io/otel/trace"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/metadata"
-	"google.golang.org/grpc/status"
 )
 
 // httpServerRequestDurationMetric is the OpenTelemetry semantic-convention metric name
 // for HTTP server request duration. Recorded as a Float64 histogram in seconds.
 const httpServerRequestDurationMetric = "http.server.request.duration"
+
+// httpServerActiveRequestsMetric is the OpenTelemetry semantic-convention metric
+// name for the number of in-flight HTTP server requests. Recorded as an Int64
+// UpDownCounter in the unitless "{request}" dimension.
+const httpServerActiveRequestsMetric = "http.server.active_requests"
 
 const httpHandlerErrorEvent = "http.handler.error"
 
@@ -64,6 +70,26 @@ func newHTTPServerDurationHistogram(meter metric.Meter) metric.Float64Histogram 
 	return hist
 }
 
+// newActiveRequestsCounter builds the int64 UpDownCounter instrument for
+// http.server.active_requests on the given meter. Returns nil if the meter is
+// nil or instrument creation fails - callers must treat nil as "do not record".
+func newActiveRequestsCounter(meter metric.Meter) metric.Int64UpDownCounter {
+	if meter == nil {
+		return nil
+	}
+
+	counter, err := meter.Int64UpDownCounter(
+		httpServerActiveRequestsMetric,
+		metric.WithUnit("{request}"),
+		metric.WithDescription("Number of active HTTP server requests."),
+	)
+	if err != nil {
+		return nil
+	}
+
+	return counter
+}
+
 // Header and metadata key constants used by the middleware.
 const (
 	// headerID is the request identifier header key.
@@ -82,21 +108,20 @@ type spanEndStateKey struct{}
 type spanEndState struct {
 	span trace.Span
 	// once guarantees End() is idempotent. It is retained (not superseded by
-	// owned) because it still protects the foreign/handler-created span on
-	// the fallback path (where owned==false and the span may be ended both
-	// by a defer and by EndTracingSpans). owned resolves ordering (which
-	// middleware ends the span, and that it happens after finalization);
+	// owned) because it still protects the foreign/handler-created span on the
+	// HTTP and gRPC fallback paths (where owned==false and the span may be
+	// ended both by a defer and by the End middleware). owned resolves ordering
+	// (which middleware ends the span, and that it happens after finalization);
 	// once resolves double-end.
 	once sync.Once
 	// owned marks the span as exclusively finalized/ended by the middleware
 	// that created it (WithTelemetry). When set, EndTracingSpans must NOT end
 	// it: the owning middleware ends it via its own deferred End() AFTER
 	// applying the route template name and post-c.Next() attributes. This
-	// removes the ordering hazard where a separately-registered
-	// EndTracingSpans unwinds first (Fiber LIFO) and ends the span before
-	// finalization, silently discarding http.route/status/error.type and the
-	// span rename - measured: the span ends up named "GET" instead of
-	// "GET /orders/:id".
+	// removes the ordering hazard where a separately-registered EndTracingSpans
+	// unwinds first (Fiber LIFO) and ends the span before finalization,
+	// silently discarding http.route/status/error.type and the span rename -
+	// measured: the span ends up named "GET" instead of "GET /orders/:id".
 	owned bool
 }
 
@@ -130,7 +155,7 @@ func spanEndStateFromContext(ctx context.Context) *spanEndState {
 	return state
 }
 
-// TelemetryMiddleware wraps HTTP and gRPC handlers with tracing and metrics setup.
+// TelemetryMiddleware wraps Fiber HTTP handlers with tracing and metrics setup.
 type TelemetryMiddleware struct {
 	Telemetry *tracing.Telemetry
 }
@@ -155,7 +180,10 @@ func (tm *TelemetryMiddleware) WithTelemetry(tl *tracing.Telemetry, excludedRout
 	// or via the receiver's stored Telemetry, mirroring the per-request logic
 	// below. If neither resolves, or any required component is nil, the
 	// histogram is left nil and recording is skipped.
-	var durationHistogram metric.Float64Histogram
+	var (
+		durationHistogram metric.Float64Histogram
+		activeRequests    metric.Int64UpDownCounter
+	)
 
 	bootstrapTelemetry := tl
 	if bootstrapTelemetry == nil && tm != nil {
@@ -171,9 +199,9 @@ func (tm *TelemetryMiddleware) WithTelemetry(tl *tracing.Telemetry, excludedRout
 	if bootstrapTelemetry != nil &&
 		bootstrapTelemetry.MeterProvider != nil &&
 		bootstrapTelemetry.MetricsFactory != nil {
-		durationHistogram = newHTTPServerDurationHistogram(
-			bootstrapTelemetry.MeterProvider.Meter(bootstrapTelemetry.LibraryName),
-		)
+		meter := bootstrapTelemetry.MeterProvider.Meter(bootstrapTelemetry.LibraryName)
+		durationHistogram = newHTTPServerDurationHistogram(meter)
+		activeRequests = newActiveRequestsCounter(meter)
 	}
 
 	// Same hoisting rationale as the histogram above: read once at
@@ -208,13 +236,20 @@ func (tm *TelemetryMiddleware) WithTelemetry(tl *tracing.Telemetry, excludedRout
 			attribute.String("app.request.request_id", reqId),
 		))
 
-		// Capture all Fiber context string values BEFORE c.Next(). Fiber v2 uses
+		// Capture all Fiber context string values BEFORE c.Next(). Fiber uses
 		// utils.UnsafeString which returns pointers into fasthttp's request buffer.
 		// After c.Next() returns, fasthttp may recycle the underlying RequestCtx
 		// for the next connection, corrupting any previously returned string slices.
 		// Safe copies via string([]byte(...)) ensure the data is heap-owned.
 		rawMethod := string([]byte(c.Method()))
 		method, methodOriginal, methodReplaced := normalizeHTTPMethod(rawMethod)
+
+		// Track in-flight requests around the full downstream chain. Increment
+		// before c.Next() and decrement on return via the returned closure, so
+		// the counter reflects concurrency across both the tracing and
+		// no-tracer paths below. No-op when the instrument is nil.
+		activeDone := trackActiveRequest(c.Context(), activeRequests, method)
+		defer activeDone()
 
 		if effectiveTelemetry.TracerProvider == nil {
 			returnedErr := c.Next()
@@ -230,20 +265,25 @@ func (tm *TelemetryMiddleware) WithTelemetry(tl *tracing.Telemetry, excludedRout
 		userAgent := string([]byte(c.Get(headerUserAgent)))
 
 		tracer := effectiveTelemetry.TracerProvider.Tracer(effectiveTelemetry.LibraryName)
-		traceCtx := c.Context()
+		// Create the span with a method-only name (e.g. "GET"). The route
+		// template is not reliably known until after routing (c.Next), and the
+		// concrete path carries PII / unbounded cardinality (IDs, Pix keys). A
+		// method-only creation name keeps PII out of the name the sampler sees
+		// and out of spans that are dropped or never match a route. After
+		// c.Next, applyTelemetrySpanAttributes renames the span to
+		// "{method} {route template}" once the route is known.
+		spanName := method
+
 		// Fail-closed by default (TrustInboundTraceContext's zero value):
 		// inbound trace context is only extracted for a deployment that opted
 		// in, so an untrusted caller cannot choose this service's trace ID or
-		// force a sampling decision via a forged traceparent header. This
-		// replaces the previous internal-service User-Agent heuristic, which
-		// was spoofable by any caller that set the header and never a real
-		// trust boundary. Governs the HTTP path only - the gRPC interceptor
-		// below keeps its own, pre-existing User-Agent gate untouched. When
+		// force a sampling decision via a forged traceparent header. When
 		// extraction does run, ExtractHTTPContext always strips the tenant.id
-		// baggage member regardless of this flag - tenant identity never
-		// comes from a header.
+		// baggage member regardless of this flag - tenant identity never comes
+		// from a header.
+		traceCtx := c.Context()
 		if trustInboundTraceContext {
-			traceCtx = tracing.ExtractHTTPContext(traceCtx, c)
+			traceCtx = ExtractHTTPContext(traceCtx, c)
 		}
 
 		// Start the server span from an identity-filtered context so the
@@ -252,11 +292,11 @@ func (tm *TelemetryMiddleware) WithTelemetry(tl *tracing.Telemetry, excludedRout
 		// request context (with the span attached) so downstream application
 		// spans and opted-in business telemetry keep the identity attributes.
 		spanStartCtx := identityFilteredSpanStartContext(traceCtx)
-		_, span := tracer.Start(spanStartCtx, method, trace.WithSpanKind(trace.SpanKindServer))
+		_, span := tracer.Start(spanStartCtx, spanName, trace.WithSpanKind(trace.SpanKindServer))
 		ctx = trace.ContextWithSpan(traceCtx, span)
 		endState := newSpanEndState(span)
-		// WithTelemetry owns this span's lifecycle: it is the sole ender (via
-		// the defer below, which fires on return AFTER applyTelemetrySpanAttributes
+		// WithTelemetry owns this span's lifecycle: it is the sole ender (via the
+		// defer below, which fires on return AFTER applyTelemetrySpanAttributes
 		// has renamed and finalized the span). EndTracingSpans, if also
 		// registered, detects the owned flag and does NOT end it.
 		endState.owned = true
@@ -423,7 +463,7 @@ func applyTelemetrySpanAttributes(
 	}
 
 	if statusCode >= 500 {
-		span.SetStatus(codes.Error, fmt.Sprintf("HTTP %d", statusCode))
+		span.SetStatus(codes.Error, "HTTP "+strconv.Itoa(statusCode))
 	}
 }
 
@@ -473,6 +513,27 @@ func recordHTTPServerDuration(
 	hist.Record(c.Context(), durationSeconds, metric.WithAttributes(attrs...))
 }
 
+// trackActiveRequest increments the http.server.active_requests UpDownCounter by
+// one and returns a closure that decrements it by one when invoked (deferred by
+// the caller). The label set is intentionally minimal - only
+// http.request.method - to keep the concurrency gauge low-cardinality;
+// http.route is deliberately omitted because it is not reliably known before
+// routing (c.Next), and adding it would multiply the series without adding
+// operational value for an in-flight gauge. It is a no-op (returns a no-op
+// closure) when the counter is nil, so callers can invoke it unconditionally.
+func trackActiveRequest(ctx context.Context, counter metric.Int64UpDownCounter, method string) func() {
+	if counter == nil {
+		return func() {}
+	}
+
+	attrs := metric.WithAttributes(attribute.String("http.request.method", method))
+	counter.Add(ctx, 1, attrs)
+
+	return func() {
+		counter.Add(ctx, -1, attrs)
+	}
+}
+
 // classifyHTTPErrorType returns the stable, low-cardinality error.type
 // label for the http.server.request.duration metric per OpenTelemetry HTTP
 // semantic conventions. Status-driven by design: a 503 surfaced via
@@ -495,7 +556,7 @@ func (tm *TelemetryMiddleware) EndTracingSpans(c fiber.Ctx) error {
 	}
 
 	originalCtx := c.Context()
-	err := c.Next()
+	err := normalizeHTTPHandlerError(c.Next())
 
 	endCtx := c.Context()
 	if endCtx == nil {
@@ -523,107 +584,6 @@ func (tm *TelemetryMiddleware) EndTracingSpans(c fiber.Ctx) error {
 	}
 
 	return err
-}
-
-// WithTelemetryInterceptor is a gRPC interceptor that adds tracing to the context.
-func (tm *TelemetryMiddleware) WithTelemetryInterceptor(tl *tracing.Telemetry) grpc.UnaryServerInterceptor {
-	return func(
-		ctx context.Context,
-		req any,
-		info *grpc.UnaryServerInfo,
-		handler grpc.UnaryHandler,
-	) (any, error) {
-		ctx = normalizeGRPCContext(ctx)
-
-		effectiveTelemetry := tl
-		if effectiveTelemetry == nil && tm != nil {
-			effectiveTelemetry = tm.Telemetry
-		}
-
-		if effectiveTelemetry == nil {
-			return handler(ctx, req)
-		}
-
-		requestID := resolveGRPCRequestID(ctx, req)
-		ctx = observability.ContextWithHeaderID(ctx, requestID)
-
-		if effectiveTelemetry.TracerProvider == nil {
-			return handler(ctx, req)
-		}
-
-		tracer := effectiveTelemetry.TracerProvider.Tracer(effectiveTelemetry.LibraryName)
-
-		methodName := "unknown"
-		if info != nil {
-			methodName = info.FullMethod
-		}
-
-		if tenantID := ResolveTenantIDFromGRPC(ctx); tenantID != "" {
-			ctx = observability.ContextWithSpanAttributes(ctx, attribute.String(constant.AttrKeyTenantID, tenantID))
-		}
-
-		ctx = observability.ContextWithSpanAttributes(ctx,
-			attribute.String("app.request.request_id", requestID),
-			attribute.String("grpc.method", methodName),
-		)
-
-		traceCtx := ctx
-		// Compatibility note: trace extraction currently trusts the internal-service
-		// User-Agent heuristic. This is an interoperability hint, not an authenticated
-		// trust boundary, and is preserved to avoid changing existing caller behavior.
-		if isInternalLerianService(getGRPCUserAgent(ctx)) {
-			md, _ := metadata.FromIncomingContext(ctx)
-			traceCtx = tracing.ExtractGRPCContext(ctx, md)
-		}
-
-		ctx, span := tracer.Start(traceCtx, methodName, trace.WithSpanKind(trace.SpanKindServer))
-		endState := newSpanEndState(span)
-
-		defer endState.End()
-
-		ctx = observability.ContextWithTracer(ctx, tracer)
-		ctx = observability.ContextWithMetricFactory(ctx, effectiveTelemetry.MetricsFactory)
-		ctx = contextWithSpanEndState(ctx, endState)
-
-		err := tm.collectMetrics(ctx)
-		if err != nil {
-			tracing.HandleSpanError(span, "Failed to collect metrics", err)
-		}
-
-		resp, err := handler(ctx, req)
-
-		grpcStatusCode := status.Code(err)
-		span.SetAttributes(
-			attribute.String("rpc.method", methodName),
-			attribute.Int("rpc.grpc.status_code", int(grpcStatusCode)),
-		)
-
-		if err != nil {
-			tracing.HandleSpanError(span, "gRPC handler error", err)
-		}
-
-		return resp, err
-	}
-}
-
-// EndTracingSpansInterceptor is a gRPC interceptor that ends the tracing spans.
-func (tm *TelemetryMiddleware) EndTracingSpansInterceptor() grpc.UnaryServerInterceptor {
-	return func(
-		ctx context.Context,
-		req any,
-		info *grpc.UnaryServerInfo,
-		handler grpc.UnaryHandler,
-	) (any, error) {
-		resp, err := handler(ctx, req)
-		if state := spanEndStateFromContext(ctx); state != nil {
-			state.End()
-			return resp, err
-		}
-
-		trace.SpanFromContext(ctx).End()
-
-		return resp, err
-	}
 }
 
 // setRequestHeaderID ensures the Fiber request carries a unique correlation ID header.

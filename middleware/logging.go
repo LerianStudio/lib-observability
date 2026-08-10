@@ -3,13 +3,13 @@ package middleware
 import (
 	"context"
 	"errors"
-	"reflect"
 	"strconv"
 	"strings"
 	"time"
 
 	observability "github.com/LerianStudio/lib-observability/v2"
 	constant "github.com/LerianStudio/lib-observability/v2/constants"
+	"github.com/LerianStudio/lib-observability/v2/grpcmiddleware"
 	obslog "github.com/LerianStudio/lib-observability/v2/log"
 	"github.com/LerianStudio/lib-observability/v2/tracing"
 	"github.com/gofiber/fiber/v3"
@@ -37,7 +37,8 @@ type RequestInfo struct {
 	Protocol      string
 	Size          int
 	// Deprecated: HTTP request bodies are never captured by access logging.
-	Body string
+	Body  string
+	start time.Time
 }
 
 // ResponseMetricsWrapper stores response metadata used to finish RequestInfo.
@@ -66,7 +67,7 @@ type LogMiddlewareOption func(l *logMiddleware)
 // WithCustomLogger configures a custom logger for access logging.
 func WithCustomLogger(logger obslog.Logger) LogMiddlewareOption {
 	return func(l *logMiddleware) {
-		if !isNilLogger(logger) {
+		if !obslog.IsNil(logger) {
 			l.Logger = logger
 		}
 	}
@@ -112,41 +113,29 @@ func buildOpts(opts ...LogMiddlewareOption) *logMiddleware {
 	return mid
 }
 
-func isNilLogger(logger obslog.Logger) bool {
-	if logger == nil {
-		return true
-	}
-
-	value := reflect.ValueOf(logger)
-	switch value.Kind() {
-	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
-		return value.IsNil()
-	default:
-		return false
-	}
-}
-
 // NewRequestInfo creates RequestInfo from a Fiber context.
 //
-// URI is deliberately left unresolved here: middleware constructs RequestInfo
-// before the downstream chain runs, when Fiber's Route().Path still reports
-// the middleware's own route (typically "/") instead of the final matched
-// template. FinishRequestInfo resolves URI once routing has completed.
+// The URI field is resolved from Fiber's route match state. Callers that
+// construct it before c.Next() must invoke FinishRequestInfo after the
+// downstream handler completes to finalize the route template.
 // The second argument is retained for source compatibility and has no effect.
 func NewRequestInfo(c fiber.Ctx, _ bool) *RequestInfo {
+	now := time.Now()
 	if c == nil {
-		return &RequestInfo{Date: time.Now().UTC()}
+		return &RequestInfo{Date: now.UTC(), start: now}
 	}
 
 	return &RequestInfo{
 		TraceID:       c.Get(headerID),
 		Method:        c.Method(),
+		URI:           resolvedHTTPRoute(c),
 		Username:      "-",
 		Referer:       "-",
 		UserAgent:     sanitizeLogValue(c.Get(headerUserAgent)),
 		RemoteAddress: c.IP(),
 		Protocol:      c.Protocol(),
-		Date:          time.Now().UTC(),
+		Date:          now.UTC(),
+		start:         now,
 	}
 }
 
@@ -188,7 +177,12 @@ func (r *RequestInfo) FinishRequestInfo(rw *ResponseMetricsWrapper) {
 		return
 	}
 
-	r.Duration = time.Since(r.Date)
+	if !r.start.IsZero() {
+		r.Duration = time.Since(r.start)
+	} else if !r.Date.IsZero() {
+		r.Duration = time.Since(r.Date)
+	}
+
 	r.Status = rw.StatusCode
 	r.Size = rw.Size
 	r.URI = resolvedHTTPRoute(rw.Context)
@@ -258,26 +252,6 @@ func WithHTTPLogging(opts ...LogMiddlewareOption) fiber.Handler {
 	}
 }
 
-// httpAccessLogLevel derives the access-log entry's severity from the
-// effective HTTP status, so a 5xx line is actually findable at Error level
-// instead of blending into Info-level traffic - the same status-driven
-// convention http.route/error.type telemetry attribution already follows.
-func httpAccessLogLevel(statusCode int) obslog.Level {
-	switch {
-	case statusCode >= fiber.StatusInternalServerError:
-		return obslog.LevelError
-	case statusCode >= fiber.StatusBadRequest:
-		return obslog.LevelWarn
-	default:
-		return obslog.LevelInfo
-	}
-}
-
-// responseBodySize returns the response body size for the access log's CLF
-// size field. A streamed response (large file download, proxied upload
-// passthrough) must never be forced into memory just to measure it via
-// response.Body() - IsBodyStream guards that, falling back to the declared
-// Content-Length, or unknownResponseBodySize when even that is absent.
 func responseBodySize(c fiber.Ctx) int {
 	response := c.Response()
 	if !response.IsBodyStream() {
@@ -295,26 +269,37 @@ func nextWithNormalizedHTTPError(c fiber.Ctx) error {
 	return normalizeHTTPHandlerError(c.Next())
 }
 
+func httpAccessLogLevel(statusCode int) obslog.Level {
+	switch {
+	case statusCode >= fiber.StatusInternalServerError:
+		return obslog.LevelError
+	case statusCode >= fiber.StatusBadRequest:
+		return obslog.LevelWarn
+	default:
+		return obslog.LevelInfo
+	}
+}
+
 func httpStatusCode(c fiber.Ctx, err error) int {
 	statusCode := c.Response().StatusCode()
+
 	if err == nil {
 		return statusCode
 	}
 
 	var fiberErr *fiber.Error
-	if errors.As(err, &fiberErr) {
+	if errors.As(err, &fiberErr) && fiberErr != nil {
 		return fiberErr.Code
 	}
 
-	if statusCode < fiber.StatusBadRequest {
-		return fiber.StatusInternalServerError
-	}
-
-	return statusCode
+	// A non-fiber error on this no-finalizer path reaches Fiber's default
+	// ErrorHandler, which renders 500 to the client regardless of any status
+	// the handler already wrote - the log must report what the client saw.
+	return fiber.StatusInternalServerError
 }
 
 // normalizeHTTPHandlerError checks ONLY the top-level error value, mirroring
-// Fiber v3's own internal nil-error check on the value a handler returns.
+// Fiber v3's own internal/nilerror check on the value a handler returns.
 //
 // It deliberately does NOT walk Unwrap()/Unwrap() []error: a valid, non-nil
 // wrapper whose Unwrap() chain happens to bottom out on a typed-nil (e.g. a
@@ -322,9 +307,9 @@ func httpStatusCode(c fiber.Ctx, err error) int {
 // with an unrelated nil one) is not itself unsafe to hand to the rest of the
 // pipeline - the wrapper's own Error() is what gets called, and a well-formed
 // wrapper does not blindly delegate to a nil child. Recursing into the chain
-// would mean one nil-chained error anywhere below a perfectly good top-level
-// error collapses the whole response to a 500, discarding a correctly mapped
-// 4xx.
+// here previously meant one nil-chained error anywhere below a perfectly good
+// top-level error (e.g. errors.Join(fiber.NewError(400, ...), typedNil))
+// collapsed the whole response to a 500, discarding a correctly mapped 4xx.
 func normalizeHTTPHandlerError(err error) error {
 	if err == nil {
 		return nil
@@ -381,6 +366,19 @@ func WithGrpcLogging(opts ...LogMiddlewareOption) grpc.UnaryServerInterceptor {
 		start := time.Now()
 		resp, err := handler(ctx, req)
 		duration := time.Since(start)
+		// Same death path as grpcmiddleware.NormalizeGRPCError guards
+		// against: whatever this interceptor returns goes straight to
+		// grpc-go's own dispatch, which calls status.FromError - and, on its
+		// fallback path, err.Error() unconditionally. Proves stringifiability
+		// rather than inspecting shape, so it also catches a valid, non-nil
+		// error whose Unwrap chain hits an unguarded typed-nil (errors.Join,
+		// a delegating wrapper), not just a bare top-level one. Shared with
+		// the grpcmiddleware package's own server/client interceptors rather
+		// than duplicated - unlike the small per-request helpers below
+		// (resolveGRPCRequestID, getMetadataID), which stay duplicated to
+		// keep this package's only gRPC coupling at the
+		// grpc.UnaryServerInterceptor type.
+		err = grpcmiddleware.NormalizeGRPCError(err)
 
 		methodName := "unknown"
 		if info != nil {

@@ -52,6 +52,19 @@ func TestSafeError_NilGuards(t *testing.T) {
 		})
 		assert.Empty(t, buf.String(), "nil error must produce no output")
 	})
+
+	t.Run("typed-nil error produces no output", func(t *testing.T) {
+		var buf bytes.Buffer
+		withTestLoggerOutput(t, &buf)
+
+		var typedNil *customError
+
+		assert.NotPanics(t, func() {
+			SafeError(&GoLogger{Level: LevelInfo}, context.Background(), "msg", typedNil, true)
+		})
+		assert.Empty(t, buf.String(),
+			"a typed-nil error interface (err != nil, but wraps a nil pointer) must be treated as no error, same as untyped nil")
+	})
 }
 
 func TestSanitizeExternalResponse(t *testing.T) {

@@ -22,3 +22,28 @@ func TestNopLoggerMethods(t *testing.T) {
 	assert.False(t, logger.Enabled(LevelDebug))
 	assert.NoError(t, logger.Sync(context.Background()))
 }
+
+func TestIsNil_DetectsInterfaceNilWithoutRejectingConcreteLogger(t *testing.T) {
+	t.Parallel()
+
+	var typedNil *NopLogger
+
+	tests := []struct {
+		name   string
+		logger Logger
+		want   bool
+	}{
+		{name: "nil interface", logger: nil, want: true},
+		{name: "typed nil logger", logger: typedNil, want: true},
+		{name: "concrete logger", logger: NewNop(), want: false},
+	}
+
+	for _, tt := range tests {
+		testCase := tt
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			assert.Equal(t, testCase.want, IsNil(testCase.logger))
+		})
+	}
+}

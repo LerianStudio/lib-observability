@@ -403,6 +403,19 @@ func TestNew_WithAllFields(t *testing.T) {
 	require.Equal(t, "op", asserter.operation)
 }
 
+func TestNew_TypedNilLogger_NormalizesAtAssertionBoundary(t *testing.T) {
+	t.Parallel()
+
+	var logger *testLogger
+	asserter := New(context.Background(), logger, "comp", "op")
+	require.Nil(t, asserter.logger)
+
+	require.NotPanics(t, func() {
+		err := asserter.Never(context.Background(), "must fail safely")
+		require.ErrorIs(t, err, ErrAssertionFailed)
+	})
+}
+
 // --- formatKeyValueLines Tests ---
 
 func TestFormatKeyValueLines_Empty(t *testing.T) {
@@ -443,37 +456,6 @@ func TestRecordAssertionObservability_NoMetricsNoSpan(t *testing.T) {
 	defer ResetAssertionMetrics()
 
 	recordAssertionObservability(context.Background(), "That", "test", nil, "comp", "op")
-}
-
-// --- isNil Tests ---
-
-func TestIsNil_UntypedNil(t *testing.T) {
-	t.Parallel()
-	require.True(t, isNil(nil))
-}
-
-func TestIsNil_TypedNilPointer(t *testing.T) {
-	t.Parallel()
-
-	var p *int
-	require.True(t, isNil(p), "typed nil pointer should be nil")
-}
-
-func TestIsNil_NonNilInt(t *testing.T) {
-	t.Parallel()
-	require.False(t, isNil(42))
-}
-
-func TestIsNil_NonNilString(t *testing.T) {
-	t.Parallel()
-	require.False(t, isNil("hello"))
-}
-
-func TestIsNil_NonNilStruct(t *testing.T) {
-	t.Parallel()
-
-	type s struct{}
-	require.False(t, isNil(s{}))
 }
 
 // --- shouldIncludeStack Tests ---

@@ -4,6 +4,7 @@ package tracing
 
 import (
 	"context"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -39,6 +40,46 @@ func unsetEnvVar(t *testing.T, key string) {
 	})
 }
 
+type nilUnsafeLogger struct{}
+
+func (l *nilUnsafeLogger) Log(context.Context, log.Level, string, ...log.Field) {
+	if l == nil {
+		panic("typed-nil logger method invoked")
+	}
+}
+
+func (l *nilUnsafeLogger) With(...log.Field) log.Logger {
+	if l == nil {
+		panic("typed-nil logger method invoked")
+	}
+
+	return l
+}
+
+func (l *nilUnsafeLogger) WithGroup(string) log.Logger {
+	if l == nil {
+		panic("typed-nil logger method invoked")
+	}
+
+	return l
+}
+
+func (l *nilUnsafeLogger) Enabled(log.Level) bool {
+	if l == nil {
+		panic("typed-nil logger method invoked")
+	}
+
+	return true
+}
+
+func (l *nilUnsafeLogger) Sync(context.Context) error {
+	if l == nil {
+		panic("typed-nil logger method invoked")
+	}
+
+	return nil
+}
+
 // ===========================================================================
 // 1. NewTelemetry validation
 // ===========================================================================
@@ -51,6 +92,47 @@ func TestNewTelemetry_NilLogger(t *testing.T) {
 	})
 	require.ErrorIs(t, err, ErrNilTelemetryLogger)
 	assert.Nil(t, tl)
+}
+
+func TestNewTelemetry_LoggerContract(t *testing.T) {
+	t.Parallel()
+
+	var typedNil *nilUnsafeLogger
+	concrete := log.NewNop()
+
+	tests := []struct {
+		name       string
+		logger     log.Logger
+		wantLogger log.Logger
+		wantErr    error
+	}{
+		{name: "untyped nil is rejected", logger: nil, wantErr: ErrNilTelemetryLogger},
+		{name: "typed nil is rejected", logger: typedNil, wantErr: ErrNilTelemetryLogger},
+		{name: "concrete logger is preserved", logger: concrete, wantLogger: concrete},
+	}
+
+	for _, tt := range tests {
+		testCase := tt
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			tl, err := NewTelemetry(TelemetryConfig{
+				LibraryName:     "test-lib",
+				EnableTelemetry: false,
+				Logger:          testCase.logger,
+			})
+			if testCase.wantErr != nil {
+				require.ErrorIs(t, err, testCase.wantErr)
+				assert.Nil(t, tl)
+
+				return
+			}
+
+			require.NoError(t, err)
+			require.NotNil(t, tl)
+			assert.Same(t, testCase.wantLogger, tl.Logger)
+		})
+	}
 }
 
 func TestNewTelemetry_EnabledEmptyEndpoint(t *testing.T) {
@@ -379,6 +461,53 @@ func TestTelemetry_ShutdownWithContext_NilShutdownFuncs(t *testing.T) {
 	require.ErrorIs(t, err, ErrNilShutdown)
 }
 
+func TestTelemetry_Shutdown_TypedNilLoggerAndNilShutdownFuncs(t *testing.T) {
+	t.Parallel()
+
+	var typedNil *nilUnsafeLogger
+	tests := []struct {
+		name     string
+		shutdown func(*Telemetry) error
+		wantErr  error
+	}{
+		{
+			name: "context shutdown returns nil shutdown error",
+			shutdown: func(tl *Telemetry) error {
+				return tl.ShutdownTelemetryWithContext(context.Background())
+			},
+			wantErr: ErrNilShutdown,
+		},
+		{
+			name: "background shutdown reports assertion without panic",
+			shutdown: func(tl *Telemetry) error {
+				tl.ShutdownTelemetry()
+
+				return nil
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		testCase := tt
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			tl := &Telemetry{TelemetryConfig: TelemetryConfig{Logger: typedNil}}
+			var err error
+			assert.NotPanics(t, func() {
+				err = testCase.shutdown(tl)
+			})
+
+			if testCase.wantErr != nil {
+				require.ErrorIs(t, err, testCase.wantErr)
+				return
+			}
+
+			require.NoError(t, err)
+		})
+	}
+}
+
 func TestTelemetry_ShutdownWithContext_FallbackToShutdown(t *testing.T) {
 	t.Parallel()
 
@@ -411,38 +540,155 @@ func TestExtractTraceContext_NilCarrier(t *testing.T) {
 	assert.Equal(t, ctx, result)
 }
 
-// TestExtractTraceContext_RestoresSeededTenantIDWithReservedCharacters proves
-// the pre-extraction, trusted tenant.id survives extraction VERBATIM even when
-// its decoded value contains a character (";") that baggage.NewMember's
-// percent-encoding validation would reject: the restore path re-applies the
-// original Member as-is instead of rebuilding it from the decoded string.
-func TestExtractTraceContext_RestoresSeededTenantIDWithReservedCharacters(t *testing.T) {
+// TestExtractTraceContext_PreservesInProcessTenantIDWhenCarrierHasNoBaggage
+// covers the regression the funnel strip introduced: propagation.Baggage's
+// own Extract returns the parent ctx UNTOUCHED when the carrier has no
+// baggage header at all - so a tenant.id already on ctx (seeded in-process
+// by lib-commons from a validated JWT claim, never from a header) must
+// survive a carrier that simply doesn't carry baggage. Stripping
+// unconditionally would delete a legitimate value that was never at risk.
+func TestExtractTraceContext_PreservesInProcessTenantIDWhenCarrierHasNoBaggage(t *testing.T) {
+	// Not parallel: mutates the process-global OTel propagator.
 	prev := otel.GetTextMapPropagator()
 	t.Cleanup(func() { otel.SetTextMapPropagator(prev) })
-	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
-		propagation.TraceContext{}, propagation.Baggage{}))
+	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}))
 
-	const trustedTenantID = "acme;corp"
-
-	m, err := baggage.NewMemberRaw(constant.AttrKeyTenantID, trustedTenantID)
+	legit, err := baggage.NewMember("tenant.id", "legit-tenant")
 	require.NoError(t, err)
 
-	b, err := baggage.New(m)
+	legitBag, err := baggage.New(legit)
 	require.NoError(t, err)
 
-	ctx := baggage.ContextWithBaggage(context.Background(), b)
+	ctx := baggage.ContextWithBaggage(context.Background(), legitBag)
 
-	carrier := propagation.MapCarrier{
-		"baggage": constant.AttrKeyTenantID + "=forged,other=kept",
-	}
+	// Carrier has NO baggage header - only a traceparent, as a real inbound
+	// request from a caller that never set baggage would.
+	carrier := propagation.HeaderCarrier{}
+	carrier.Set("traceparent", "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
 
-	extracted := ExtractTraceContext(ctx, carrier)
+	got := ExtractTraceContext(ctx, carrier)
 
-	bag := baggage.FromContext(extracted)
-	assert.Equal(t, trustedTenantID, bag.Member(constant.AttrKeyTenantID).Value(),
-		"trusted pre-extraction tenant.id must survive verbatim")
-	assert.Equal(t, "kept", bag.Member("other").Value(),
-		"other inbound baggage members must be preserved")
+	assert.Equal(t, "legit-tenant", baggage.FromContext(got).Member("tenant.id").Value(),
+		"an in-process tenant.id must survive extraction when the carrier has no baggage header")
+}
+
+// TestExtractTraceContext_StripsForgedBaggageTenantID covers the other side:
+// when the carrier DOES carry a baggage header, a forged tenant.id in it must
+// still be stripped, exactly as before this fix.
+func TestExtractTraceContext_StripsForgedBaggageTenantID(t *testing.T) {
+	// Not parallel: mutates the process-global OTel propagator.
+	prev := otel.GetTextMapPropagator()
+	t.Cleanup(func() { otel.SetTextMapPropagator(prev) })
+	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}))
+
+	carrier := propagation.HeaderCarrier{}
+	carrier.Set("baggage", "tenant.id=forged-tenant,region=us-east")
+
+	got := ExtractTraceContext(context.Background(), carrier)
+
+	assert.Empty(t, baggage.FromContext(got).Member("tenant.id").Value(),
+		"a forged tenant.id carried in an inbound baggage header must still be stripped")
+	assert.Equal(t, "us-east", baggage.FromContext(got).Member("region").Value(),
+		"other baggage members must still propagate")
+}
+
+// seedTenantIDBaggage returns a ctx carrying a single tenant.id baggage
+// member, simulating what lib-commons seeds in-process from a validated JWT
+// claim before this middleware ever runs.
+func seedTenantIDBaggage(t *testing.T, ctx context.Context, tenantID string) context.Context {
+	t.Helper()
+
+	member, err := baggage.NewMember("tenant.id", tenantID)
+	require.NoError(t, err)
+
+	bag, err := baggage.New(member)
+	require.NoError(t, err)
+
+	return baggage.ContextWithBaggage(ctx, bag)
+}
+
+// TestExtractTraceContext_RestoresTenantIDWithDecodedCharacters covers the
+// encoding asymmetry in the restore path: the pre-extraction tenant.id is
+// captured via Member.Value(), which returns the DECODED string, but
+// baggage.NewMember expects a percent-ENCODED input and rejects raw values
+// containing characters like ';'. restoreTenantIDBaggage must use
+// NewMemberRaw so such a legitimate in-process tenant.id survives instead of
+// being silently dropped.
+func TestExtractTraceContext_RestoresTenantIDWithDecodedCharacters(t *testing.T) {
+	// Not parallel: mutates the process-global OTel propagator.
+	prev := otel.GetTextMapPropagator()
+	t.Cleanup(func() { otel.SetTextMapPropagator(prev) })
+	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}))
+
+	// Seed with the raw constructor: ";" is what Member.Value() yields after
+	// extraction percent-decodes an inbound "tenant%3Bid" value.
+	member, err := baggage.NewMemberRaw("tenant.id", "acme;corp")
+	require.NoError(t, err)
+
+	bag, err := baggage.New(member)
+	require.NoError(t, err)
+
+	ctx := baggage.ContextWithBaggage(context.Background(), bag)
+
+	carrier := propagation.HeaderCarrier{}
+	carrier.Set("baggage", "region=sa-east-1") // wipes ctx baggage on Extract
+
+	got := ExtractTraceContext(ctx, carrier)
+
+	assert.Equal(t, "acme;corp", baggage.FromContext(got).Member("tenant.id").Value(),
+		"a decoded tenant.id containing characters NewMember rejects must still be restored")
+}
+
+// TestExtractTraceContext_SeededTenantIDSurvivesBaggageWithoutTenantMember
+// covers the case the carrierHasBaggage skip alone did not: propagation.
+// Baggage.Extract does not merge into the existing baggage, it REPLACES the
+// whole value on ctx with whatever it parses from the carrier - so an
+// inbound baggage header that mentions OTHER members but never tenant.id at
+// all (not a forged one) still wiped an in-process, legitimate tenant.id.
+// Measured before this fix: `baggage: region=sa-east-1` with no tenant.id
+// member erased a seeded tenant.id that survived fine when the carrier had
+// no baggage header whatsoever.
+func TestExtractTraceContext_SeededTenantIDSurvivesBaggageWithoutTenantMember(t *testing.T) {
+	// Not parallel: mutates the process-global OTel propagator.
+	prev := otel.GetTextMapPropagator()
+	t.Cleanup(func() { otel.SetTextMapPropagator(prev) })
+	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}))
+
+	ctx := seedTenantIDBaggage(t, context.Background(), "seeded-tenant")
+
+	carrier := propagation.HeaderCarrier{}
+	carrier.Set("baggage", "region=sa-east-1") // no tenant.id member at all
+
+	got := ExtractTraceContext(ctx, carrier)
+
+	assert.Equal(t, "seeded-tenant", baggage.FromContext(got).Member("tenant.id").Value(),
+		"an in-process tenant.id must survive a baggage header that simply doesn't mention tenant.id")
+	assert.Equal(t, "sa-east-1", baggage.FromContext(got).Member("region").Value(),
+		"the header's own members must still propagate alongside the restored tenant.id")
+}
+
+// TestExtractTraceContext_SeededTenantIDBeatsForgedInboundTenantID covers the
+// combination: a caller sends its OWN forged tenant.id in the baggage
+// header, but ctx already carries a legitimate, in-process one. The seeded
+// value must win - tenant identity never comes from an inbound carrier -
+// while the forged one is dropped rather than merged in.
+func TestExtractTraceContext_SeededTenantIDBeatsForgedInboundTenantID(t *testing.T) {
+	// Not parallel: mutates the process-global OTel propagator.
+	prev := otel.GetTextMapPropagator()
+	t.Cleanup(func() { otel.SetTextMapPropagator(prev) })
+	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}))
+
+	ctx := seedTenantIDBaggage(t, context.Background(), "seeded-tenant")
+
+	carrier := propagation.HeaderCarrier{}
+	carrier.Set("baggage", "tenant.id=forged-tenant,region=sa-east-1")
+
+	got := ExtractTraceContext(ctx, carrier)
+
+	assert.Equal(t, "seeded-tenant", baggage.FromContext(got).Member("tenant.id").Value(),
+		"the in-process tenant.id must win over a forged one carried in an inbound baggage header")
+	assert.Equal(t, "sa-east-1", baggage.FromContext(got).Member("region").Value(),
+		"other baggage members must still propagate")
 }
 
 func TestInjectHTTPContext_NilHeaders(t *testing.T) {
@@ -476,6 +722,41 @@ func TestExtractGRPCContext_WithTraceparentKey(t *testing.T) {
 
 	span := trace.SpanFromContext(ctx)
 	assert.Equal(t, "00112233445566778899aabbccddeeff", span.SpanContext().TraceID().String())
+}
+
+// TestExtractGRPCContext_PropagatesBaggageAndStripsTenantID verifies the fix
+// to a case-mismatch that made W3C baggage propagation over gRPC a complete
+// no-op: grpc-go always lowercases metadata keys (HTTP/2 requires lowercase
+// header field names, so no real gRPC client can send anything else), but
+// propagation.HeaderCarrier's Get canonicalizes to "Baggage" before lookup,
+// so a "baggage" key never matched - reproduced by direct execution before
+// this fix. Fixed by extending the same lowercase<->PascalCase remap already
+// applied to traceparent/tracestate (grpcMetadataHeaderPairs).
+//
+// tenant.id must still never survive extraction (the funnel strip lives in
+// ExtractTraceContext) now that baggage actually propagates: an internal
+// caller correctly forwarding tenant.id via baggage across a trusted service
+// boundary is the legitimate use this library supports elsewhere (see
+// resolveTenantIDForTelemetry's doc comment in the middleware package), but
+// that is a DIFFERENT thing from trusting whatever baggage an inbound
+// request carries - which this strip forbids unconditionally, over every
+// transport.
+func TestExtractGRPCContext_PropagatesBaggageAndStripsTenantID(t *testing.T) {
+	// Not parallel: mutates the process-global OTel propagator.
+	prev := otel.GetTextMapPropagator()
+	t.Cleanup(func() { otel.SetTextMapPropagator(prev) })
+	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}))
+
+	md := metadata.MD{
+		"baggage": {"tenant.id=victim,region=us-east"},
+	}
+
+	ctx := ExtractGRPCContext(context.Background(), md)
+
+	assert.Empty(t, baggage.FromContext(ctx).Member("tenant.id").Value(),
+		"tenant.id must never survive gRPC baggage extraction")
+	assert.Equal(t, "us-east", baggage.FromContext(ctx).Member("region").Value(),
+		"other baggage members must propagate now that the case-mismatch is fixed")
 }
 
 func TestInjectQueueTraceContext_ReturnsMap(t *testing.T) {
@@ -1039,6 +1320,89 @@ func TestHandleSpanError_WithSpan(t *testing.T) {
 	require.Len(t, spans, 1)
 	assert.Equal(t, codes.Error, spans[0].Status.Code, "HandleSpanError must set ERROR status")
 	assert.Contains(t, spans[0].Status.Description, "something failed")
+}
+
+// typedNilTracingError has an unsafe Error() implementation (dereferences the
+// nil receiver's field) so tests can prove the handler functions guard
+// against a typed-nil BEFORE calling it, rather than by coincidence.
+type typedNilTracingError struct {
+	message string
+}
+
+func (e *typedNilTracingError) Error() string {
+	return e.message
+}
+
+func TestHandleSpanError_TypedNilDoesNotPanic(t *testing.T) {
+	t.Parallel()
+
+	exporter := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
+	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
+	_, span := tp.Tracer("test").Start(context.Background(), "op")
+
+	var typedNil *typedNilTracingError
+
+	require.NotPanics(t, func() {
+		HandleSpanError(span, "something failed", typedNil)
+	})
+	span.End()
+
+	spans := exporter.GetSpans()
+	require.Len(t, spans, 1)
+	assert.Equal(t, codes.Unset, spans[0].Status.Code,
+		"a typed-nil error must be treated as no error - the span must not be marked failed")
+	assert.Empty(t, spans[0].Events, "a typed-nil error must not produce a recorded error event")
+}
+
+func TestHandleSpanBusinessErrorEvent_TypedNilDoesNotPanic(t *testing.T) {
+	t.Parallel()
+
+	exporter := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
+	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
+	_, span := tp.Tracer("test").Start(context.Background(), "op")
+
+	var typedNil *typedNilTracingError
+
+	require.NotPanics(t, func() {
+		HandleSpanBusinessErrorEvent(span, "business_error", typedNil)
+	})
+	span.End()
+
+	spans := exporter.GetSpans()
+	require.Len(t, spans, 1)
+	assert.Empty(t, spans[0].Events, "a typed-nil error must not produce a recorded business-error event")
+}
+
+// TestHandleSpanError_ValidErrorWithUnsafeUnwrapChainDoesNotPanic covers the
+// case a bare log.IsNil guard cannot catch: a NON-nil, VALID top-level error
+// (errors.Join is the canonical example) whose own Error() implementation is
+// unsafe because it delegates to a typed-nil member with no guard. This is a
+// pre-existing gotcha in the standard library's errors.Join, not something
+// callers can be relied on to avoid, so HandleSpanError/
+// HandleSpanBusinessErrorEvent recover from it internally.
+func TestHandleSpanError_ValidErrorWithUnsafeUnwrapChainDoesNotPanic(t *testing.T) {
+	t.Parallel()
+
+	exporter := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
+	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
+	_, span := tp.Tracer("test").Start(context.Background(), "op")
+
+	var nilMember *typedNilTracingError
+
+	compound := errors.Join(errors.New("valid sibling"), nilMember)
+
+	require.NotPanics(t, func() {
+		HandleSpanError(span, "something failed", compound)
+	})
+	span.End()
+
+	spans := exporter.GetSpans()
+	require.Len(t, spans, 1)
+	assert.Equal(t, codes.Error, spans[0].Status.Code,
+		"a valid, non-nil compound error must still mark the span failed")
 }
 
 func TestHandleSpanError_EmptyMessage(t *testing.T) {

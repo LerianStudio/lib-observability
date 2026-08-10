@@ -3,7 +3,6 @@ package middleware
 import (
 	"context"
 	"reflect"
-	"regexp"
 	"strings"
 
 	"github.com/gofiber/fiber/v3"
@@ -12,8 +11,7 @@ import (
 
 const unmatchedRouteTemplate = "/{unmatched}"
 
-// internalServicePattern matches Lerian internal service user-agent strings.
-var internalServicePattern = regexp.MustCompile(`^[\w-]+/[\d.]+\s+LerianStudio$`)
+const maxRequestIDLength = 128
 
 // knownHTTPMethods is the canonical case-sensitive set per OpenTelemetry
 // HTTP semantic conventions; methods outside this set are reported as
@@ -162,31 +160,6 @@ func sanitizeLogValue(raw string) string {
 	return replacer.Replace(raw)
 }
 
-// getGRPCUserAgent extracts the User-Agent from incoming gRPC metadata.
-// Returns empty string if the metadata is not present or doesn't contain user-agent.
-func getGRPCUserAgent(ctx context.Context) string {
-	if ctx == nil {
-		return ""
-	}
-
-	md, ok := metadata.FromIncomingContext(ctx)
-	if !ok || md == nil {
-		return ""
-	}
-
-	userAgents := md.Get(strings.ToLower(headerUserAgent))
-	if len(userAgents) == 0 {
-		return ""
-	}
-
-	return userAgents[0]
-}
-
-// isInternalLerianService reports whether a user-agent belongs to a Lerian internal service.
-func isInternalLerianService(userAgent string) bool {
-	return internalServicePattern.MatchString(userAgent)
-}
-
 // isNilOrEmptyString reports whether a string pointer is nil or the trimmed value is empty.
 // "null" and "nil" are treated as empty to handle JSON null serialization artifacts
 // where some encoders emit the literal string "null" or "nil" instead of a JSON null.
@@ -194,15 +167,11 @@ func isNilOrEmptyString(s *string) bool {
 	return s == nil || strings.TrimSpace(*s) == "" || strings.TrimSpace(*s) == "null" || strings.TrimSpace(*s) == "nil"
 }
 
-// maxRequestIDLength bounds a correlation ID so an unbounded caller-supplied
-// value cannot inflate headers/log lines/span attributes indefinitely.
-const maxRequestIDLength = 128
-
 // normalizeRequestID returns a bounded, injection-safe identifier suitable
 // for headers and telemetry.
 //
-// It rejects-and-regenerates rather than rewriting: only control bytes (CR,
-// LF, tab, NUL, and the rest of printable ASCII's complement) are stripped,
+// It only strips and truncates, never substitutes: only control bytes (CR,
+// LF, NUL, and the rest of printable ASCII's complement) are stripped,
 // because those enable header/log injection (CWE-113/CWE-117). Every other
 // printable ASCII character - including ':', '/', '+', '=' - passes through
 // unchanged, so an existing cross-service ID format (namespaced identifiers,
@@ -212,8 +181,8 @@ const maxRequestIDLength = 128
 // function a second time returns the same value, since it has nothing left
 // to strip or truncate.
 //
-// The caller regenerates a UUID when this returns "" - this function only
-// ever strips or truncates, never substitutes.
+// Regeneration is the caller's job: a UUID is generated when this returns ""
+// (isNilOrEmptyString in setRequestHeaderID / getMetadataID).
 func normalizeRequestID(raw string) string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -241,8 +210,8 @@ func normalizeRequestID(raw string) string {
 
 // isSafeRequestIDCharacter reports whether a rune is safe to carry in a
 // correlation ID: printable ASCII (0x20-0x7E), which by construction
-// excludes CR, LF, tab, NUL and every other control byte - the actual
-// injection vector - without narrowing the allowed punctuation set.
+// excludes CR, LF, NUL and every other control byte - the actual injection
+// vector - without narrowing the allowed punctuation set.
 func isSafeRequestIDCharacter(char rune) bool {
 	return char >= 0x20 && char <= 0x7E
 }

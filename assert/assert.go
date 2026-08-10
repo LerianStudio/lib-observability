@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"reflect"
 	goruntime "runtime"
 	"runtime/debug"
 	"strconv"
@@ -111,7 +110,7 @@ func (asserter *Asserter) That(ctx context.Context, ok bool, msg string, kv ...a
 //		return err
 //	}
 func (asserter *Asserter) NotNil(ctx context.Context, v any, msg string, kv ...any) error {
-	if !isNil(v) {
+	if !log.IsNil(v) {
 		return nil
 	}
 
@@ -150,10 +149,14 @@ func (asserter *Asserter) NoError(ctx context.Context, err error, msg string, kv
 	// errorKVPairs: 2 pairs added (error + error_type), each pair = 2 elements
 	const errorKVPairs = 4
 
-	// A valid, non-nil err can still panic when stringified if its own
-	// Unwrap chain contains an unguarded typed-nil (errors.Join is the
-	// standard-library example). log.SafeErrorMessage recovers from that; %T
-	// never calls a method, so it is safe regardless.
+	// A typed-nil err (non-nil interface wrapping a nil concrete value) is
+	// itself the caller's bug, so this MUST still fail - but calling err.Error()
+	// on it can panic (nil receiver dereference), and a VALID non-nil err can
+	// still panic when stringified if its own Unwrap chain contains an
+	// unguarded typed-nil (errors.Join is the standard-library example).
+	// log.SafeErrorMessage covers both: "<nil>" for the nil/typed-nil case,
+	// a stable fallback if a non-nil err's Error() itself panics. %T never
+	// calls a method, so it is safe regardless.
 	kvWithError := make([]any, 0, len(kv)+errorKVPairs)
 	kvWithError = append(kvWithError, "error", log.SafeErrorMessage(err))
 	kvWithError = append(kvWithError, "error_type", fmt.Sprintf("%T", err))
@@ -353,22 +356,6 @@ func logAssertion(logger Logger, message string) {
 	}
 
 	fmt.Fprintln(os.Stderr, message)
-}
-
-// isNil checks if a value is nil, handling both untyped nil and typed nil
-// (nil interface values with concrete types).
-func isNil(v any) bool {
-	if v == nil {
-		return true
-	}
-
-	rv := reflect.ValueOf(v)
-	switch rv.Kind() {
-	case reflect.Pointer, reflect.Interface, reflect.Slice, reflect.Map, reflect.Chan, reflect.Func:
-		return rv.IsNil()
-	default:
-		return false
-	}
 }
 
 // AssertionSpanEventName is the event name used when recording assertion failures on spans.

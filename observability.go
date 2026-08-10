@@ -48,11 +48,11 @@ func NewLoggerFromContext(ctx context.Context) log.Logger {
 		ctx = context.Background()
 	}
 
-	if cv, ok := ctx.Value(ContextKey).(*ContextValue); ok && cv != nil && !log.IsNil(cv.Logger) {
-		return cv.Logger
+	if cv, ok := ctx.Value(ContextKey).(*ContextValue); ok && cv != nil {
+		return resolveLogger(cv.Logger)
 	}
 
-	return &log.NopLogger{}
+	return log.NewNop()
 }
 
 // cloneContextValues returns a shallow copy of the ContextValue from ctx.
@@ -83,7 +83,7 @@ func ContextWithLogger(ctx context.Context, logger log.Logger) context.Context {
 	}
 
 	values := cloneContextValues(ctx)
-	values.Logger = logger
+	values.Logger = resolveLogger(logger)
 
 	return context.WithValue(ctx, ContextKey, values)
 }
@@ -163,7 +163,7 @@ func resolveLogger(logger log.Logger) log.Logger {
 		return logger
 	}
 
-	return &log.NopLogger{} // Null Object Pattern - always functional
+	return log.NewNop() // Null Object Pattern - always functional
 }
 
 // resolveTracer ensures a valid tracer is always available using OpenTelemetry best practices.
@@ -200,7 +200,7 @@ func getDefaultMetricsFactory() *metrics.MetricsFactory {
 	defaultFactoryOnce.Do(func() {
 		meter := otel.GetMeterProvider().Meter("observability.default")
 
-		f, err := metrics.NewMetricsFactory(meter, &log.NopLogger{})
+		f, err := metrics.NewMetricsFactory(meter, log.NewNop())
 		if err != nil {
 			defaultFactory = metrics.NewNopFactory()
 			return
@@ -227,7 +227,7 @@ func resolveMetricFactory(factory *metrics.MetricsFactory) *metrics.MetricsFacto
 // Used when context extraction fails entirely - ensures system remains operational.
 func newDefaultTrackingComponents() TrackingComponents {
 	return TrackingComponents{
-		Logger:        &log.NopLogger{},
+		Logger:        log.NewNop(),
 		Tracer:        otel.Tracer("observability.default"),
 		HeaderID:      uuid.New().String(),
 		MetricFactory: resolveMetricFactory(nil),

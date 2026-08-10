@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	observability "github.com/LerianStudio/lib-observability/v2"
 	obslog "github.com/LerianStudio/lib-observability/v2/log"
 	"github.com/gofiber/fiber/v3"
 	"github.com/stretchr/testify/assert"
@@ -14,9 +15,69 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 )
 
+func TestSetSpanAttributeForParam_HTTPParameter_RedactsSensitiveValue(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		param      string
+		value      string
+		entityName string
+		wantKey    string
+		wantValue  string
+	}{
+		{
+			name:       "entity id uses entity-specific key",
+			param:      "id",
+			value:      "account-123",
+			entityName: "account",
+			wantKey:    "app.request.account_id",
+			wantValue:  "account-123",
+		},
+		{
+			name:      "sensitive parameter is masked",
+			param:     "token",
+			value:     "opaque-secret-token",
+			wantKey:   "app.request.token",
+			wantValue: "[REDACTED]",
+		},
+		{
+			name:       "non-id parameter keeps its own key",
+			param:      "status",
+			value:      "active",
+			entityName: "account",
+			wantKey:    "app.request.status",
+			wantValue:  "active",
+		},
+	}
+
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			app := fiber.New()
+			var got []attribute.KeyValue
+			app.Get("/test", func(c fiber.Ctx) error {
+				SetSpanAttributeForParam(c, test.param, test.value, test.entityName)
+				got = observability.AttributesFromContext(c.Context())
+
+				return c.SendStatus(http.StatusNoContent)
+			})
+
+			resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/test", nil))
+			require.NoError(t, err)
+			defer func() { require.NoError(t, resp.Body.Close()) }()
+			require.Len(t, got, 1)
+			assert.Equal(t, test.wantKey, string(got[0].Key))
+			assert.Equal(t, test.wantValue, got[0].Value.AsString())
+		})
+	}
+}
+
 func TestHTTPMiddleware_AdversarialRequest_EmitsOnlyRouteTemplate(t *testing.T) {
-	// WithTelemetry installs process-wide telemetry state, so this test stays
-	// sequential under the repository's global-state rule.
+	// WithTelemetry starts the process-wide runtime metrics collector, so this
+	// test must remain sequential under the repository's global-state rule.
 	const (
 		routeTemplate         = "/v1/contratos/:numero_contrato"
 		unmatchedRoute        = "/{unmatched}"
