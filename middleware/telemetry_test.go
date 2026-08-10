@@ -21,6 +21,7 @@ import (
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	semconv "go.opentelemetry.io/otel/semconv/v1.34.0"
 	oteltrace "go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
@@ -193,6 +194,71 @@ func TestWithTelemetry(t *testing.T) {
 			}
 		})
 	}
+}
+
+// stubTypedHandlerError is a distinctly-typed handler error so the exception
+// event assertions below can prove the ORIGINAL type survives onto the span.
+type stubTypedHandlerError struct{ msg string }
+
+func (e *stubTypedHandlerError) Error() string { return e.msg }
+
+// TestWithTelemetryRecordsOriginalExceptionType asserts the >=500 exception
+// event carries the handler error's original Go type and sanitized message,
+// not the type of an internal substitute error (errors.errorString).
+func TestWithTelemetryRecordsOriginalExceptionType(t *testing.T) {
+	ctx := context.Background()
+
+	tp, spanRecorder := setupTestTracer(t)
+	defer func() { _ = tp.Shutdown(ctx) }()
+
+	tel := &tracing.Telemetry{
+		TelemetryConfig: tracing.TelemetryConfig{
+			LibraryName:     "test-library",
+			EnableTelemetry: true,
+		},
+		TracerProvider: tp,
+	}
+
+	mid := NewTelemetryMiddleware(tel)
+
+	app := fiber.New(fiber.Config{
+		ErrorHandler: func(c fiber.Ctx, _ error) error {
+			return c.Status(http.StatusInternalServerError).SendString("boom")
+		},
+	})
+	app.Use(mid.WithTelemetry(tel))
+	app.Get("/api/resource", func(fiber.Ctx) error {
+		return &stubTypedHandlerError{msg: "handler exploded"}
+	})
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/resource", nil))
+	require.NoError(t, err)
+
+	defer func() { require.NoError(t, resp.Body.Close()) }()
+
+	require.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+
+	var exceptionType, exceptionMessage string
+
+	for _, span := range spanRecorder.Ended() {
+		for _, event := range span.Events() {
+			if event.Name != semconv.ExceptionEventName {
+				continue
+			}
+
+			for _, attr := range event.Attributes {
+				switch attr.Key {
+				case semconv.ExceptionTypeKey:
+					exceptionType = attr.Value.AsString()
+				case semconv.ExceptionMessageKey:
+					exceptionMessage = attr.Value.AsString()
+				}
+			}
+		}
+	}
+
+	assert.Equal(t, "middleware.stubTypedHandlerError", exceptionType)
+	assert.Equal(t, "handler exploded", exceptionMessage)
 }
 
 // TestWithTelemetryExcludedRoutes tests the WithTelemetry middleware with excluded routes.

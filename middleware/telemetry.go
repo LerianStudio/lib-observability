@@ -21,6 +21,7 @@ import (
 	"go.opentelemetry.io/otel/baggage"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
+	semconv "go.opentelemetry.io/otel/semconv/v1.34.0"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
@@ -395,18 +396,27 @@ func applyTelemetrySpanAttributes(
 	// The error-recording mechanism is status-driven; status itself stays
 	// gated on statusCode below regardless of which branch runs, so a 4xx
 	// handler error never flips the span to Error per OTel semconv:
-	//   - >=500: span.RecordError produces the OTel semconv "exception" event
+	//   - >=500: the OTel semconv "exception" event
 	//     (exception.type/exception.message), which APM backends (Tempo,
 	//     Jaeger) index on - a custom-named event does not surface there.
+	//     Emitted directly rather than via span.RecordError: handing
+	//     req.handlerErr to RecordError is unsafe (its Error() may panic),
+	//     and wrapping the sanitized message in errors.New would report
+	//     exception.type "errors.errorString" for EVERY handler failure,
+	//     erasing the original type an operator needs to locate the bug.
 	//   - <500: the custom http.handler.error event, kept for handler errors
 	//     that don't warrant "exception" status, e.g. a mapped 4xx.
 	// tracing.ErrorMessage is unconditionally safe to call - it routes
 	// through log.SafeErrorMessage, which never panics regardless of
 	// req.handlerErr's shape (nil, typed-nil, or a valid-but-unsafe-to
-	// -stringify error).
+	// -stringify error). errorTypeOriginal is reflect-only, so it never
+	// calls Error() either.
 	if req.handlerErr != nil {
 		if statusCode >= 500 {
-			span.RecordError(errors.New(tracing.ErrorMessage(req.handlerErr)))
+			span.AddEvent(semconv.ExceptionEventName, trace.WithAttributes(
+				semconv.ExceptionTypeKey.String(errorTypeOriginal(req.handlerErr)),
+				semconv.ExceptionMessageKey.String(tracing.ErrorMessage(req.handlerErr)),
+			))
 		} else {
 			tracing.HandleSpanBusinessErrorEvent(span, httpHandlerErrorEvent, req.handlerErr)
 		}

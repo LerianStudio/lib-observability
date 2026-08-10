@@ -60,11 +60,15 @@ func WithHTTPErrorHandling() fiber.Handler {
 		raw := c.Next()
 		// Preserve the pre-normalization value for telemetry/logging: its true
 		// type (via reflection) is more useful for debugging a handler bug than
-		// the generic fiber.ErrInternalServerError a typed-nil would otherwise be
-		// replaced with. The safe sinks that read state.originalErr downstream
-		// (error.type_original via reflect.TypeOf, and the log/span error fields,
-		// which are guarded against typed-nil) can consume it directly.
-		state.originalErr = raw
+		// the generic fiber.ErrInternalServerError it might later be substituted
+		// with. Only a REAL error is stored, though: a typed-nil raw means the
+		// request completes as a success (normalizeHTTPHandlerError rejects it,
+		// no ErrorHandler runs), but a typed-nil interface value still satisfies
+		// every handlerErr != nil check downstream, so storing it would put a
+		// false error field on the access log and span of a successful request.
+		if !obslog.IsNil(raw) {
+			state.originalErr = raw
+		}
 
 		normalizedErr := normalizeHTTPHandlerError(raw)
 		if normalizedErr != nil {

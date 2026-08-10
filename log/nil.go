@@ -1,6 +1,9 @@
 package log
 
-import "context"
+import (
+	"context"
+	"fmt"
+)
 
 // NopLogger is a no-op logger implementation.
 type NopLogger struct{}
@@ -62,7 +65,14 @@ func safeStringify(err error) (msg string, safe bool) {
 
 	defer func() {
 		if r := recover(); r != nil {
-			msg, safe = safeErrorMessageFallback, false
+			// Carry the evidence in the returned message: this package cannot
+			// log the panic without recursing into the logger, and the constant
+			// alone names neither the failing error type nor the panic cause.
+			// %T on err is reflect-only (no method call) and %v on r is
+			// rendered by fmt, which recovers formatting panics itself - err's
+			// Error() is never called again here, that call is what panicked.
+			msg = fmt.Sprintf("%s (%T: %v)", safeErrorMessageFallback, err, r)
+			safe = false
 		}
 	}()
 

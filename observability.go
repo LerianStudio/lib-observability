@@ -48,7 +48,7 @@ func NewLoggerFromContext(ctx context.Context) log.Logger {
 		ctx = context.Background()
 	}
 
-	if cv, ok := ctx.Value(ContextKey).(*ContextValue); ok && !log.IsNil(cv.Logger) {
+	if cv, ok := ctx.Value(ContextKey).(*ContextValue); ok && cv != nil && !log.IsNil(cv.Logger) {
 		return cv.Logger
 	}
 
