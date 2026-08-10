@@ -411,6 +411,40 @@ func TestExtractTraceContext_NilCarrier(t *testing.T) {
 	assert.Equal(t, ctx, result)
 }
 
+// TestExtractTraceContext_RestoresSeededTenantIDWithReservedCharacters proves
+// the pre-extraction, trusted tenant.id survives extraction VERBATIM even when
+// its decoded value contains a character (";") that baggage.NewMember's
+// percent-encoding validation would reject: the restore path re-applies the
+// original Member as-is instead of rebuilding it from the decoded string.
+func TestExtractTraceContext_RestoresSeededTenantIDWithReservedCharacters(t *testing.T) {
+	prev := otel.GetTextMapPropagator()
+	t.Cleanup(func() { otel.SetTextMapPropagator(prev) })
+	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
+		propagation.TraceContext{}, propagation.Baggage{}))
+
+	const trustedTenantID = "acme;corp"
+
+	m, err := baggage.NewMemberRaw(constant.AttrKeyTenantID, trustedTenantID)
+	require.NoError(t, err)
+
+	b, err := baggage.New(m)
+	require.NoError(t, err)
+
+	ctx := baggage.ContextWithBaggage(context.Background(), b)
+
+	carrier := propagation.MapCarrier{
+		"baggage": constant.AttrKeyTenantID + "=forged,other=kept",
+	}
+
+	extracted := ExtractTraceContext(ctx, carrier)
+
+	bag := baggage.FromContext(extracted)
+	assert.Equal(t, trustedTenantID, bag.Member(constant.AttrKeyTenantID).Value(),
+		"trusted pre-extraction tenant.id must survive verbatim")
+	assert.Equal(t, "kept", bag.Member("other").Value(),
+		"other inbound baggage members must be preserved")
+}
+
 func TestInjectHTTPContext_NilHeaders(t *testing.T) {
 	t.Parallel()
 	assert.NotPanics(t, func() { InjectHTTPContext(context.Background(), nil) })

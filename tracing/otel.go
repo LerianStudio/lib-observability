@@ -829,11 +829,17 @@ func ExtractTraceContext(ctx context.Context, carrier propagation.TextMapCarrier
 	// not just one that forges a tenant.id - silently wipes an
 	// already-seeded, legitimate tenant.id (the one seeded from a validated
 	// JWT claim before this middleware ever runs).
-	preExistingTenantID := baggage.FromContext(ctx).Member(constant.AttrKeyTenantID).Value()
+	// The whole Member is captured (not just its decoded Value) so the
+	// restore below can re-apply it verbatim via SetMember: rebuilding it
+	// with baggage.NewMember would treat the DECODED value as
+	// percent-encoded input, so a legitimate tenant.id containing a
+	// character like ";" would fail validation and silently drop the
+	// trusted value.
+	preExistingTenantID := baggage.FromContext(ctx).Member(constant.AttrKeyTenantID)
 
 	extracted := stripTenantIDBaggage(otel.GetTextMapPropagator().Extract(ctx, carrier))
 
-	if preExistingTenantID != "" {
+	if preExistingTenantID.Value() != "" {
 		extracted = restoreTenantIDBaggage(extracted, preExistingTenantID)
 	}
 
@@ -849,14 +855,20 @@ func ExtractTraceContext(ctx context.Context, carrier propagation.TextMapCarrier
 // Extract's replacement) or tried to forge one (removed by the strip): the
 // third rail is that tenant identity never comes from the carrier, so the
 // trusted, pre-extraction value is the only one that may survive here.
-func restoreTenantIDBaggage(ctx context.Context, tenantID string) context.Context {
-	member, err := baggage.NewMember(constant.AttrKeyTenantID, tenantID)
-	if err != nil {
-		return ctx
-	}
-
+//
+// The original Member is re-applied as-is - never rebuilt through
+// baggage.NewMember, whose percent-encoding validation would reject (and
+// so drop) a decoded value containing characters like ";". A member that
+// came out of a parsed Baggage is already valid, so SetMember failing is
+// unexpected; when it does, the failure is logged rather than swallowed,
+// since it means a trusted tenant.id was lost.
+func restoreTenantIDBaggage(ctx context.Context, member baggage.Member) context.Context {
 	bag, err := baggage.FromContext(ctx).SetMember(member)
 	if err != nil {
+		observability.NewLoggerFromContext(ctx).Log(ctx, log.LevelWarn,
+			"failed to restore trusted tenant.id baggage member after inbound extraction",
+			log.Err(err))
+
 		return ctx
 	}
 
