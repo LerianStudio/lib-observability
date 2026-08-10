@@ -58,19 +58,26 @@ func WithHTTPErrorHandling() fiber.Handler {
 		c.SetContext(context.WithValue(c.Context(), httpResponseStateKey{}, state))
 
 		raw := c.Next()
+		normalizedErr := normalizeHTTPHandlerError(raw)
 		// Preserve the pre-normalization value for telemetry/logging: its true
 		// type (via reflection) is more useful for debugging a handler bug than
 		// the generic fiber.ErrInternalServerError it might later be substituted
-		// with. Only a REAL error is stored, though: a typed-nil raw means the
-		// request completes as a success (normalizeHTTPHandlerError rejects it,
-		// no ErrorHandler runs), but a typed-nil interface value still satisfies
-		// every handlerErr != nil check downstream, so storing it would put a
-		// false error field on the access log and span of a successful request.
-		if !obslog.IsNil(raw) {
+		// with. A typed-nil raw is NOT a success: normalizeHTTPHandlerError maps
+		// it to fiber.ErrInternalServerError and the ErrorHandler renders a 500,
+		// so the normalized value is stored in that case to keep an error field
+		// on the access log and error.type_original on the span of that 500.
+		// The typed-nil raw itself is never stored: a typed-nil interface value
+		// satisfies every handlerErr != nil check downstream but renders as
+		// "<nil>", which names nothing an operator can act on.
+		switch {
+		case raw == nil:
+			// Genuine success: no error to attribute.
+		case obslog.IsNil(raw):
+			state.originalErr = normalizedErr
+		default:
 			state.originalErr = raw
 		}
 
-		normalizedErr := normalizeHTTPHandlerError(raw)
 		if normalizedErr != nil {
 			// normalizeHTTPHandlerError only rejects a top-level typed-nil; a
 			// valid, non-nil error whose Unwrap chain hits an unguarded
