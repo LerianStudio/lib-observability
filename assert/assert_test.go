@@ -236,6 +236,66 @@ func TestNoError_MessageContainsError(t *testing.T) {
 	require.Contains(t, msg, "context_key=context_value")
 }
 
+// typedNilAssertError has an unsafe Error() implementation (dereferences the
+// nil receiver's field) so TestNoError_TypedNilFailsSafely proves NoError
+// guards against it before calling it, rather than by coincidence.
+type typedNilAssertError struct {
+	message string
+}
+
+func (e *typedNilAssertError) Error() string {
+	return e.message
+}
+
+// TestNoError_TypedNilFailsSafely verifies NoError still treats a typed-nil
+// error as a caller bug (returns a failure, does not silently pass like the
+// nil case) but never calls Error() on it - a typed-nil interface is not ==
+// nil, so the top guard alone does not catch it.
+func TestNoError_TypedNilFailsSafely(t *testing.T) {
+	t.Parallel()
+
+	var typedNil *typedNilAssertError
+
+	a, _ := newTestAsserterWithLogger()
+
+	var err error
+
+	require.NotPanics(t, func() {
+		err = a.NoError(context.Background(), typedNil, "should fail safely")
+	})
+
+	require.Error(t, err, "a typed-nil error is a caller bug and must still fail the assertion")
+
+	msg := err.Error()
+	require.Contains(t, msg, "error=<nil>")
+	require.Contains(t, msg, "error_type=*assert.typedNilAssertError")
+}
+
+// TestNoError_ValidErrorWithUnsafeUnwrapChainFailsSafely covers the case a
+// bare log.IsNil-style guard cannot catch: a NON-nil, VALID top-level error
+// (errors.Join is the canonical example) whose own Error() implementation is
+// unsafe because it delegates to a typed-nil member with no guard. Before
+// routing through log.SafeErrorMessage, NoError called err.Error() directly
+// once isNil(err) was false, which panicked on exactly this input.
+func TestNoError_ValidErrorWithUnsafeUnwrapChainFailsSafely(t *testing.T) {
+	t.Parallel()
+
+	var nilMember *typedNilAssertError
+
+	compound := errors.Join(errors.New("valid sibling"), nilMember)
+
+	a, _ := newTestAsserterWithLogger()
+
+	var err error
+
+	require.NotPanics(t, func() {
+		err = a.NoError(context.Background(), compound, "should fail safely")
+	})
+
+	require.Error(t, err, "a valid, non-nil compound error must still fail the assertion")
+	require.Contains(t, err.Error(), "error_type=*errors.joinError")
+}
+
 // TestNever_AlwaysFails verifies Never always returns an error.
 func TestNever_AlwaysFails(t *testing.T) {
 	t.Parallel()

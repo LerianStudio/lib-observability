@@ -3,8 +3,9 @@ package runtime
 import (
 	"context"
 	"fmt"
-	"reflect"
 	"sync"
+
+	"github.com/LerianStudio/lib-observability/v2/log"
 )
 
 // ErrorReporter defines an interface for external error reporting services.
@@ -154,8 +155,9 @@ func toPanicError(panicValue any, isProduction bool) error {
 	}
 
 	// Guard against typed-nil error values: an interface holding (type=*MyError, value=nil)
-	// would pass the type assertion but panic on .Error(). Use reflect to detect this.
-	if err, ok := panicValue.(error); ok && !isTypedNil(panicValue) {
+	// would pass the type assertion but panic on .Error(). log.IsNil detects this the same
+	// way the observability sinks (tracing.HandleSpanError, assert.NoError) do.
+	if err, ok := panicValue.(error); ok && !log.IsNil(err) {
 		return err
 	}
 
@@ -166,22 +168,6 @@ func toPanicError(panicValue any, isProduction bool) error {
 	return &panicError{message: "panic: " + formatPanicValue(panicValue)}
 }
 
-// isTypedNil returns true if v is an interface holding a nil pointer/nil value.
-func isTypedNil(v any) bool {
-	if v == nil {
-		return false // untyped nil is not a typed nil
-	}
-
-	rv := reflect.ValueOf(v)
-
-	switch rv.Kind() {
-	case reflect.Pointer, reflect.Interface, reflect.Slice, reflect.Map, reflect.Chan, reflect.Func:
-		return rv.IsNil()
-	default:
-		return false
-	}
-}
-
 // formatPanicValue formats a panic value as a string.
 func formatPanicValue(value any) string {
 	if value == nil {
@@ -189,7 +175,7 @@ func formatPanicValue(value any) string {
 	}
 
 	// Guard against typed-nil values that would panic on method calls.
-	if isTypedNil(value) {
+	if log.IsNil(value) {
 		return fmt.Sprintf("<%T>(nil)", value)
 	}
 

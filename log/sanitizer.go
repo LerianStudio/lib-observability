@@ -18,7 +18,7 @@ func SafeError(logger Logger, ctx context.Context, msg string, err error, produc
 		return
 	}
 
-	if err == nil {
+	if IsNil(err) {
 		return
 	}
 

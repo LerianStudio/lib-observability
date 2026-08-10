@@ -66,6 +66,38 @@ func TestGoLogger_Enabled(t *testing.T) {
 	assert.False(t, logger.Enabled(LevelDebug))
 }
 
+// TestLevelConstants_MatchDocumentedNumericValues pins the exact numeric
+// values the doc comment on Level promises (LevelError=0 .. LevelDebug=3).
+// The four Level constants previously shared a const block with five string
+// constants declared before them, so iota (which counts every ConstSpec in
+// the block, not just the ones referencing it) put LevelError at 5 instead
+// of 0 - silently, since every test exercising ordering used an explicit
+// Level field and so only ever compared the four constants' RELATIVE order,
+// which an equal shift preserves. Only a comparison against the literal
+// zero value catches it, which is exactly TestGoLogger_ZeroValueEnablesError
+// below.
+func TestLevelConstants_MatchDocumentedNumericValues(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, Level(0), LevelError)
+	assert.Equal(t, Level(1), LevelWarn)
+	assert.Equal(t, Level(2), LevelInfo)
+	assert.Equal(t, Level(3), LevelDebug)
+}
+
+// TestGoLogger_ZeroValueEnablesError verifies the specific production
+// consequence of the iota bug above: an uninitialized &GoLogger{} (its Level
+// field is the Go zero value, 0) is the default WithHTTPLogging/WithGrpcLogging
+// fall back to when no WithCustomLogger option is supplied. It must be
+// enabled for at least LevelError, or the default access logger emits
+// nothing at any level.
+func TestGoLogger_ZeroValueEnablesError(t *testing.T) {
+	t.Parallel()
+
+	var zeroValue GoLogger
+	assert.True(t, zeroValue.Enabled(LevelError), "the zero-value GoLogger must emit at least error level")
+}
+
 func TestGoLogger_LogWithFieldsAndGroup(t *testing.T) {
 	var buf bytes.Buffer
 	withTestLoggerOutput(t, &buf)

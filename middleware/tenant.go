@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"context"
+	"strings"
 
 	observability "github.com/LerianStudio/lib-observability/v2"
 	constant "github.com/LerianStudio/lib-observability/v2/constants"
@@ -52,7 +53,7 @@ func ResolveTenantIDFromGRPC(ctx context.Context) string {
 // the MaxTenantIDLen cap. Returns "" for any value that fails normalization or
 // exceeds the cap, so callers can use it as a presence check.
 func sanitizeTenantID(raw string) string {
-	value := normalizeRequestID(raw)
+	value := strings.TrimSpace(sanitizeLogValue(raw))
 	if isNilOrEmptyString(&value) {
 		return ""
 	}

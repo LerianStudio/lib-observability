@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"unicode/utf8"
 
@@ -18,11 +19,22 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
+
+type nonStringifiableError struct {
+	calls *atomic.Int32
+}
+
+func (e nonStringifiableError) Error() string {
+	e.calls.Add(1)
+
+	return "handler detail"
+}
 
 // newMetricsHarness wires a real OTel SDK ManualReader so tests can assert on
 // the http.server.request.duration histogram exactly as it would appear to an
@@ -291,6 +303,103 @@ func TestWithTelemetry_RecordsDurationOnHandlerError(t *testing.T) {
 	assert.Equal(t, "errors.errorString",
 		getSpanAttr(spans[0], "error.type_original"),
 		"span must surface the originating Go type name for debugging")
+}
+
+// findEventAttr returns the string value of the named attribute on the first
+// span event matching eventName, or "" if either is absent.
+func findEventAttr(spans []tracetest.SpanStub, eventName, attrKey string) (value string, found bool) {
+	for _, span := range spans {
+		for _, event := range span.Events {
+			if event.Name != eventName {
+				continue
+			}
+
+			for _, attr := range event.Attributes {
+				if string(attr.Key) == attrKey {
+					return attr.Value.Emit(), true
+				}
+			}
+		}
+	}
+
+	return "", false
+}
+
+// TestWithTelemetry_5xxHandlerErrorRecordsSemconvException verifies FIX 8's
+// >=500 branch: span.RecordError produces the OTel semconv "exception" event
+// (exception.type/exception.message) rather than a custom-named event -
+// Tempo/Jaeger and other APM backends index specifically on those semconv
+// keys, so a differently-named event with the same information is invisible
+// to them. tracing.ErrorMessage's sanitization (secrets stripped,
+// length-capped) still applies before the message reaches the span.
+func TestWithTelemetry_5xxHandlerErrorRecordsSemconvException(t *testing.T) {
+	t.Parallel()
+
+	tel, _, spanExp := newTelemetryHarness(t)
+	var errorCalls atomic.Int32
+
+	app := fiber.New(fiber.Config{
+		ErrorHandler: func(c fiber.Ctx, _ error) error {
+			return c.SendStatus(http.StatusInternalServerError)
+		},
+	})
+	app.Use(NewTelemetryMiddleware(tel).WithTelemetry(tel))
+	app.Get("/error", func(fiber.Ctx) error {
+		return nonStringifiableError{calls: &errorCalls}
+	})
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/error", nil))
+	require.NoError(t, err)
+	defer func() { require.NoError(t, resp.Body.Close()) }()
+	require.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+	assert.EqualValues(t, 1, errorCalls.Load(),
+		"the message must reach the span, which requires exactly one Error() call")
+
+	spans := spanExp.GetSpans()
+	require.Len(t, spans, 1)
+	assert.Equal(t, codes.Error, spans[0].Status.Code)
+	assert.Equal(t, "HTTP 500", spans[0].Status.Description)
+	assert.Equal(t, "middleware.nonStringifiableError", getSpanAttr(spans[0], "error.type_original"))
+
+	msg, found := findEventAttr(spans, "exception", "exception.message")
+	require.True(t, found, "span must record the OTel semconv exception event on a 5xx")
+	assert.Equal(t, "handler detail", msg,
+		"the exception event must carry the handler error's message")
+
+	_, hasCustomEvent := findEventAttr(spans, "http.handler.error", "error")
+	assert.False(t, hasCustomEvent, "the custom event is reserved for <500; a 5xx uses the semconv exception event instead")
+}
+
+// TestWithTelemetry_4xxHandlerErrorUsesCustomEvent verifies the <500 branch
+// still uses the custom http.handler.error event (unchanged from before FIX
+// 8's split), since a mapped 4xx must never produce an "exception" event or
+// ERROR span status per OTel semconv.
+func TestWithTelemetry_4xxHandlerErrorUsesCustomEvent(t *testing.T) {
+	t.Parallel()
+
+	tel, _, spanExp := newTelemetryHarness(t)
+
+	app := fiber.New()
+	app.Use(NewTelemetryMiddleware(tel).WithTelemetry(tel))
+	app.Get("/error", func(fiber.Ctx) error {
+		return fiber.NewError(http.StatusBadRequest, "bad input")
+	})
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/error", nil))
+	require.NoError(t, err)
+	defer func() { require.NoError(t, resp.Body.Close()) }()
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+
+	spans := spanExp.GetSpans()
+	require.Len(t, spans, 1)
+	assert.Equal(t, codes.Unset, spans[0].Status.Code, "a 4xx must never set ERROR span status")
+
+	msg, found := findEventAttr(spans, "http.handler.error", "error")
+	require.True(t, found, "a 4xx handler error must still record the custom event")
+	assert.Equal(t, "bad input", msg)
+
+	_, hasExceptionEvent := findEventAttr(spans, "exception", "exception.message")
+	assert.False(t, hasExceptionEvent, "a 4xx must never record the semconv exception event")
 }
 
 // TestWithTelemetry_FiberError4xxOmitsErrorTypeOnMetric verifies that a
@@ -656,7 +765,7 @@ func TestWithTelemetry_NilMetricsFactoryDoesNotRecord(t *testing.T) {
 }
 
 // TestWithTelemetry_UnmatchedRouteOmitsHTTPRoute verifies the catch-all 404
-// guard: Fiber v2's default unmatched-path handler exposes Route().Path=="/",
+// guard: Fiber's default unmatched-path handler exposes Route().Path=="/",
 // which would conflate scanner/404 traffic with the actual root handler in
 // dashboards. The middleware MUST omit http.route entirely from both the span
 // and the metric in that case, while still recording http.route="/" for a
@@ -713,6 +822,48 @@ func TestWithTelemetry_UnmatchedRouteOmitsHTTPRoute(t *testing.T) {
 		require.NotEmpty(t, spans)
 		assert.Equal(t, "/", getSpanAttr(spans[0], "http.route"))
 	})
+}
+
+func TestWithTelemetry_EarlyBodyLimitMiddlewareRefusalRecordsStatusWithoutRoute(t *testing.T) {
+	t.Parallel()
+
+	tel, reader, spanExp := newTelemetryHarness(t)
+
+	app := fiber.New()
+	mid := NewTelemetryMiddleware(tel)
+	app.Use(mid.WithTelemetry(tel))
+	app.Use(func(c fiber.Ctx) error {
+		if c.Request().Header.ContentLength() > 16 {
+			return fiber.ErrRequestEntityTooLarge
+		}
+
+		return c.Next()
+	})
+	app.Post("/", func(c fiber.Ctx) error {
+		return c.SendStatus(http.StatusNoContent)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(strings.Repeat("a", 32)))
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, resp.Body.Close()) }()
+	require.Equal(t, http.StatusRequestEntityTooLarge, resp.StatusCode)
+
+	dp := findDurationHistogram(t, reader)
+	require.NotNil(t, dp, "duration must be recorded for early refusals")
+	assert.EqualValues(t, 1, dp.Count)
+
+	status, ok := dp.Attributes.Value(attribute.Key("http.response.status_code"))
+	require.True(t, ok)
+	assert.EqualValues(t, http.StatusRequestEntityTooLarge, status.AsInt64())
+
+	_, hasMetricRoute := dp.Attributes.Value(attribute.Key("http.route"))
+	assert.False(t, hasMetricRoute, "an early refusal has no matched route")
+
+	spans := spanExp.GetSpans()
+	require.Len(t, spans, 1)
+	assert.Equal(t, "413", getSpanAttr(spans[0], "http.response.status_code"))
+	assert.Empty(t, getSpanAttr(spans[0], "http.route"))
 }
 
 // TestWithTelemetry_NormalizesUnknownMethodOnSpan verifies that an unknown

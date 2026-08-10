@@ -5,12 +5,101 @@ package middleware
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// TestNormalizeRequestID_PunctuationPassesThroughIntact verifies FIX 7:
+// only control bytes (CR, LF, NUL, and the rest of printable ASCII's
+// complement) are stripped. Punctuation an existing ID format may use -
+// ':', '/', '+', '=' among it - is never rewritten, so a caller's ID
+// survives untouched and cross-service log correlation joins keep working.
+func TestNormalizeRequestID_PunctuationPassesThroughIntact(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{name: "colon and slash", raw: "svc-a:01HZX/9K", want: "svc-a:01HZX/9K"},
+		{name: "plus and equals (base64)", raw: "ab+cd==", want: "ab+cd=="},
+		{name: "semicolon and comma", raw: "a;b,c", want: "a;b,c"},
+		{name: "already clean ASCII", raw: "request-42", want: "request-42"},
+		{
+			name: "control bytes stripped, punctuation kept",
+			raw:  "svc-a:01HZX/9K+ab=\r\n",
+			want: "svc-a:01HZX/9K+ab=",
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			assert.Equal(t, tt.want, normalizeRequestID(tt.raw))
+		})
+	}
+}
+
+// TestNormalizeRequestID_Idempotent verifies a second pass over an
+// already-normalized value returns the same value unchanged.
+func TestNormalizeRequestID_Idempotent(t *testing.T) {
+	t.Parallel()
+
+	inputs := []string{
+		"svc-a:01HZX/9K+ab=",
+		strings.Repeat("a", 200),
+		"plain-request-id",
+		"",
+	}
+
+	for _, raw := range inputs {
+		first := normalizeRequestID(raw)
+		second := normalizeRequestID(first)
+		assert.Equal(t, first, second, "second pass over %q must not change the value", first)
+	}
+}
+
+// TestNormalizeRequestID_BoundsAndEmptiness covers the cap and the
+// all-control-bytes-yields-empty case (the caller regenerates a UUID for an
+// empty result).
+func TestNormalizeRequestID_BoundsAndEmptiness(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		raw        string
+		wantEmpty  bool
+		wantLength int
+	}{
+		{name: "empty input", raw: "", wantEmpty: true},
+		{name: "only control bytes", raw: "\r\n\x00\x01", wantEmpty: true},
+		{name: "whitespace only", raw: "   ", wantEmpty: true},
+		{name: "overlong input is capped at 128", raw: strings.Repeat("a", 300), wantLength: maxRequestIDLength},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := normalizeRequestID(tt.raw)
+
+			if tt.wantEmpty {
+				assert.Empty(t, got)
+				return
+			}
+
+			assert.Len(t, got, tt.wantLength)
+		})
+	}
+}
 
 func TestIsRouteExcludedFromList(t *testing.T) {
 	cases := []struct {
@@ -68,7 +157,7 @@ func TestIsRouteExcludedFromList(t *testing.T) {
 
 // TestRouteAttribute_NilContext verifies the nil-context guard returns absent.
 func TestRouteAttribute_NilContext(t *testing.T) {
-	route, present := routeAttribute(nil, http.StatusOK)
+	route, present := routeAttribute(nil)
 	assert.False(t, present, "nil ctx must report the route as absent")
 	assert.Empty(t, route)
 }
@@ -84,7 +173,7 @@ func TestRouteAttribute_MatchedRoute(t *testing.T) {
 	)
 
 	app.Get("/api/users/:id", func(c fiber.Ctx) error {
-		gotRoute, gotPresent = routeAttribute(c, http.StatusOK)
+		gotRoute, gotPresent = routeAttribute(c)
 		return c.SendStatus(http.StatusOK)
 	})
 
@@ -111,7 +200,7 @@ func TestRouteAttribute_UnmatchedCatchAll404(t *testing.T) {
 	// A catch-all middleware runs for the unmatched path so we can inspect the
 	// context Fiber assembled for the 404. No route is registered for the path.
 	app.Use(func(c fiber.Ctx) error {
-		gotRoute, gotPresent = routeAttribute(c, http.StatusNotFound)
+		gotRoute, gotPresent = routeAttribute(c)
 		return c.Next()
 	})
 
@@ -137,7 +226,7 @@ func TestRouteAttribute_RegisteredRoot(t *testing.T) {
 	)
 
 	app.Get("/", func(c fiber.Ctx) error {
-		gotRoute, gotPresent = routeAttribute(c, http.StatusOK)
+		gotRoute, gotPresent = routeAttribute(c)
 		return c.SendStatus(http.StatusOK)
 	})
 

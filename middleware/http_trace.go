@@ -38,9 +38,12 @@ func SetSpanAttributeForParam(c fiber.Ctx, param, value, entityName string) {
 
 // ExtractHTTPContext extracts trace headers from a Fiber request.
 //
-// Moved here from the tracing package: it depends on fiber.Ctx. It delegates the
+// Moved here from the tracing package: it depends on fiber.Ctx. It delegates
 // carrier-level extraction to tracing.ExtractTraceContext, which remains
-// fiber-free. Behavior is identical to the previous tracing.ExtractHTTPContext.
+// fiber-free and is also where the tenant.id baggage member is always
+// stripped (that funnel is shared with the gRPC and queue extraction paths -
+// see its doc comment), so this function carries no tenant-stripping logic
+// of its own.
 func ExtractHTTPContext(ctx context.Context, c fiber.Ctx) context.Context {
 	if c == nil {
 		return ctx

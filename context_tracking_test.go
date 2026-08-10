@@ -61,6 +61,63 @@ func TestContextTrackingFallbacksFromEmptyContextValue(t *testing.T) {
 	assert.NotNil(t, factory)
 }
 
+func TestLoggerResolution_TypedNilUsesNopLogger(t *testing.T) {
+	t.Parallel()
+
+	var typedNil *log.GoLogger
+
+	poisonedContext := context.WithValue(context.Background(), ContextKey, &ContextValue{Logger: typedNil})
+
+	tests := []struct {
+		name   string
+		logger func() log.Logger
+	}{
+		{
+			name: "direct resolver",
+			logger: func() log.Logger {
+				return resolveLogger(typedNil)
+			},
+		},
+		{
+			name: "direct context extraction",
+			logger: func() log.Logger {
+				return NewLoggerFromContext(poisonedContext)
+			},
+		},
+		{
+			name: "tracking bundle extraction",
+			logger: func() log.Logger {
+				logger, _, _, _ := NewTrackingFromContext(poisonedContext)
+
+				return logger
+			},
+		},
+		{
+			name: "context attachment",
+			logger: func() log.Logger {
+				ctx := ContextWithLogger(context.Background(), typedNil)
+				values, _ := ctx.Value(ContextKey).(*ContextValue)
+				if values == nil {
+					return nil
+				}
+
+				return values.Logger
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		testCase := tt
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			resolved := testCase.logger()
+			assert.False(t, log.IsNil(resolved))
+			assert.IsType(t, &log.NopLogger{}, resolved)
+		})
+	}
+}
+
 func TestContextAttributesAreCopied(t *testing.T) {
 	t.Parallel()
 
