@@ -1,5 +1,45 @@
 # Lib-observability Changelog
 
+## [3.0.0](https://github.com/LerianStudio/lib-observability/releases/tag/v3.0.0)
+
+Features:
+- Bump Go module path to `/v3` for the `v3.0.0` release. (@fredcamaral)
+- Add HTTP client instrumentation wrapper for `httpobs`. (@gauchito91)
+- Introduce native RED/runtime metrics and provide instrumentation helpers for databases, caches, and queues. (@gauchito91)
+- Add `StartClientSpan` helper for tracing. (@gauchito91)
+
+Fixes:
+- Ensure HTTP/gRPC error handling is safe for typed-nil values and maintains observability integrity. (@fredcamaral)
+- Prevent HTTP identity leakage in middleware. (@fredcamaral)
+- Name HTTP spans by route template instead of raw path. (@gauchito91)
+- Resolve `golangci-lint` findings in middleware. (@fredcamaral)
+- Address review feedback on typed-nil events and baggage restoration in middleware. (@fredcamaral)
+- Attribute typed-nil handler errors and improve stream-test access logging in middleware. (@fredcamaral)
+
+Improvements:
+- Correct SDK cardinality-limit statement in tenant-id gap note for `grpcmiddleware`. (@fredcamaral)
+- Document URI lifecycle on `NewRequestInfo` in middleware. (@fredcamaral)
+- Clarify `httpobs` provider-dependency and client ownership. (@gauchito91)
+- Document `httpobs` and `StartClientSpan` for client-side outbound operations. (@gauchito91)
+- Add pre-development artifacts for span-kind-client-helpers. (@gauchito91)
+- Document wrapper precedence principle for span kind. (@gauchito91)
+- Implement `ENV_NAME` fallback and strict `ParseBool` in core documentation. (@gauchito91)
+- Read telemetry configuration from environment variables instead of hard-coding endpoints. (@gauchito91)
+- Fix insecure-exporter production example and missing imports in core documentation. (@gauchito91)
+- Fix error handling in usage snippets in core documentation. (@gauchito91)
+- Add instrumentation guide for native metrics and wrappers. (@gauchito91)
+- Bump `grpc` dependency for CVE and clarify `sqlobs` pool and gRPC documentation reference. (@gauchito91)
+- Decouple Fiber `v3` from tracing core, gRPC, and system collector. (@gauchito91)
+- Satisfy `wsl_v5` whitespace requirements before gRPC interceptor return in middleware. (@gauchito91)
+- Extend gRPC span ownership in middleware tests. (@gauchito91)
+- Address CodeRabbit review feedback in middleware tests. (@gauchito91)
+- Enforce Go module major tags in CI release process. (@fredcamaral)
+- Renew `trivyignore` exception for `GO-2026-5932`. (@fredcamaral)
+
+[Compare changes](https://github.com/LerianStudio/lib-observability/compare/v2.1.2...v3.0.0)
+
+---
+
 ## [Unreleased]
 
 
