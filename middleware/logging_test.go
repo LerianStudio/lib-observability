@@ -1031,7 +1031,7 @@ func (e *typedNilGRPCLoggingError) Error() string {
 }
 
 // TestWithGrpcLoggingHandlerReturnsTypedNilDoesNotPanic mirrors
-// grpcmiddleware's TestNormalizeGRPCHandlerError_CatchesEveryUnsafeShape:
+// grpcmiddleware's TestNormalizeGRPCError_CatchesEveryUnsafeShape:
 // WithGrpcLogging returns whatever the handler gives it straight to
 // grpc-go's own dispatch, which calls status.FromError - and, on its
 // fallback path, err.Error() unconditionally. A bare top-level typed-nil,

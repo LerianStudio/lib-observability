@@ -112,8 +112,7 @@ func TestWithTelemetryInterceptor_TrustInboundTraceContext(t *testing.T) {
 
 // TestWithTelemetryInterceptor_StripsInboundTenantIDBaggage mirrors the HTTP
 // counterpart (middleware.TestExtractHTTPContext_StripsTenantIDBaggage): even
-// a caller that HAS opted into TrustInboundTraceContext (see R3-7 - the
-// caller's User-Agent no longer has any bearing on this) must still never
+// a caller that HAS opted into TrustInboundTraceContext must still never
 // have its tenant.id baggage member trusted. Other baggage members
 // propagate normally, proving this isn't baggage propagation being broken
 // again - it is the tenant.id member specifically that is always stripped.
@@ -147,7 +146,7 @@ func TestWithTelemetryInterceptor_StripsInboundTenantIDBaggage(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Empty(t, gotTenant,
-		"tenant.id must never propagate from inbound gRPC baggage, even for a caller matching the internal-service heuristic")
+		"tenant.id must never propagate from inbound gRPC baggage, even when TrustInboundTraceContext is opted in")
 	assert.Equal(t, "us-east", gotRegion, "other baggage members must still propagate")
 
 	require.NotEmpty(t, spanExp.GetSpans(), "a span must still be recorded")
@@ -230,12 +229,12 @@ func (e delegatingGRPCError) Error() string {
 	return "wrapped: " + e.cause.Error()
 }
 
-// TestNormalizeGRPCHandlerError_CatchesEveryUnsafeShape proves the guard
+// TestNormalizeGRPCError_CatchesEveryUnsafeShape proves the guard
 // works by testing stringifiability directly, not by inspecting the error's
 // shape: a bare log.IsNil check only catches the first of these three forms,
 // all of which panic identically on status.FromError's unguarded err.Error()
 // fallback.
-func TestNormalizeGRPCHandlerError_CatchesEveryUnsafeShape(t *testing.T) {
+func TestNormalizeGRPCError_CatchesEveryUnsafeShape(t *testing.T) {
 	t.Parallel()
 
 	var typedNil *typedNilGRPCHandlerError
@@ -257,7 +256,7 @@ func TestNormalizeGRPCHandlerError_CatchesEveryUnsafeShape(t *testing.T) {
 			var got error
 
 			require.NotPanics(t, func() {
-				got = NormalizeGRPCHandlerError(tt.err)
+				got = NormalizeGRPCError(tt.err)
 			})
 
 			require.Error(t, got)
@@ -267,19 +266,19 @@ func TestNormalizeGRPCHandlerError_CatchesEveryUnsafeShape(t *testing.T) {
 	}
 }
 
-// TestNormalizeGRPCHandlerError_PassesThroughSafeErrors verifies the guard
+// TestNormalizeGRPCError_PassesThroughSafeErrors verifies the guard
 // only replaces genuinely unsafe errors: an ordinary error, and a real gRPC
 // status error (whose Error() is always safe to call), must reach grpc-go's
 // dispatch unchanged so the actual status code survives.
-func TestNormalizeGRPCHandlerError_PassesThroughSafeErrors(t *testing.T) {
+func TestNormalizeGRPCError_PassesThroughSafeErrors(t *testing.T) {
 	t.Parallel()
 
 	ordinary := errors.New("plain failure")
 	grpcStatus := status.Error(grpccodes.NotFound, "missing")
 
-	assert.Same(t, ordinary, NormalizeGRPCHandlerError(ordinary))
-	assert.Same(t, grpcStatus, NormalizeGRPCHandlerError(grpcStatus))
-	assert.Nil(t, NormalizeGRPCHandlerError(nil))
+	assert.Same(t, ordinary, NormalizeGRPCError(ordinary))
+	assert.Same(t, grpcStatus, NormalizeGRPCError(grpcStatus))
+	assert.Nil(t, NormalizeGRPCError(nil))
 }
 
 // TestWithTelemetryInterceptor_NoTracerProviderSurvivesTypedNilAndPreservesStatus

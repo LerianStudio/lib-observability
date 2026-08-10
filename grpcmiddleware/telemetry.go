@@ -102,7 +102,7 @@ func classifyGRPCErrorType(code grpccodes.Code) string {
 	return code.String()
 }
 
-// NormalizeGRPCHandlerError proves the error value returned by a gRPC
+// NormalizeGRPCError proves the error value returned by a gRPC
 // handler or invoker is safe to stringify, rather than inspecting its shape.
 //
 // google.golang.org/grpc/status.FromError - and therefore status.Code, called
@@ -120,7 +120,7 @@ func classifyGRPCErrorType(code grpccodes.Code) string {
 // performs the identical status.FromError conversion one level up - so the
 // value must be normalized here, not only read defensively for our own
 // telemetry.
-func NormalizeGRPCHandlerError(err error) error {
+func NormalizeGRPCError(err error) error {
 	if err == nil {
 		return nil
 	}
@@ -263,7 +263,7 @@ func (tm *TelemetryMiddleware) WithTelemetryInterceptor(tl *tracing.Telemetry) g
 		if effectiveTelemetry.TracerProvider == nil {
 			start := time.Now()
 			resp, err := handler(ctx, req)
-			err = NormalizeGRPCHandlerError(err)
+			err = NormalizeGRPCError(err)
 
 			recordRPCDuration(ctx, serverDurationHistogram, methodName, start, err,
 				ResolveTenantIDFromGRPC(ctx))
@@ -328,11 +328,11 @@ func (tm *TelemetryMiddleware) WithTelemetryInterceptor(tl *tracing.Telemetry) g
 		// status.FromError calls err.Error() unconditionally on its fallback
 		// path for anything that is not already a grpc Status - a
 		// nil-receiver method call that panics the serving goroutine and,
-		// unrecovered, kills the whole process. NormalizeGRPCHandlerError
+		// unrecovered, kills the whole process. NormalizeGRPCError
 		// proves stringifiability directly (see its own doc comment); it is
 		// NOT limited to the top-level value the way
 		// middleware.normalizeHTTPHandlerError is.
-		err = NormalizeGRPCHandlerError(err)
+		err = NormalizeGRPCError(err)
 
 		grpcStatusCode := status.Code(err)
 		span.SetAttributes(
@@ -480,7 +480,7 @@ func (tm *TelemetryMiddleware) UnaryClientInterceptor(tl *tracing.Telemetry) grp
 
 		start := time.Now()
 		err := invoker(ctx, method, req, reply, cc, opts...)
-		err = NormalizeGRPCHandlerError(err)
+		err = NormalizeGRPCError(err)
 
 		// Client metric carries no tenant.id (empty string omits the label).
 		recordRPCDuration(ctx, clientDurationHistogram, method, start, err, "")
@@ -615,10 +615,17 @@ func getMetadataID(ctx context.Context) string {
 // every inbound carrier, see its doc comment - this function reads a
 // caller-controlled `tenant-id` gRPC metadata field DIRECTLY, with no
 // equivalent strip, and its result is stamped onto spans and the
-// rpc.server.duration metric's tenant.id label. Whether to close this the
-// same way (and what that breaks for callers that already rely on it as a
-// deliberate cross-service hint) is a separate, pending product decision -
-// not addressed by this fix.
+// rpc.server.duration metric's tenant.id label. The gap is twofold:
+// attribution forgery (a caller can claim any tenant), and metric label
+// cardinality - sanitizeTenantID caps each value's LENGTH but not the number
+// of DISTINCT values, so a caller sending unlimited distinct tenant-id
+// values creates unbounded rpc.server.duration series, growing memory in the
+// SDK's aggregation store and in the metrics backend (the span attribute is
+// bounded per trace and unaffected; the metric label is the exposed
+// surface). Whether to close this the same way (and what that breaks for
+// callers that already rely on it as a deliberate cross-service hint) is a
+// separate, pending product decision covering both risks - not addressed by
+// this fix.
 func ResolveTenantIDFromGRPC(ctx context.Context) string {
 	if ctx == nil {
 		return ""

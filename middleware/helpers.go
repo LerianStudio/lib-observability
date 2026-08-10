@@ -166,7 +166,7 @@ func isNilOrEmptyString(s *string) bool {
 // normalizeRequestID returns a bounded, injection-safe identifier suitable
 // for headers and telemetry.
 //
-// It rejects-and-regenerates rather than rewriting: only control bytes (CR,
+// It only strips and truncates, never substitutes: only control bytes (CR,
 // LF, NUL, and the rest of printable ASCII's complement) are stripped,
 // because those enable header/log injection (CWE-113/CWE-117). Every other
 // printable ASCII character - including ':', '/', '+', '=' - passes through
@@ -177,9 +177,8 @@ func isNilOrEmptyString(s *string) bool {
 // function a second time returns the same value, since it has nothing left
 // to strip or truncate.
 //
-// The caller regenerates a UUID when this returns "" (isNilOrEmptyString in
-// setRequestHeaderID / getMetadataID) - this function only ever strips or
-// truncates, never substitutes.
+// Regeneration is the caller's job: a UUID is generated when this returns ""
+// (isNilOrEmptyString in setRequestHeaderID / getMetadataID).
 func normalizeRequestID(raw string) string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {

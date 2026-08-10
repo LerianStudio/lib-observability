@@ -14,7 +14,7 @@ import (
 // policy based on its own configuration. Callers in production deployments
 // should pass true to prevent leaking sensitive error details into log output.
 func SafeError(logger Logger, ctx context.Context, msg string, err error, production bool) {
-	if logger == nil {
+	if IsNil(logger) {
 		return
 	}
 

@@ -363,7 +363,7 @@ func WithGrpcLogging(opts ...LogMiddlewareOption) grpc.UnaryServerInterceptor {
 		start := time.Now()
 		resp, err := handler(ctx, req)
 		duration := time.Since(start)
-		// Same death path as grpcmiddleware.NormalizeGRPCHandlerError guards
+		// Same death path as grpcmiddleware.NormalizeGRPCError guards
 		// against: whatever this interceptor returns goes straight to
 		// grpc-go's own dispatch, which calls status.FromError - and, on its
 		// fallback path, err.Error() unconditionally. Proves stringifiability
@@ -375,7 +375,7 @@ func WithGrpcLogging(opts ...LogMiddlewareOption) grpc.UnaryServerInterceptor {
 		// (resolveGRPCRequestID, getMetadataID), which stay duplicated to
 		// keep this package's only gRPC coupling at the
 		// grpc.UnaryServerInterceptor type.
-		err = grpcmiddleware.NormalizeGRPCHandlerError(err)
+		err = grpcmiddleware.NormalizeGRPCError(err)
 
 		methodName := "unknown"
 		if info != nil {
