@@ -76,7 +76,10 @@ func (r grpcRequestWithID) GetRequestId() string {
 // returns nil). Access logging must never touch the body at all; Referer and
 // Username are fixed "-" placeholders rather than parsed from the request.
 func TestNewRequestInfoNeverCapturesRequestBody(t *testing.T) {
-	app := fiber.New()
+	// StreamRequestBody makes the body arrive as a one-shot stream: anything
+	// that consumes it (like the old c.Body() call in NewRequestInfo) drains
+	// the stream before the handler can read it, so the read below would fail.
+	app := fiber.New(fiber.Config{StreamRequestBody: true})
 	app.Post("/charge", func(c fiber.Ctx) error {
 		info := NewRequestInfo(c, false)
 
@@ -88,8 +91,13 @@ func TestNewRequestInfoNeverCapturesRequestBody(t *testing.T) {
 		assert.Empty(t, info.Body, "request bodies are never captured by access logging")
 
 		// The downstream handler must still be able to read the full body
-		// afterward: proves NewRequestInfo did not consume or buffer it.
-		assert.Equal(t, "{\"password\":\"secret\"}", string(c.Body()))
+		// from the request-body STREAM afterward: proves NewRequestInfo did
+		// not consume or buffer it. c.Body() alone only checks buffered
+		// access and could pass even after the stream was drained.
+		require.True(t, c.Request().IsBodyStream(), "test must exercise the streaming path")
+		streamed, readErr := io.ReadAll(c.Request().BodyStream())
+		require.NoError(t, readErr)
+		assert.Equal(t, "{\"password\":\"secret\"}", string(streamed))
 
 		info.FinishRequestInfo(&ResponseMetricsWrapper{Context: c, StatusCode: http.StatusNoContent})
 		assert.Equal(t, "/charge", info.URI)
