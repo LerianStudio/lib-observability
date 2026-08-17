@@ -137,6 +137,22 @@ conn, _ := grpc.NewClient(target,
 
 Emite: `db.client.operation.duration` (s). Labels: db.system.name, db.operation.name, db.collection.name, error.type. **Nunca** query text/params.
 
+**Recomendado — `Setup` (uma chamada, defaults completos).** Compõe `InstrumentDB` + `RegisterDBStatsMetrics` e cuida das regras de posse do handle, que são a parte fácil de errar:
+
+```go
+import "github.com/LerianStudio/lib-observability/v3/sqlobs"
+
+db, cleanup, err := sqlobs.Setup(rawDB, sqlobs.SystemPostgreSQL, sqlobs.WithDSN(dsn))
+if err != nil { /* logar e seguir: instrumentação nunca quebra a conexão */ }
+defer cleanup() // libera as gauges de pool; idempotente
+
+db.SetMaxOpenConns(25) // tuning DEPOIS do Setup, no handle retornado
+```
+
+`Setup` **fecha o `rawDB`** (o handle retornado tem pool próprio — `sql.Open` é lazy, então nada foi discado) e devolve sempre um `*sql.DB` usável e um `cleanup` não-nil, mesmo em erro. Com o DSN em mãos, `sqlobs.SetupOpen(driverName, dsn, system, opts...)` já abre instrumentado e dispensa o handle descartável.
+
+As seções abaixo mostram os passos que o `Setup` compõe (úteis p/ o caso do dbresolver, onde cada pool é instrumentado separadamente).
+
 ### 4a. Caso simples (um `*sql.DB`)
 ```go
 import "github.com/LerianStudio/lib-observability/v3/sqlobs"
@@ -165,6 +181,7 @@ resolver := dbresolver.New(dbresolver.WithPrimaryDBs(primary), dbresolver.WithRe
 `WithPoolRole` adiciona a label `primary|replica` (baixa cardinalidade) → visibilidade read vs write.
 
 ### 4c. Métricas de pool (opcional, alto valor p/ saturação)
+> Já incluído no `Setup` — esta forma é para quem monta os passos na mão (ex.: dbresolver).
 ```go
 reg, err := sqlobs.RegisterDBStatsMetrics(instrumented, sqlobs.SystemPostgreSQL)
 if err != nil { /* tratar */ }
