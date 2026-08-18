@@ -10,9 +10,9 @@
    - Leitura em ms é responsabilidade do PAINEL: no Grafana, unidade do campo = `seconds (s)` → formata "50 ms"/"1.2 s" automaticamente. Fallback em query: `... * 1000` (fator 1000, multiplica; NÃO converte o label `le` de heatmap/bucket).
    - NÃO dual-emitir (ms+s) na lib. NÃO converter no collector. Compat legacy de dashboards antigos migra p/ unidade-do-painel.
 2. **Instrumento criado UMA vez** na construção (nunca por request). Record é **no-op** quando o instrumento é nil (telemetria desabilitada) — chamável incondicionalmente, nunca panic, nunca afeta o request path.
-3. **Só labels de baixa cardinalidade bounded.** Ver lista PROIBIDA abaixo. Cada valor distinto de um label multiplica séries.
+3. **Labels devem ter cardinalidade controlada.** Dimensões nativas são bounded; `tenant.id` é a única exceção opt-in e sua cardinalidade é limitada operacionalmente ao conjunto de tenants autenticados. O serviço que habilita a métrica deve monitorar esse conjunto. Ver lista PROIBIDA abaixo. Cada valor distinto de um label multiplica séries.
 4. **Nomes = OTel semconv estável.** Não inventar chaves; reusar `constants/opentelemetry.go`.
-5. **tenant.id** nunca em métricas HTTP; automático apenas em RPC server e manual em métrica de negócio.
+5. **tenant.id** nunca entra automaticamente em métricas HTTP. É permitido somente na métrica HTTP opt-in por tenant, a partir de identidade autenticada explicitamente no contexto da aplicação; header, baggage, metadata e AttrBag não são fontes confiáveis.
 
 ## Buckets advisory (por sinal)
 
@@ -26,6 +26,7 @@
 | Métrica | Tipo | Unidade | Labels permitidos | Estabilidade |
 |---|---|---|---|---|
 | `http.server.request.duration` | Histogram | s | http.request.method, http.response.status_code, http.route, error.type | STABLE (já existe) |
+| `lerian.http.server.request.duration.by_tenant` | Histogram | s | http.request.method, http.response.status_code, http.route, error.type, tenant.id autenticado | OPT-IN |
 | `http.client.request.duration` | Histogram | s | http.request.method, http.response.status_code, server.address, error.type | STABLE (já existe) |
 | `http.server.active_requests` | UpDownCounter | {request} | http.request.method, http.route (opcional) | (T4) |
 | `rpc.server.duration`¹ | Histogram | s | rpc.system, rpc.method, rpc.grpc.status_code, error.type, tenant.id | (T2) |

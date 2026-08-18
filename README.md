@@ -121,6 +121,27 @@ defer span.End()
 
 The HTTP middleware never derives tenant or customer identity from `X-Tenant-Id`. That client-controlled value is not added to access logs, server spans, or the built-in HTTP metrics. `http.server.request.duration` is limited to method, route template, response status, and error class.
 
+Applications that need tenant-level HTTP latency can opt into the separate
+`lerian.http.server.request.duration.by_tenant` histogram. The authentication
+layer must first attest the tenant explicitly; the metric never falls back to a
+header, baggage, metadata, or generic span attribute:
+
+```go
+mid := middleware.NewTelemetryMiddleware(telemetry)
+app.Use(mid.WithAuthenticatedTenantHTTPMetrics(telemetry))
+app.Use(func(c fiber.Ctx) error {
+    tenantID := tenantResolvedFromValidatedCredential(c)
+    c.SetContext(observability.ContextWithAuthenticatedTenantID(c.Context(), tenantID))
+    return c.Next()
+})
+```
+
+Register telemetry before authentication so it measures the complete request
+and records the tenant only after the downstream authentication layer has
+enriched the context. Requests without an explicitly authenticated tenant are
+still present in `http.server.request.duration` and are omitted from the
+tenant-attributed histogram.
+
 ## Tenant ID propagation
 
 The gRPC middleware can still read a tenant identifier from request metadata and propagate it through telemetry as the `tenant.id` attribute / log field. HTTP applications must attach authenticated identity explicitly if their application telemetry requires it.
@@ -154,7 +175,7 @@ _ = counter.
 
 `ResolveTenantIDFromHTTP` remains available for source compatibility, but the shared HTTP middleware no longer invokes it automatically. `X-Tenant-Id` is client-controlled and must not become infrastructure telemetry identity.
 
-If an auth layer resolves the real tenant from a signed credential, it can call `observability.ContextWithSpanAttributes(ctx, attribute.String("tenant.id", real))` for explicit application spans or business metrics. The built-in HTTP duration histogram still excludes identity.
+If an auth layer resolves the real tenant from a signed credential, it can call `observability.ContextWithSpanAttributes(ctx, attribute.String("tenant.id", real))` for explicit application spans or business metrics. The standard HTTP duration histogram still excludes identity. For the opt-in tenant-attributed HTTP histogram, the auth layer must instead call `observability.ContextWithAuthenticatedTenantID`; generic span attributes are deliberately insufficient.
 
 ## Relationship to lib-commons
 

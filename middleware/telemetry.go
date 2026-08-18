@@ -33,6 +33,12 @@ import (
 // for HTTP server request duration. Recorded as a Float64 histogram in seconds.
 const httpServerRequestDurationMetric = "http.server.request.duration"
 
+// authenticatedTenantHTTPServerRequestDurationMetric is an opt-in HTTP server
+// duration histogram partitioned by identity already authenticated by the
+// application. It never derives tenant identity from transport-controlled
+// headers, baggage, metadata, or generic span attributes.
+const authenticatedTenantHTTPServerRequestDurationMetric = "lerian.http.server.request.duration.by_tenant"
+
 // httpServerActiveRequestsMetric is the OpenTelemetry semantic-convention metric
 // name for the number of in-flight HTTP server requests. Recorded as an Int64
 // UpDownCounter in the unitless "{request}" dimension.
@@ -61,6 +67,27 @@ func newHTTPServerDurationHistogram(meter metric.Meter) metric.Float64Histogram 
 		httpServerRequestDurationMetric,
 		metric.WithUnit("s"),
 		metric.WithDescription("Duration of HTTP server requests."),
+		metric.WithExplicitBucketBoundaries(httpServerDurationBuckets...),
+	)
+	if err != nil {
+		return nil
+	}
+
+	return hist
+}
+
+// newAuthenticatedTenantHTTPServerDurationHistogram builds the opt-in
+// tenant-attributed HTTP duration histogram. It intentionally uses a separate
+// instrument so the standard HTTP RED metric remains identity-free.
+func newAuthenticatedTenantHTTPServerDurationHistogram(meter metric.Meter) metric.Float64Histogram {
+	if meter == nil {
+		return nil
+	}
+
+	hist, err := meter.Float64Histogram(
+		authenticatedTenantHTTPServerRequestDurationMetric,
+		metric.WithUnit("s"),
+		metric.WithDescription("Duration of HTTP server requests partitioned by authenticated tenant."),
 		metric.WithExplicitBucketBoundaries(httpServerDurationBuckets...),
 	)
 	if err != nil {
@@ -162,7 +189,34 @@ type TelemetryMiddleware struct {
 
 // NewTelemetryMiddleware creates a new instance of TelemetryMiddleware.
 func NewTelemetryMiddleware(tl *tracing.Telemetry) *TelemetryMiddleware {
-	return &TelemetryMiddleware{tl}
+	return &TelemetryMiddleware{Telemetry: tl}
+}
+
+func newHTTPServerInstruments(
+	tl *tracing.Telemetry,
+	enableAuthenticatedTenantMetrics bool,
+) (
+	metric.Float64Histogram,
+	metric.Float64Histogram,
+	metric.Int64UpDownCounter,
+) {
+	// MetricsFactory presence is the canonical "metrics enabled" signal across
+	// the library even though these instruments are built from MeterProvider.
+	if tl == nil || tl.MeterProvider == nil || tl.MetricsFactory == nil {
+		return nil, nil, nil
+	}
+
+	meter := tl.MeterProvider.Meter(tl.LibraryName)
+	durationHistogram := newHTTPServerDurationHistogram(meter)
+	activeRequests := newActiveRequestsCounter(meter)
+
+	if !enableAuthenticatedTenantMetrics {
+		return durationHistogram, nil, activeRequests
+	}
+
+	return durationHistogram,
+		newAuthenticatedTenantHTTPServerDurationHistogram(meter),
+		activeRequests
 }
 
 // WithTelemetry is a middleware that adds tracing to the context.
@@ -175,34 +229,40 @@ func NewTelemetryMiddleware(tl *tracing.Telemetry) *TelemetryMiddleware {
 // instrument creation errors all silently skip the metric without affecting
 // the request path or existing span behavior.
 func (tm *TelemetryMiddleware) WithTelemetry(tl *tracing.Telemetry, excludedRoutes ...string) fiber.Handler {
+	return tm.withTelemetry(tl, false, excludedRoutes...)
+}
+
+// WithAuthenticatedTenantHTTPMetrics adds the standard HTTP telemetry and the
+// separate lerian.http.server.request.duration.by_tenant histogram. The tenant
+// metric is recorded only when an authentication layer has explicitly
+// populated the request context with
+// observability.ContextWithAuthenticatedTenantID. Client-controlled headers,
+// baggage, metadata, and generic span attributes are never accepted as an
+// identity source.
+func (tm *TelemetryMiddleware) WithAuthenticatedTenantHTTPMetrics(
+	tl *tracing.Telemetry,
+	excludedRoutes ...string,
+) fiber.Handler {
+	return tm.withTelemetry(tl, true, excludedRoutes...)
+}
+
+func (tm *TelemetryMiddleware) withTelemetry(
+	tl *tracing.Telemetry,
+	enableAuthenticatedTenantMetrics bool,
+	excludedRoutes ...string,
+) fiber.Handler {
 	// Build the duration histogram once at handler-construction time. The
 	// effective Telemetry may be supplied either via the explicit `tl` argument
 	// or via the receiver's stored Telemetry, mirroring the per-request logic
 	// below. If neither resolves, or any required component is nil, the
 	// histogram is left nil and recording is skipped.
-	var (
-		durationHistogram metric.Float64Histogram
-		activeRequests    metric.Int64UpDownCounter
-	)
-
 	bootstrapTelemetry := tl
 	if bootstrapTelemetry == nil && tm != nil {
 		bootstrapTelemetry = tm.Telemetry
 	}
 
-	// MetricsFactory presence is used here as the canonical "metrics subsystem
-	// enabled" signal across this library, even though the histogram itself is
-	// built directly from MeterProvider below. Keeping this gate aligned with
-	// the rest of the metrics package (see metrics/doc.go) ensures callers that
-	// disable metrics by nil-ing MetricsFactory also stop receiving the duration
-	// histogram, without us needing a separate enablement flag.
-	if bootstrapTelemetry != nil &&
-		bootstrapTelemetry.MeterProvider != nil &&
-		bootstrapTelemetry.MetricsFactory != nil {
-		meter := bootstrapTelemetry.MeterProvider.Meter(bootstrapTelemetry.LibraryName)
-		durationHistogram = newHTTPServerDurationHistogram(meter)
-		activeRequests = newActiveRequestsCounter(meter)
-	}
+	durationHistogram, authenticatedTenantDurationHistogram, activeRequests :=
+		newHTTPServerInstruments(bootstrapTelemetry, enableAuthenticatedTenantMetrics)
 
 	// Same hoisting rationale as the histogram above: read once at
 	// construction time rather than on every request.
@@ -256,6 +316,13 @@ func (tm *TelemetryMiddleware) WithTelemetry(tl *tracing.Telemetry, excludedRout
 			statusCode, chainErr, _ := resolveHTTPResponse(c, returnedErr)
 
 			recordHTTPServerDuration(c, durationHistogram, method, requestStart, statusCode)
+			recordAuthenticatedTenantHTTPServerDuration(
+				c,
+				authenticatedTenantDurationHistogram,
+				method,
+				requestStart,
+				statusCode,
+			)
 
 			return chainErr
 		}
@@ -327,6 +394,13 @@ func (tm *TelemetryMiddleware) WithTelemetry(tl *tracing.Telemetry, excludedRout
 		})
 
 		recordHTTPServerDuration(c, durationHistogram, method, requestStart, statusCode)
+		recordAuthenticatedTenantHTTPServerDuration(
+			c,
+			authenticatedTenantDurationHistogram,
+			method,
+			requestStart,
+			statusCode,
+		)
 
 		return chainErr
 	}
@@ -511,6 +585,42 @@ func recordHTTPServerDuration(
 
 	durationSeconds := time.Since(start).Seconds()
 	hist.Record(c.Context(), durationSeconds, metric.WithAttributes(attrs...))
+}
+
+// recordAuthenticatedTenantHTTPServerDuration emits the opt-in HTTP duration
+// histogram only when the application authentication layer has explicitly
+// attested a tenant in the request context. Transport-controlled identity
+// sources are intentionally ignored.
+func recordAuthenticatedTenantHTTPServerDuration(
+	c fiber.Ctx,
+	hist metric.Float64Histogram,
+	method string,
+	start time.Time,
+	statusCode int,
+) {
+	if hist == nil || c == nil {
+		return
+	}
+
+	tenantID, ok := observability.AuthenticatedTenantIDFromContext(c.Context())
+	if !ok {
+		return
+	}
+
+	attrs := []attribute.KeyValue{
+		attribute.String("http.request.method", method),
+		attribute.Int("http.response.status_code", statusCode),
+		attribute.String(constant.AttrKeyTenantID, tenantID.String()),
+	}
+	if routePath, present := routeAttribute(c); present {
+		attrs = append(attrs, attribute.String("http.route", routePath))
+	}
+
+	if errType := classifyHTTPErrorType(statusCode); errType != "" {
+		attrs = append(attrs, attribute.String("error.type", errType))
+	}
+
+	hist.Record(c.Context(), time.Since(start).Seconds(), metric.WithAttributes(attrs...))
 }
 
 // trackActiveRequest increments the http.server.active_requests UpDownCounter by
