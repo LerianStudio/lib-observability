@@ -77,7 +77,27 @@ func newConfig(opts ...Option) config {
 // Nil-safe: a nil client returns ErrNilClient and never panics. With no
 // providers configured it attaches against the no-op providers, so telemetry
 // being off never breaks the client.
+//
+// The asynchronous pool-stat instruments (db.client.connections.*) registered
+// here live as long as the meter: this call hands back nothing that can release
+// them. A caller that ever REPLACES its client — a reconnect, a failover, a
+// test that rebuilds the client per case — MUST use Setup instead, which
+// returns the cleanup that unregisters them.
 func Instrument(client redis.UniversalClient, opts ...Option) error {
+	// A nil close channel keeps this call exactly as cheap as it has always
+	// been: redisotel then starts no watcher goroutine, because there is no
+	// cleanup handle to give the caller anyway.
+	return instrument(client, nil, opts...)
+}
+
+// instrument applies the redisotel tracing and metrics hooks to client. When
+// closeChan is non-nil it is handed to InstrumentMetrics, which unregisters
+// every pool-stat registration it made once the channel is closed; a nil
+// channel disables that mechanism (and its watcher goroutine) entirely.
+//
+// Shared by Instrument and Setup so the two entry points can never drift on the
+// PII guardrail or on which providers reach redisotel.
+func instrument(client redis.UniversalClient, closeChan chan struct{}, opts ...Option) error {
 	if client == nil {
 		return ErrNilClient
 	}
@@ -88,6 +108,38 @@ func Instrument(client redis.UniversalClient, opts ...Option) error {
 	// value redisotel already uses; the shared list carries only bounded extras.
 	commonAttrs := make([]attribute.KeyValue, 0, 1+len(cfg.extraAttrs))
 	commonAttrs = append(commonAttrs, cfg.extraAttrs...)
+
+	metricsOpts := []redisotel.MetricsOption{
+		redisotel.WithMeterProvider(cfg.meterProvider),
+	}
+	if len(commonAttrs) > 0 {
+		metricsOpts = append(metricsOpts, redisotel.WithAttributes(commonAttrs...))
+	}
+
+	// Metrics-only: the close channel releases the asynchronous pool-stat
+	// callbacks. Tracing hooks carry no registration — they are owned by the
+	// client and die with it.
+	if closeChan != nil {
+		metricsOpts = append(metricsOpts, redisotel.WithCloseChan(closeChan))
+	}
+
+	// ORDER IS LOAD-BEARING: metrics FIRST, tracing second.
+	//
+	// go-redis hooks are additive, so a partial failure that leaves one side
+	// installed makes a caller's retry attach that side twice. The two calls are
+	// not symmetric, which is what settles the order: InstrumentTracing fails for
+	// exactly one reason, an unsupported client type, while InstrumentMetrics
+	// fails for that AND for instrument-creation errors when it registers the
+	// pool-stat callbacks.
+	//
+	// Running metrics first makes the reachable partial failure impossible: if
+	// metrics fails, tracing has not run, so nothing is installed and a retry is
+	// clean; if metrics succeeds, the client type is supported and tracing
+	// therefore cannot fail. Swapping these back reintroduces a client that
+	// double-reports spans after a retry.
+	if err := redisotel.InstrumentMetrics(client, metricsOpts...); err != nil {
+		return err
+	}
 
 	tracingOpts := []redisotel.TracingOption{
 		redisotel.WithTracerProvider(cfg.tracerProvider),
@@ -100,18 +152,7 @@ func Instrument(client redis.UniversalClient, opts ...Option) error {
 		tracingOpts = append(tracingOpts, redisotel.WithAttributes(commonAttrs...))
 	}
 
-	if err := redisotel.InstrumentTracing(client, tracingOpts...); err != nil {
-		return err
-	}
-
-	metricsOpts := []redisotel.MetricsOption{
-		redisotel.WithMeterProvider(cfg.meterProvider),
-	}
-	if len(commonAttrs) > 0 {
-		metricsOpts = append(metricsOpts, redisotel.WithAttributes(commonAttrs...))
-	}
-
-	return redisotel.InstrumentMetrics(client, metricsOpts...)
+	return redisotel.InstrumentTracing(client, tracingOpts...)
 }
 
 // System returns the db.system value redisotel emits for both Redis and Valkey.

@@ -11,6 +11,15 @@
 // the helper applies redisotel.InstrumentTracing + redisotel.InstrumentMetrics
 // and returns. It never dials, never closes, and never manages the client.
 //
+// # Releasing the pool-stat registrations
+//
+// The pool-stat instruments (db.client.connections.*) are ASYNCHRONOUS: their
+// callbacks are owned by the MeterProvider, hold the client, and outlive it.
+// Instrument returns nothing that can cancel them, so a service that recreates
+// its client (reconnect, failover, per-tenant pool rebuild) would accumulate
+// callbacks observing dead clients. Setup is Instrument plus the CleanupFunc
+// that releases them; prefer it in any long-lived service.
+//
 // # Emitted telemetry
 //
 // redisotel emits db.client.operation.duration (seconds) and command spans with
