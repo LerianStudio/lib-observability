@@ -4,12 +4,16 @@ package redisobs
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/metric/embedded"
+	noopmetric "go.opentelemetry.io/otel/metric/noop"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -272,4 +276,84 @@ func TestSetup_NeverEmitsCommandOrKeyAsAttribute(t *testing.T) {
 			assert.NotContains(t, val, secretKey, "span attribute leaked redis key: %s=%s", key, val)
 		}
 	}
+}
+
+// failingMeterProvider hands out a Meter whose observable-gauge constructor
+// always fails, which is what makes redisotel.InstrumentMetrics fail for a
+// reason OTHER than an unsupported client type — the asymmetry the ordering in
+// instrument() depends on.
+type failingMeterProvider struct{ embedded.MeterProvider }
+
+func (failingMeterProvider) Meter(string, ...metric.MeterOption) metric.Meter {
+	return failingMeter{}
+}
+
+type failingMeter struct{ noopmetric.Meter }
+
+func (failingMeter) Int64ObservableUpDownCounter(
+	string, ...metric.Int64ObservableUpDownCounterOption,
+) (metric.Int64ObservableUpDownCounter, error) {
+	return nil, errors.New("instrument creation failed")
+}
+
+// TestSetup_MetricsFailureLeavesNoTracingHook is the regression guard for the
+// order of the two redisotel calls.
+//
+// go-redis hooks are additive, so any side installed before a failure is
+// installed AGAIN when the caller retries. Metrics is the only one of the two
+// that can fail for something other than an unsupported client type, so it must
+// run first: a metrics failure must leave the client untouched, and the retry
+// must produce exactly one span per command rather than two.
+//
+// Reversing the calls in instrument() makes this test fail on the retry count.
+func TestSetup_MetricsFailureLeavesNoTracingHook(t *testing.T) {
+	_, tp, spanExp := newRedisHarness(t)
+
+	client := newUnreachableClient(t)
+
+	// First attempt: metrics cannot build its instruments, so Setup fails.
+	cleanup, err := Setup(client,
+		WithMeterProvider(failingMeterProvider{}),
+		WithTracerProvider(tp),
+	)
+	require.Error(t, err, "a meter that cannot create instruments must fail Setup")
+	require.NotNil(t, cleanup)
+
+	t.Cleanup(func() { _ = cleanup() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	_ = client.Get(ctx, "some-key").Err()
+
+	require.Empty(t, spanExp.GetSpans(),
+		"a failed Setup must leave no tracing hook behind, or the retry duplicates it")
+
+	// Second attempt with a working meter: the caller retries the same client.
+	mp := sdkmetric.NewMeterProvider()
+	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
+
+	retryCleanup, err := Setup(client, WithMeterProvider(mp), WithTracerProvider(tp))
+	require.NoError(t, err)
+
+	t.Cleanup(func() { _ = retryCleanup() })
+
+	spanExp.Reset()
+
+	_ = client.Get(ctx, "another-key").Err()
+
+	// redisotel installs a dial hook as well as a process hook, so a command
+	// against an unreachable address emits both a "redis.dial" and a command
+	// span. Count the command span only: a leftover hook from the failed attempt
+	// shows up as a SECOND one of these.
+	var commandSpans int
+
+	for _, span := range spanExp.GetSpans() {
+		if span.Name == "get" {
+			commandSpans++
+		}
+	}
+
+	assert.Equal(t, 1, commandSpans,
+		"exactly one command span; two means the failed attempt left a tracing hook installed")
 }

@@ -109,21 +109,6 @@ func instrument(client redis.UniversalClient, closeChan chan struct{}, opts ...O
 	commonAttrs := make([]attribute.KeyValue, 0, 1+len(cfg.extraAttrs))
 	commonAttrs = append(commonAttrs, cfg.extraAttrs...)
 
-	tracingOpts := []redisotel.TracingOption{
-		redisotel.WithTracerProvider(cfg.tracerProvider),
-		// GUARDRAIL (ADR-004, docs/metrics-contract.md): never attach the raw
-		// command / key / value (db.statement) to spans. redisotel enables it by
-		// default.
-		redisotel.WithDBStatement(false),
-	}
-	if len(commonAttrs) > 0 {
-		tracingOpts = append(tracingOpts, redisotel.WithAttributes(commonAttrs...))
-	}
-
-	if err := redisotel.InstrumentTracing(client, tracingOpts...); err != nil {
-		return err
-	}
-
 	metricsOpts := []redisotel.MetricsOption{
 		redisotel.WithMeterProvider(cfg.meterProvider),
 	}
@@ -138,7 +123,36 @@ func instrument(client redis.UniversalClient, closeChan chan struct{}, opts ...O
 		metricsOpts = append(metricsOpts, redisotel.WithCloseChan(closeChan))
 	}
 
-	return redisotel.InstrumentMetrics(client, metricsOpts...)
+	// ORDER IS LOAD-BEARING: metrics FIRST, tracing second.
+	//
+	// go-redis hooks are additive, so a partial failure that leaves one side
+	// installed makes a caller's retry attach that side twice. The two calls are
+	// not symmetric, which is what settles the order: InstrumentTracing fails for
+	// exactly one reason, an unsupported client type, while InstrumentMetrics
+	// fails for that AND for instrument-creation errors when it registers the
+	// pool-stat callbacks.
+	//
+	// Running metrics first makes the reachable partial failure impossible: if
+	// metrics fails, tracing has not run, so nothing is installed and a retry is
+	// clean; if metrics succeeds, the client type is supported and tracing
+	// therefore cannot fail. Swapping these back reintroduces a client that
+	// double-reports spans after a retry.
+	if err := redisotel.InstrumentMetrics(client, metricsOpts...); err != nil {
+		return err
+	}
+
+	tracingOpts := []redisotel.TracingOption{
+		redisotel.WithTracerProvider(cfg.tracerProvider),
+		// GUARDRAIL (ADR-004, docs/metrics-contract.md): never attach the raw
+		// command / key / value (db.statement) to spans. redisotel enables it by
+		// default.
+		redisotel.WithDBStatement(false),
+	}
+	if len(commonAttrs) > 0 {
+		tracingOpts = append(tracingOpts, redisotel.WithAttributes(commonAttrs...))
+	}
+
+	return redisotel.InstrumentTracing(client, tracingOpts...)
 }
 
 // System returns the db.system value redisotel emits for both Redis and Valkey.
