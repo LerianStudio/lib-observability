@@ -77,7 +77,27 @@ func newConfig(opts ...Option) config {
 // Nil-safe: a nil client returns ErrNilClient and never panics. With no
 // providers configured it attaches against the no-op providers, so telemetry
 // being off never breaks the client.
+//
+// The asynchronous pool-stat instruments (db.client.connections.*) registered
+// here live as long as the meter: this call hands back nothing that can release
+// them. A caller that ever REPLACES its client — a reconnect, a failover, a
+// test that rebuilds the client per case — MUST use Setup instead, which
+// returns the cleanup that unregisters them.
 func Instrument(client redis.UniversalClient, opts ...Option) error {
+	// A nil close channel keeps this call exactly as cheap as it has always
+	// been: redisotel then starts no watcher goroutine, because there is no
+	// cleanup handle to give the caller anyway.
+	return instrument(client, nil, opts...)
+}
+
+// instrument applies the redisotel tracing and metrics hooks to client. When
+// closeChan is non-nil it is handed to InstrumentMetrics, which unregisters
+// every pool-stat registration it made once the channel is closed; a nil
+// channel disables that mechanism (and its watcher goroutine) entirely.
+//
+// Shared by Instrument and Setup so the two entry points can never drift on the
+// PII guardrail or on which providers reach redisotel.
+func instrument(client redis.UniversalClient, closeChan chan struct{}, opts ...Option) error {
 	if client == nil {
 		return ErrNilClient
 	}
@@ -109,6 +129,13 @@ func Instrument(client redis.UniversalClient, opts ...Option) error {
 	}
 	if len(commonAttrs) > 0 {
 		metricsOpts = append(metricsOpts, redisotel.WithAttributes(commonAttrs...))
+	}
+
+	// Metrics-only: the close channel releases the asynchronous pool-stat
+	// callbacks. Tracing hooks carry no registration — they are owned by the
+	// client and die with it.
+	if closeChan != nil {
+		metricsOpts = append(metricsOpts, redisotel.WithCloseChan(closeChan))
 	}
 
 	return redisotel.InstrumentMetrics(client, metricsOpts...)
