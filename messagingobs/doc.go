@@ -32,9 +32,24 @@
 // The messaging.* names/units are shared with lib-streaming (RedPanda/Kafka) so
 // a single worker dashboard is transport-agnostic.
 //
+// # Providers (zero-configuration by default)
+//
+// NewPublisherWithOptions and NewConsumerWithOptions take functional options and
+// default to the OTel global providers, like sqlobs, redisobs and httpobs. A
+// library instrumenting
+// on a service's behalf can therefore build a helper with no arguments: the
+// service gets telemetry as soon as it installs its providers
+// (Telemetry.ApplyGlobals at bootstrap), with no code change at the call site.
+//
+// Services that deliberately do not install the globals can bind explicit
+// providers with WithMeterProvider / WithTracerProvider, or pass a Telemetry
+// built by this library with WithTelemetry. The older NewPublisher/NewConsumer
+// constructors are deprecated shorthands for the latter.
+//
 // # No-op degradation (ADR-008)
 //
-// With nil telemetry (or a nil MeterProvider/MetricsFactory) the helpers still
-// return a valid context, injectable headers, and a finish func that is a
-// no-op. They never panic and never break the messaging path.
+// Until providers are installed the globals are no-op implementations, so the
+// helpers still return a valid context, injectable headers, and a finish func
+// that does nothing. Nil receivers are safe too. They never panic and never
+// break the messaging path.
 package messagingobs

@@ -241,10 +241,11 @@ func TestProduce_ErrorSetsErrorTypeLabel(t *testing.T) {
 	assert.NotEmpty(t, errType)
 }
 
-// TestProduce_NilTelemetryIsNoOp verifies the producer degrades to a safe no-op
-// that still returns usable trace headers and never panics.
-func TestProduce_NilTelemetryIsNoOp(t *testing.T) {
-	pub := NewPublisher(nil)
+// TestProduce_NoProvidersIsNoOp verifies the producer degrades to a safe no-op
+// against the (uninstalled) globals: it still returns usable trace headers and
+// never panics.
+func TestProduce_NoProvidersIsNoOp(t *testing.T) {
+	pub := NewPublisherWithOptions()
 
 	ctx, headers, finish := pub.Produce(context.Background(), ProduceParams{
 		DestinationTemplate: "x",
@@ -256,9 +257,9 @@ func TestProduce_NilTelemetryIsNoOp(t *testing.T) {
 	assert.NotPanics(t, func() { finish(nil) })
 }
 
-// TestConsume_NilTelemetryIsNoOp verifies the consumer degrades to a safe no-op.
-func TestConsume_NilTelemetryIsNoOp(t *testing.T) {
-	con := NewConsumer(nil)
+// TestConsume_NoProvidersIsNoOp verifies the consumer degrades to a safe no-op.
+func TestConsume_NoProvidersIsNoOp(t *testing.T) {
+	con := NewConsumerWithOptions()
 
 	ctx, finish := con.Consume(context.Background(), ConsumeParams{
 		Headers:             map[string]any{},
@@ -309,4 +310,143 @@ func assertNoForbiddenMessagingLabels(t *testing.T, set attribute.Set) {
 		assert.NotContains(t, val, "0f8fad5b",
 			"metric label %q leaked message id: %s", kv.Key, val)
 	}
+}
+
+// installGlobals points the OTel globals at SDK providers wired to the returned
+// reader/exporter, exactly as Telemetry.ApplyGlobals does at service bootstrap,
+// and restores the previous globals afterwards.
+func installGlobals(t *testing.T) (*sdkmetric.ManualReader, *tracetest.InMemoryExporter) {
+	t.Helper()
+
+	prevMP, prevTP := otel.GetMeterProvider(), otel.GetTracerProvider()
+
+	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
+		propagation.TraceContext{}, propagation.Baggage{},
+	))
+
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	spanExp := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(spanExp))
+
+	otel.SetMeterProvider(mp)
+	otel.SetTracerProvider(tp)
+
+	t.Cleanup(func() {
+		otel.SetMeterProvider(prevMP)
+		otel.SetTracerProvider(prevTP)
+		_ = mp.Shutdown(context.Background())
+		_ = tp.Shutdown(context.Background())
+	})
+
+	return reader, spanExp
+}
+
+// TestProduce_ZeroOptionsUsesGlobalProviders is the contract that lets a library
+// instrument on the service's behalf: with NO options at all the publisher binds
+// to the globals the service installed, so the service emits producer telemetry
+// on a dependency bump alone, without passing anything down.
+func TestProduce_ZeroOptionsUsesGlobalProviders(t *testing.T) {
+	reader, spanExp := installGlobals(t)
+
+	pub := NewPublisherWithOptions()
+
+	_, headers, finish := pub.Produce(context.Background(), ProduceParams{
+		DestinationTemplate: "transactions.{tenant}",
+		OperationName:       "publish",
+	})
+	finish(nil)
+
+	assert.True(t, hasTraceparent(headers), "trace context must be injected into the headers")
+
+	points := findHistogram(t, reader, messagingClientOperationDurationMetric)
+	require.Len(t, points, 1, "the global MeterProvider must receive the duration")
+
+	system, ok := attrString(points[0].Attributes, "messaging.system")
+	require.True(t, ok)
+	assert.Equal(t, "rabbitmq", system)
+
+	spans := spanExp.GetSpans()
+	require.Len(t, spans, 1, "the global TracerProvider must receive the PRODUCER span")
+	assert.Equal(t, defaultLibraryName, spans[0].InstrumentationScope.Name)
+}
+
+// TestConsume_ZeroOptionsUsesGlobalProviders is the consumer half of the same
+// contract.
+func TestConsume_ZeroOptionsUsesGlobalProviders(t *testing.T) {
+	reader, spanExp := installGlobals(t)
+
+	con := NewConsumerWithOptions()
+
+	_, finish := con.Consume(context.Background(), ConsumeParams{
+		Headers:             map[string]any{},
+		DestinationTemplate: "transactions.{tenant}",
+		OperationName:       "process",
+	})
+	finish(nil)
+
+	require.Len(t, findHistogram(t, reader, messagingProcessDurationMetric), 1)
+	require.Len(t, spanExp.GetSpans(), 1)
+}
+
+// TestOptions_ExplicitProvidersWinOverGlobals verifies an explicitly injected
+// provider is used instead of the installed global one.
+func TestOptions_ExplicitProvidersWinOverGlobals(t *testing.T) {
+	globalReader, _ := installGlobals(t)
+
+	ownReader := sdkmetric.NewManualReader()
+	ownMP := sdkmetric.NewMeterProvider(sdkmetric.WithReader(ownReader))
+
+	t.Cleanup(func() { _ = ownMP.Shutdown(context.Background()) })
+
+	pub := NewPublisherWithOptions(WithMeterProvider(ownMP), WithLibraryName("explicit-scope"))
+
+	_, _, finish := pub.Produce(context.Background(), ProduceParams{
+		DestinationTemplate: "x",
+		OperationName:       "publish",
+	})
+	finish(nil)
+
+	assert.Len(t, findHistogram(t, ownReader, messagingClientOperationDurationMetric), 1,
+		"the injected MeterProvider must receive the duration")
+	assert.Empty(t, findHistogram(t, globalReader, messagingClientOperationDurationMetric),
+		"the global MeterProvider must not be used when one was injected")
+}
+
+// TestOptions_NilAndEmptyValuesAreIgnored verifies the options never downgrade
+// the resolved config: a nil provider or empty name leaves the default in place,
+// as does a nil Telemetry.
+func TestOptions_NilAndEmptyValuesAreIgnored(t *testing.T) {
+	cfg := newConfig(
+		WithMeterProvider(nil),
+		WithTracerProvider(nil),
+		WithLibraryName(""),
+		WithTelemetry(nil),
+		WithTelemetry(&tracing.Telemetry{}),
+	)
+
+	assert.Equal(t, otel.GetMeterProvider(), cfg.meterProvider)
+	assert.Equal(t, otel.GetTracerProvider(), cfg.tracerProvider)
+	assert.Equal(t, defaultLibraryName, cfg.libraryName)
+}
+
+// TestNilReceiversAreSafe verifies a nil helper never panics, so a caller
+// holding an unbuilt publisher/consumer degrades instead of crashing the
+// publish path.
+func TestNilReceiversAreSafe(t *testing.T) {
+	var (
+		pub *Publisher
+		con *Consumer
+	)
+
+	assert.NotPanics(t, func() {
+		_, headers, finish := pub.Produce(nil, ProduceParams{OperationName: "publish"}) //nolint:staticcheck // nil ctx is the case under test
+		require.NotNil(t, headers)
+		finish(errors.New("boom"))
+	})
+
+	assert.NotPanics(t, func() {
+		_, finish := con.Consume(nil, ConsumeParams{OperationName: "process"}) //nolint:staticcheck // nil ctx is the case under test
+		finish(nil)
+	})
 }

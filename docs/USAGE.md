@@ -224,7 +224,10 @@ Emite `messaging.client.operation.duration` (produce) e `messaging.process.durat
 ```go
 import "github.com/LerianStudio/lib-observability/v3/messagingobs"
 
-pub := messagingobs.NewPublisher(tel)
+// Sem opções, usa os providers globais instalados no bootstrap (ApplyGlobals).
+// Para providers explícitos: messagingobs.WithTelemetry(tel),
+// messagingobs.WithMeterProvider(mp), messagingobs.WithTracerProvider(tp).
+pub := messagingobs.NewPublisherWithOptions()
 
 ctx, headers, finish := pub.Produce(ctx, messagingobs.ProduceParams{
     DestinationTemplate: "transactions.{tenant}", // LOW-CARDINALITY. NUNCA a queue/routing key concreta
@@ -239,7 +242,7 @@ finish(err) // registra a duração + error.type
 
 ### 6b. Consumer
 ```go
-con := messagingobs.NewConsumer(tel)
+con := messagingobs.NewConsumerWithOptions()
 
 ctx, finish := con.Consume(ctx, messagingobs.ConsumeParams{
     Headers:             delivery.Headers, // extrai o trace propagado

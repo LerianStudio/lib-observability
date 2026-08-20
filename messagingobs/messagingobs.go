@@ -52,23 +52,6 @@ func newDurationHistogram(meter metric.Meter, name, description string) metric.F
 	return hist
 }
 
-// telemetryEnabled reports whether the Telemetry has the components required to
-// emit metrics, mirroring the middleware gate (MeterProvider AND MetricsFactory
-// non-nil).
-func telemetryEnabled(tl *tracing.Telemetry) bool {
-	return tl != nil && tl.MeterProvider != nil && tl.MetricsFactory != nil
-}
-
-// tracerFor returns the library tracer when a TracerProvider is configured, or
-// nil otherwise (callers create no span for nil).
-func tracerFor(tl *tracing.Telemetry) trace.Tracer {
-	if tl == nil || tl.TracerProvider == nil {
-		return nil
-	}
-
-	return tl.TracerProvider.Tracer(tl.LibraryName)
-}
-
 // classifyErrorType returns a bounded error.type label for a failed messaging
 // operation. It uses the Go error type name (a bounded set for a given service),
 // never the error message, which could carry unbounded/PII content.
@@ -132,25 +115,40 @@ type FinishFunc func(err error)
 // Publisher instruments RabbitMQ produce operations. Build one with NewPublisher
 // and reuse it; the duration histogram is created once at construction.
 type Publisher struct {
-	tel  *tracing.Telemetry
-	hist metric.Float64Histogram
+	tracer trace.Tracer
+	hist   metric.Float64Histogram
 }
 
-// NewPublisher returns a Publisher bound to the given Telemetry. The duration
-// histogram is built once here (nil when telemetry is disabled), matching the
-// instrument-once pattern used across the library.
+// NewPublisher returns a Publisher bound to the given Telemetry.
+//
+// Deprecated: use NewPublisherWithOptions, which defaults to the OTel globals
+// and so can be built by a library on the service's behalf. This constructor is
+// NewPublisherWithOptions(WithTelemetry(tl)) and will be folded into it at the
+// next major.
 func NewPublisher(tl *tracing.Telemetry) *Publisher {
-	p := &Publisher{tel: tl}
+	return NewPublisherWithOptions(WithTelemetry(tl))
+}
 
-	if telemetryEnabled(tl) {
-		p.hist = newDurationHistogram(
-			tl.MeterProvider.Meter(tl.LibraryName),
+// NewPublisherWithOptions returns a Publisher for the resolved providers. With
+// no options it instruments against the OTel globals, so a library can build one
+// on the service's behalf without the service passing anything; the globals are
+// no-op until the service installs real providers (Telemetry.ApplyGlobals). Pass
+// WithMeterProvider / WithTracerProvider, or WithTelemetry, to bind explicit
+// ones.
+//
+// The duration histogram is built once here, matching the instrument-once
+// pattern used across the library.
+func NewPublisherWithOptions(opts ...Option) *Publisher {
+	cfg := newConfig(opts...)
+
+	return &Publisher{
+		tracer: cfg.tracer(),
+		hist: newDurationHistogram(
+			cfg.meter(),
 			messagingClientOperationDurationMetric,
 			"Duration of messaging producer operations.",
-		)
+		),
 	}
-
-	return p
 }
 
 // Produce starts a producer span, injects the trace context into a fresh header
@@ -165,10 +163,17 @@ func (p *Publisher) Produce(ctx context.Context, params ProduceParams) (context.
 		ctx = context.Background()
 	}
 
-	var span trace.Span
+	var (
+		span trace.Span
+		hist metric.Float64Histogram
+	)
 
-	if tracer := tracerFor(p.tel); tracer != nil {
-		ctx, span = tracer.Start(ctx, spanName(params.OperationName, params.DestinationTemplate),
+	if p != nil {
+		hist = p.hist
+	}
+
+	if p != nil && p.tracer != nil {
+		ctx, span = p.tracer.Start(ctx, spanName(params.OperationName, params.DestinationTemplate),
 			trace.WithSpanKind(trace.SpanKindProducer),
 			trace.WithAttributes(baseMessagingAttrs(params.OperationName, params.DestinationTemplate)...),
 		)
@@ -183,7 +188,7 @@ func (p *Publisher) Produce(ctx context.Context, params ProduceParams) (context.
 	start := time.Now()
 
 	finish := func(err error) {
-		recordMessagingDuration(ctx, p.hist, params.OperationName, params.DestinationTemplate, "", start, err)
+		recordMessagingDuration(ctx, hist, params.OperationName, params.DestinationTemplate, "", start, err)
 		finalizeSpan(span, err)
 	}
 
@@ -193,24 +198,33 @@ func (p *Publisher) Produce(ctx context.Context, params ProduceParams) (context.
 // Consumer instruments RabbitMQ consume/process operations. Build one with
 // NewConsumer and reuse it.
 type Consumer struct {
-	tel  *tracing.Telemetry
-	hist metric.Float64Histogram
+	tracer trace.Tracer
+	hist   metric.Float64Histogram
 }
 
-// NewConsumer returns a Consumer bound to the given Telemetry. The process
-// duration histogram is built once here (nil when telemetry is disabled).
+// NewConsumer returns a Consumer bound to the given Telemetry.
+//
+// Deprecated: use NewConsumerWithOptions, which defaults to the OTel globals.
+// This constructor is NewConsumerWithOptions(WithTelemetry(tl)) and will be
+// folded into it at the next major.
 func NewConsumer(tl *tracing.Telemetry) *Consumer {
-	c := &Consumer{tel: tl}
+	return NewConsumerWithOptions(WithTelemetry(tl))
+}
 
-	if telemetryEnabled(tl) {
-		c.hist = newDurationHistogram(
-			tl.MeterProvider.Meter(tl.LibraryName),
+// NewConsumerWithOptions returns a Consumer for the resolved providers,
+// following the same global-provider default as NewPublisherWithOptions. The
+// process duration histogram is built once here.
+func NewConsumerWithOptions(opts ...Option) *Consumer {
+	cfg := newConfig(opts...)
+
+	return &Consumer{
+		tracer: cfg.tracer(),
+		hist: newDurationHistogram(
+			cfg.meter(),
 			messagingProcessDurationMetric,
 			"Duration of messaging consumer processing.",
-		)
+		),
 	}
-
-	return c
 }
 
 // Consume extracts the trace context from the inbound headers (joining the
@@ -228,16 +242,23 @@ func (c *Consumer) Consume(ctx context.Context, params ConsumeParams) (context.C
 	// even when this service's telemetry is disabled.
 	ctx = tracing.ExtractTraceContextFromQueueHeaders(ctx, params.Headers)
 
-	var span trace.Span
+	var (
+		span trace.Span
+		hist metric.Float64Histogram
+	)
 
-	if tracer := tracerFor(c.tel); tracer != nil {
+	if c != nil {
+		hist = c.hist
+	}
+
+	if c != nil && c.tracer != nil {
 		attrs := baseMessagingAttrs(params.OperationName, params.DestinationTemplate)
 		if params.ConsumerGroup != "" {
 			attrs = append(attrs, attribute.String("messaging.consumer.group.name",
 				constant.SanitizeMetricLabel(params.ConsumerGroup)))
 		}
 
-		ctx, span = tracer.Start(ctx, spanName(params.OperationName, params.DestinationTemplate),
+		ctx, span = c.tracer.Start(ctx, spanName(params.OperationName, params.DestinationTemplate),
 			trace.WithSpanKind(trace.SpanKindConsumer),
 			trace.WithAttributes(attrs...),
 		)
@@ -246,7 +267,7 @@ func (c *Consumer) Consume(ctx context.Context, params ConsumeParams) (context.C
 	start := time.Now()
 
 	finish := func(err error) {
-		recordMessagingDuration(ctx, c.hist, params.OperationName, params.DestinationTemplate,
+		recordMessagingDuration(ctx, hist, params.OperationName, params.DestinationTemplate,
 			params.ConsumerGroup, start, err)
 		finalizeSpan(span, err)
 	}
