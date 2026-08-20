@@ -24,9 +24,9 @@ const connectionOpenMetric = "db.sql.connection.open"
 // these tests is that it is NOT empty, so Setup is allowed to swap the handle.
 const fakeDSN = "fake://db"
 
-// dsnRequiredDriver stands in for the production drivers (pgx, go-sql-driver)
-// that resolve the server address from the DSN: opening with an empty one fails.
-// It exists to prove WHY Setup refuses to swap a handle it has no DSN for.
+// dsnRequiredDriver is a test-only driver that requires a non-empty DSN:
+// opening with an empty one fails. It exists to prove WHY Setup refuses to
+// swap a handle it has no DSN for.
 type dsnRequiredDriver struct{}
 
 func (dsnRequiredDriver) Open(dsn string) (driver.Conn, error) {

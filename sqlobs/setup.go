@@ -69,9 +69,10 @@ func registerStats(db *sql.DB, system System, opts ...Option) (CleanupFunc, erro
 //	db.SetMaxOpenConns(25)
 //
 // A NON-EMPTY WithDSN IS REQUIRED, and enforced: a *sql.DB does not expose the
-// DSN it was opened with, so with none supplied (omitted, or empty) the
-// replacement pool would have nothing to dial. Setup therefore refuses the swap —
-// it returns db untouched (still open), a no-op cleanup, and ErrDSNRequired.
+// DSN it was opened with, so with none supplied (omitted, or empty) Setup cannot
+// safely recreate the original connection configuration — the replacement could
+// fail or connect to unintended driver defaults. Setup therefore refuses the swap
+// — it returns db untouched (still open), a no-op cleanup, and ErrDSNRequired.
 // Prefer SetupOpen when the DSN is known at construction time — it never creates
 // the throwaway pool at all.
 //
