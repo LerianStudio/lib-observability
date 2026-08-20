@@ -68,11 +68,7 @@ func findInt64SumByName(t *testing.T, reader *sdkmetric.ManualReader, name strin
 
 			s, ok := m.Data.(metricdata.Sum[int64])
 			require.True(t, ok, "expected Int64 sum for %s, got %T", m.Name, m.Data)
-			expectedUnit := "{request}"
-			if name == authenticatedTenantHTTPServerErrorsMetric {
-				expectedUnit = "{error}"
-			}
-			require.Equal(t, expectedUnit, m.Unit)
+			require.Equal(t, "{request}", m.Unit)
 
 			return &s
 		}
@@ -111,14 +107,16 @@ func TestAuthenticatedTenantHTTPMetrics_RecordsExplicitlyAttestedIdentity(t *tes
 	assert.Equal(t, "/api/users/:id", mustAttrValue(t, counterDP.Attributes, "http.route"))
 	assertExactAttributeKeys(t, counterDP.Attributes, constant.AttrKeyTenantID, "http.route")
 
-	errors := findInt64SumByName(t, reader, authenticatedTenantHTTPServerErrorsMetric)
-	require.NotNil(t, errors)
-	require.Len(t, errors.DataPoints, 1)
-	errorDP := errors.DataPoints[0]
+	responses5xx := findInt64SumByName(t, reader, authenticatedTenantHTTPServerResponses5xxMetric)
+	require.NotNil(t, responses5xx)
+	require.Len(t, responses5xx.DataPoints, 1)
+	errorDP := responses5xx.DataPoints[0]
 	assert.EqualValues(t, 1, errorDP.Value)
 	assert.Equal(t, tenantID.String(), mustAttrValue(t, errorDP.Attributes, constant.AttrKeyTenantID))
 	assert.Equal(t, "/api/users/:id", mustAttrValue(t, errorDP.Attributes, "http.route"))
 	assertExactAttributeKeys(t, errorDP.Attributes, constant.AttrKeyTenantID, "http.route")
+	assert.Nil(t, findInt64SumByName(t, reader, "lerian.http.server.errors.by_tenant"),
+		"the unreleased legacy name must not be emitted alongside responses_5xx")
 	assert.Nil(t, findInt64SumByName(t, reader, authenticatedTenantHTTPServerResponses4xxMetric))
 
 	latency := findFloat64HistogramByName(t, reader, authenticatedTenantHTTPServerLatencyMetric)
@@ -132,7 +130,7 @@ func TestAuthenticatedTenantHTTPMetrics_RecordsExplicitlyAttestedIdentity(t *tes
 		constant.AttrKeyTenantID, "http.response.status_class")
 }
 
-func TestAuthenticatedTenantHTTPMetrics_ErrorsCounterOmitsNonServerErrors(t *testing.T) {
+func TestAuthenticatedTenantHTTPMetrics_Responses5xxCounterOmitsOtherStatusClasses(t *testing.T) {
 	tel, reader := newMetricsHarness(t)
 	tenantID := uuid.New()
 
@@ -153,7 +151,7 @@ func TestAuthenticatedTenantHTTPMetrics_ErrorsCounterOmitsNonServerErrors(t *tes
 	require.NotNil(t, requests)
 	require.Len(t, requests.DataPoints, 1)
 	assert.EqualValues(t, 1, requests.DataPoints[0].Value)
-	assert.Nil(t, findInt64SumByName(t, reader, authenticatedTenantHTTPServerErrorsMetric))
+	assert.Nil(t, findInt64SumByName(t, reader, authenticatedTenantHTTPServerResponses5xxMetric))
 
 	responses4xx := findInt64SumByName(t, reader, authenticatedTenantHTTPServerResponses4xxMetric)
 	require.NotNil(t, responses4xx)
@@ -184,10 +182,10 @@ func TestAuthenticatedTenantHTTPMetrics_Responses4xxCounterOmitsOtherStatusClass
 	defer func() { require.NoError(t, resp.Body.Close()) }()
 
 	assert.Nil(t, findInt64SumByName(t, reader, authenticatedTenantHTTPServerResponses4xxMetric))
-	errors := findInt64SumByName(t, reader, authenticatedTenantHTTPServerErrorsMetric)
-	require.NotNil(t, errors)
-	require.Len(t, errors.DataPoints, 1)
-	assert.EqualValues(t, 1, errors.DataPoints[0].Value)
+	responses5xx := findInt64SumByName(t, reader, authenticatedTenantHTTPServerResponses5xxMetric)
+	require.NotNil(t, responses5xx)
+	require.Len(t, responses5xx.DataPoints, 1)
+	assert.EqualValues(t, 1, responses5xx.DataPoints[0].Value)
 }
 
 func TestAuthenticatedTenantHTTPMetrics_IsDisabledByDefault(t *testing.T) {
@@ -208,7 +206,7 @@ func TestAuthenticatedTenantHTTPMetrics_IsDisabledByDefault(t *testing.T) {
 	defer func() { require.NoError(t, resp.Body.Close()) }()
 
 	assert.Nil(t, findInt64SumByName(t, reader, authenticatedTenantHTTPServerRequestsMetric))
-	assert.Nil(t, findInt64SumByName(t, reader, authenticatedTenantHTTPServerErrorsMetric))
+	assert.Nil(t, findInt64SumByName(t, reader, authenticatedTenantHTTPServerResponses5xxMetric))
 	assert.Nil(t, findInt64SumByName(t, reader, authenticatedTenantHTTPServerResponses4xxMetric))
 	assert.Nil(t, findFloat64HistogramByName(t, reader, authenticatedTenantHTTPServerLatencyMetric))
 	assert.NotNil(t, findFloat64HistogramByName(t, reader, httpServerRequestDurationMetric))
@@ -249,7 +247,7 @@ func TestAuthenticatedTenantHTTPMetrics_IgnoresUntrustedIdentitySources(t *testi
 
 	assert.Nil(t, findInt64SumByName(t, reader, authenticatedTenantHTTPServerRequestsMetric),
 		"headers, baggage, gRPC metadata, and AttrBag attributes must not mint tenant series")
-	assert.Nil(t, findInt64SumByName(t, reader, authenticatedTenantHTTPServerErrorsMetric),
+	assert.Nil(t, findInt64SumByName(t, reader, authenticatedTenantHTTPServerResponses5xxMetric),
 		"headers, baggage, gRPC metadata, and AttrBag attributes must not mint tenant series")
 	assert.Nil(t, findInt64SumByName(t, reader, authenticatedTenantHTTPServerResponses4xxMetric),
 		"headers, baggage, gRPC metadata, and AttrBag attributes must not mint tenant series")
@@ -283,7 +281,7 @@ func TestAuthenticatedTenantHTTPMetrics_OmitsNilTenant(t *testing.T) {
 	defer func() { require.NoError(t, resp.Body.Close()) }()
 
 	assert.Nil(t, findInt64SumByName(t, reader, authenticatedTenantHTTPServerRequestsMetric))
-	assert.Nil(t, findInt64SumByName(t, reader, authenticatedTenantHTTPServerErrorsMetric))
+	assert.Nil(t, findInt64SumByName(t, reader, authenticatedTenantHTTPServerResponses5xxMetric))
 	assert.Nil(t, findInt64SumByName(t, reader, authenticatedTenantHTTPServerResponses4xxMetric))
 	assert.Nil(t, findFloat64HistogramByName(t, reader, authenticatedTenantHTTPServerLatencyMetric))
 }
@@ -500,7 +498,7 @@ func TestAuthenticatedTenantHTTPMetrics_GRPCMetadataDoesNotMintTenant(t *testing
 	defer func() { require.NoError(t, resp.Body.Close()) }()
 
 	assert.Nil(t, findInt64SumByName(t, reader, authenticatedTenantHTTPServerRequestsMetric))
-	assert.Nil(t, findInt64SumByName(t, reader, authenticatedTenantHTTPServerErrorsMetric))
+	assert.Nil(t, findInt64SumByName(t, reader, authenticatedTenantHTTPServerResponses5xxMetric))
 	assert.Nil(t, findInt64SumByName(t, reader, authenticatedTenantHTTPServerResponses4xxMetric))
 	assert.Nil(t, findFloat64HistogramByName(t, reader, authenticatedTenantHTTPServerLatencyMetric))
 }
@@ -583,7 +581,7 @@ func TestAuthenticatedTenantHTTPMetrics_DocumentedScenarioDoesNotOverflow(t *tes
 	tel, reader := newMetricsHarness(t)
 	instruments := newHTTPServerInstruments(tel, true)
 	require.NotNil(t, instruments.tenantRequests)
-	require.NotNil(t, instruments.tenantErrors)
+	require.NotNil(t, instruments.tenant5xx)
 	require.NotNil(t, instruments.tenant4xx)
 	require.NotNil(t, instruments.tenantLatency)
 
@@ -594,7 +592,7 @@ func TestAuthenticatedTenantHTTPMetrics_DocumentedScenarioDoesNotOverflow(t *tes
 			routeAttr := attribute.String("http.route", fmt.Sprintf("/route/%d", routeIndex))
 			attrs := metric.WithAttributes(tenantAttr, routeAttr)
 			instruments.tenantRequests.Add(ctx, 1, attrs)
-			instruments.tenantErrors.Add(ctx, 1, attrs)
+			instruments.tenant5xx.Add(ctx, 1, attrs)
 			instruments.tenant4xx.Add(ctx, 1, attrs)
 		}
 		for _, statusClass := range statusClasses {
@@ -610,10 +608,10 @@ func TestAuthenticatedTenantHTTPMetrics_DocumentedScenarioDoesNotOverflow(t *tes
 	require.Len(t, requests.DataPoints, tenantCount*routeCount)
 	assertNoOverflowInt64(t, requests.DataPoints)
 
-	errors := findInt64SumByName(t, reader, authenticatedTenantHTTPServerErrorsMetric)
-	require.NotNil(t, errors)
-	require.Len(t, errors.DataPoints, tenantCount*routeCount)
-	assertNoOverflowInt64(t, errors.DataPoints)
+	responses5xx := findInt64SumByName(t, reader, authenticatedTenantHTTPServerResponses5xxMetric)
+	require.NotNil(t, responses5xx)
+	require.Len(t, responses5xx.DataPoints, tenantCount*routeCount)
+	assertNoOverflowInt64(t, responses5xx.DataPoints)
 
 	responses4xx := findInt64SumByName(t, reader, authenticatedTenantHTTPServerResponses4xxMetric)
 	require.NotNil(t, responses4xx)

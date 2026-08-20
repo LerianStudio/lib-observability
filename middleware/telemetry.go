@@ -39,10 +39,11 @@ const httpServerRequestDurationMetric = "http.server.request.duration"
 // routes produce 1,500 attribute sets, below the OTel SDK default limit of 2,000.
 const authenticatedTenantHTTPServerRequestsMetric = "lerian.http.server.requests.by_tenant"
 
-// authenticatedTenantHTTPServerErrorsMetric is an opt-in per-tenant server-error
-// counter. Keeping failures in a separate instrument preserves route-level error
-// rates without multiplying the request counter by status values.
-const authenticatedTenantHTTPServerErrorsMetric = "lerian.http.server.errors.by_tenant"
+// authenticatedTenantHTTPServerResponses5xxMetric is an opt-in per-tenant
+// counter for requests resulting in HTTP 5xx responses. Keeping failures in a
+// separate instrument preserves route-level error rates without multiplying the
+// request counter by status values.
+const authenticatedTenantHTTPServerResponses5xxMetric = "lerian.http.server.responses_5xx.by_tenant"
 
 // authenticatedTenantHTTPServerResponses4xxMetric is an opt-in per-tenant
 // counter for requests resulting in HTTP 4xx responses. It deliberately carries
@@ -114,17 +115,18 @@ func newAuthenticatedTenantHTTPRequestsCounter(meter metric.Meter) metric.Int64C
 	return counter
 }
 
-// newAuthenticatedTenantHTTPErrorsCounter builds the opt-in per-tenant server-
-// error counter. Returns nil if the meter is nil or instrument creation fails.
-func newAuthenticatedTenantHTTPErrorsCounter(meter metric.Meter) metric.Int64Counter {
+// newAuthenticatedTenantHTTPResponses5xxCounter builds the opt-in per-tenant
+// HTTP 5xx response counter. Returns nil if the meter is nil or instrument
+// creation fails.
+func newAuthenticatedTenantHTTPResponses5xxCounter(meter metric.Meter) metric.Int64Counter {
 	if meter == nil {
 		return nil
 	}
 
 	counter, err := meter.Int64Counter(
-		authenticatedTenantHTTPServerErrorsMetric,
-		metric.WithUnit("{error}"),
-		metric.WithDescription("Count of HTTP server errors partitioned by authenticated tenant."),
+		authenticatedTenantHTTPServerResponses5xxMetric,
+		metric.WithUnit("{request}"),
+		metric.WithDescription("Count of HTTP server requests resulting in 5xx responses partitioned by authenticated tenant."),
 	)
 	if err != nil {
 		return nil
@@ -276,7 +278,7 @@ type httpServerInstruments struct {
 	duration       metric.Float64Histogram
 	activeRequests metric.Int64UpDownCounter
 	tenantRequests metric.Int64Counter
-	tenantErrors   metric.Int64Counter
+	tenant5xx      metric.Int64Counter
 	tenant4xx      metric.Int64Counter
 	tenantLatency  metric.Float64Histogram
 }
@@ -302,7 +304,7 @@ func newHTTPServerInstruments(
 	}
 
 	instruments.tenantRequests = newAuthenticatedTenantHTTPRequestsCounter(meter)
-	instruments.tenantErrors = newAuthenticatedTenantHTTPErrorsCounter(meter)
+	instruments.tenant5xx = newAuthenticatedTenantHTTPResponses5xxCounter(meter)
 	instruments.tenant4xx = newAuthenticatedTenantHTTPResponses4xxCounter(meter)
 	instruments.tenantLatency = newAuthenticatedTenantHTTPLatencyHistogram(meter)
 
@@ -684,7 +686,7 @@ func recordAuthenticatedTenantHTTPMetrics(
 	statusCode int,
 ) {
 	if c == nil || (instruments.tenantRequests == nil &&
-		instruments.tenantErrors == nil &&
+		instruments.tenant5xx == nil &&
 		instruments.tenant4xx == nil &&
 		instruments.tenantLatency == nil) {
 		return
@@ -708,8 +710,8 @@ func recordAuthenticatedTenantHTTPMetrics(
 		instruments.tenantRequests.Add(ctx, 1, metric.WithAttributes(routeAttrs...))
 	}
 
-	if instruments.tenantErrors != nil && isHTTPServerError(statusCode) {
-		instruments.tenantErrors.Add(ctx, 1, metric.WithAttributes(routeAttrs...))
+	if instruments.tenant5xx != nil && isHTTPServerError(statusCode) {
+		instruments.tenant5xx.Add(ctx, 1, metric.WithAttributes(routeAttrs...))
 	}
 
 	if instruments.tenant4xx != nil && isHTTPClientError(statusCode) {

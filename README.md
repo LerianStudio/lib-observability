@@ -148,7 +148,7 @@ The instruments divide responsibility deliberately:
 - `lerian.http.server.responses_4xx.by_tenant` counts HTTP 4xx responses by
   authenticated tenant and normalized route. Exact status codes stay out of the
   metric to prevent another cardinality multiplier.
-- `lerian.http.server.errors.by_tenant` counts HTTP 5xx responses by authenticated
+- `lerian.http.server.responses_5xx.by_tenant` counts HTTP 5xx responses by authenticated
   tenant and normalized route. Dividing it by the request counter gives the
   route-level server-error rate.
 - `lerian.http.server.latency.by_tenant` provides p50/p95/p99 by authenticated
@@ -162,7 +162,7 @@ This split is a correctness boundary, not only a cost optimization. With the
 current 14 explicit boundaries, a Prometheus histogram costs 17 series per
 attribute set; a counter costs one. For 50 tenants, 30 routes, and 6 bounded
 status classes, the four tenant instruments produce at most 1,500 request
-sets, 1,500 4xx-response sets, 1,500 5xx-error sets, and 300 latency sets
+sets, 1,500 4xx-response sets, 1,500 5xx-response sets, and 300 latency sets
 (about 9,600 Prometheus series).
 Each instrument stays below the OTel SDK default 2,000-set limit. Putting route
 and status on one counter would instead create 9,000 sets and collapse 7,001 into
