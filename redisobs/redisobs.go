@@ -30,7 +30,7 @@ func isNilClient(client redis.UniversalClient) bool {
 
 	v := reflect.ValueOf(client)
 
-	return v.Kind() == reflect.Ptr && v.IsNil()
+	return v.Kind() == reflect.Pointer && v.IsNil()
 }
 
 // config holds resolved helper options.
