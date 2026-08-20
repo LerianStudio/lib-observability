@@ -10,9 +10,9 @@
    - Leitura em ms é responsabilidade do PAINEL: no Grafana, unidade do campo = `seconds (s)` → formata "50 ms"/"1.2 s" automaticamente. Fallback em query: `... * 1000` (fator 1000, multiplica; NÃO converte o label `le` de heatmap/bucket).
    - NÃO dual-emitir (ms+s) na lib. NÃO converter no collector. Compat legacy de dashboards antigos migra p/ unidade-do-painel.
 2. **Instrumento criado UMA vez** na construção (nunca por request). Record é **no-op** quando o instrumento é nil (telemetria desabilitada) — chamável incondicionalmente, nunca panic, nunca afeta o request path.
-3. **Labels devem ter cardinalidade controlada.** Dimensões nativas são bounded; `tenant.id` é a única exceção opt-in e sua cardinalidade é limitada operacionalmente ao conjunto de tenants autenticados. O serviço que habilita a métrica deve monitorar esse conjunto. Ver lista PROIBIDA abaixo. Cada valor distinto de um label multiplica séries.
-4. **Nomes = OTel semconv estável.** Não inventar chaves; reusar `constants/opentelemetry.go`.
-5. **tenant.id** nunca entra automaticamente em métricas HTTP. É permitido somente na métrica HTTP opt-in por tenant, a partir de identidade autenticada explicitamente no contexto da aplicação; header, baggage, metadata e AttrBag não são fontes confiáveis.
+3. **Cardinalidade é calculada, não estimada.** Cada combinação de atributos custa 1 série num counter e `bucket_count + 2` num histograma Prometheus (buckets, `_sum`, `_count`; hoje 17). O SDK OTel retém no máximo 2.000 attribute-sets por instrumento e colapsa o excedente em `otel.metric.overflow=true`, descartando a identidade do tenant. Portanto, o limite deve ser respeitado separadamente por instrumento. No cenário de 50 tenants, 30 rotas e 6 classes de status: request counter = 1.500 sets; error counter = até 1.500; latency histogram = 300 sets / 5.100 séries; total aproximado = 8.100 séries. Um único counter com tenant × rota × status teria 9.000 sets e já quebraria o filtro por tenant. O orçamento não é garantia universal: cada adotante deve recalcular tenants autenticados × rotas normalizadas e manter cada instrumento abaixo de 2.000 sets. Identidade entra em counter dimensionado ou trace, nunca em histograma de alta dimensão.
+4. **Nomes = OTel semconv estável.** Não inventar chaves em instrumentos semconv. Quando a semconv proíbe estender uma métrica estável com identidade, criar instrumento próprio sob `lerian.` em vez de contaminar o nome estável.
+5. **tenant.id** nunca entra em métricas HTTP padrão nem em métricas de infra (`sqlobs`, `redisobs`, `messagingobs`): esses recursos são compartilhados entre tenants e o label seria semanticamente errado. É permitido somente nas métricas `lerian.*.by_tenant` opt-in, a partir de identidade autenticada explicitamente no contexto da aplicação; header, baggage, metadata e AttrBag não são fontes confiáveis.
 
 ## Buckets advisory (por sinal)
 
@@ -26,7 +26,9 @@
 | Métrica | Tipo | Unidade | Labels permitidos | Estabilidade |
 |---|---|---|---|---|
 | `http.server.request.duration` | Histogram | s | http.request.method, http.response.status_code, http.route, error.type | STABLE (já existe) |
-| `lerian.http.server.request.duration.by_tenant` | Histogram | s | http.request.method, http.response.status_code, http.route, error.type, tenant.id autenticado | OPT-IN |
+| `lerian.http.server.requests.by_tenant` | Counter | {request} | tenant.id autenticado, http.route | OPT-IN |
+| `lerian.http.server.errors.by_tenant` | Counter | {error} | tenant.id autenticado, http.route | OPT-IN; somente HTTP 5xx |
+| `lerian.http.server.latency.by_tenant` | Histogram | s | tenant.id autenticado, http.response.status_class (1xx–5xx, other) | OPT-IN |
 | `http.client.request.duration` | Histogram | s | http.request.method, http.response.status_code, server.address, error.type | STABLE (já existe) |
 | `http.server.active_requests` | UpDownCounter | {request} | http.request.method, http.route (opcional) | (T4) |
 | `rpc.server.duration`¹ | Histogram | s | rpc.system, rpc.method, rpc.grpc.status_code, error.type, tenant.id | (T2) |

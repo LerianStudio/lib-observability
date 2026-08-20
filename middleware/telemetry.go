@@ -10,6 +10,7 @@ package middleware
 import (
 	"context"
 	"errors"
+	"net/http"
 	"reflect"
 	"strconv"
 	"strings"
@@ -33,11 +34,23 @@ import (
 // for HTTP server request duration. Recorded as a Float64 histogram in seconds.
 const httpServerRequestDurationMetric = "http.server.request.duration"
 
-// authenticatedTenantHTTPServerRequestDurationMetric is an opt-in HTTP server
-// duration histogram partitioned by identity already authenticated by the
-// application. It never derives tenant identity from transport-controlled
-// headers, baggage, metadata, or generic span attributes.
-const authenticatedTenantHTTPServerRequestDurationMetric = "lerian.http.server.request.duration.by_tenant"
+// authenticatedTenantHTTPServerRequestsMetric is an opt-in per-tenant request
+// counter. It deliberately carries only tenant and route: 50 tenants across 30
+// routes produce 1,500 attribute sets, below the OTel SDK default limit of 2,000.
+const authenticatedTenantHTTPServerRequestsMetric = "lerian.http.server.requests.by_tenant"
+
+// authenticatedTenantHTTPServerErrorsMetric is an opt-in per-tenant server-error
+// counter. Keeping failures in a separate instrument preserves route-level error
+// rates without multiplying the request counter by status values.
+const authenticatedTenantHTTPServerErrorsMetric = "lerian.http.server.errors.by_tenant"
+
+// authenticatedTenantHTTPServerLatencyMetric is an opt-in per-tenant latency
+// histogram. It deliberately omits http.route and http.request.method: each
+// label multiplies series by bucket_count+2, and the OTel SDK drops tenant
+// identity into an otel.metric.overflow bucket past 2000 attribute sets.
+// Response statuses are normalized to a bounded class before recording.
+// Per-route latency is a trace-level question.
+const authenticatedTenantHTTPServerLatencyMetric = "lerian.http.server.latency.by_tenant"
 
 // httpServerActiveRequestsMetric is the OpenTelemetry semantic-convention metric
 // name for the number of in-flight HTTP server requests. Recorded as an Int64
@@ -76,16 +89,54 @@ func newHTTPServerDurationHistogram(meter metric.Meter) metric.Float64Histogram 
 	return hist
 }
 
-// newAuthenticatedTenantHTTPServerDurationHistogram builds the opt-in
-// tenant-attributed HTTP duration histogram. It intentionally uses a separate
-// instrument so the standard HTTP RED metric remains identity-free.
-func newAuthenticatedTenantHTTPServerDurationHistogram(meter metric.Meter) metric.Float64Histogram {
+// newAuthenticatedTenantHTTPRequestsCounter builds the opt-in per-tenant request
+// counter. Returns nil if the meter is nil or instrument creation fails.
+func newAuthenticatedTenantHTTPRequestsCounter(meter metric.Meter) metric.Int64Counter {
+	if meter == nil {
+		return nil
+	}
+
+	counter, err := meter.Int64Counter(
+		authenticatedTenantHTTPServerRequestsMetric,
+		metric.WithUnit("{request}"),
+		metric.WithDescription("Count of HTTP server requests partitioned by authenticated tenant."),
+	)
+	if err != nil {
+		return nil
+	}
+
+	return counter
+}
+
+// newAuthenticatedTenantHTTPErrorsCounter builds the opt-in per-tenant server-
+// error counter. Returns nil if the meter is nil or instrument creation fails.
+func newAuthenticatedTenantHTTPErrorsCounter(meter metric.Meter) metric.Int64Counter {
+	if meter == nil {
+		return nil
+	}
+
+	counter, err := meter.Int64Counter(
+		authenticatedTenantHTTPServerErrorsMetric,
+		metric.WithUnit("{error}"),
+		metric.WithDescription("Count of HTTP server errors partitioned by authenticated tenant."),
+	)
+	if err != nil {
+		return nil
+	}
+
+	return counter
+}
+
+// newAuthenticatedTenantHTTPLatencyHistogram builds the opt-in per-tenant latency
+// histogram. Shares httpServerDurationBuckets with the standard metric so both
+// are directly comparable. Returns nil if the meter is nil or creation fails.
+func newAuthenticatedTenantHTTPLatencyHistogram(meter metric.Meter) metric.Float64Histogram {
 	if meter == nil {
 		return nil
 	}
 
 	hist, err := meter.Float64Histogram(
-		authenticatedTenantHTTPServerRequestDurationMetric,
+		authenticatedTenantHTTPServerLatencyMetric,
 		metric.WithUnit("s"),
 		metric.WithDescription("Duration of HTTP server requests partitioned by authenticated tenant."),
 		metric.WithExplicitBucketBoundaries(httpServerDurationBuckets...),
@@ -192,31 +243,42 @@ func NewTelemetryMiddleware(tl *tracing.Telemetry) *TelemetryMiddleware {
 	return &TelemetryMiddleware{Telemetry: tl}
 }
 
+// httpServerInstruments groups the HTTP server instruments built once at
+// handler-construction time. A struct (rather than positional returns) makes it
+// impossible to transpose the standard and per-tenant instruments.
+type httpServerInstruments struct {
+	duration       metric.Float64Histogram
+	activeRequests metric.Int64UpDownCounter
+	tenantRequests metric.Int64Counter
+	tenantErrors   metric.Int64Counter
+	tenantLatency  metric.Float64Histogram
+}
+
 func newHTTPServerInstruments(
 	tl *tracing.Telemetry,
 	enableAuthenticatedTenantMetrics bool,
-) (
-	metric.Float64Histogram,
-	metric.Float64Histogram,
-	metric.Int64UpDownCounter,
-) {
+) httpServerInstruments {
 	// MetricsFactory presence is the canonical "metrics enabled" signal across
 	// the library even though these instruments are built from MeterProvider.
 	if tl == nil || tl.MeterProvider == nil || tl.MetricsFactory == nil {
-		return nil, nil, nil
+		return httpServerInstruments{}
 	}
 
 	meter := tl.MeterProvider.Meter(tl.LibraryName)
-	durationHistogram := newHTTPServerDurationHistogram(meter)
-	activeRequests := newActiveRequestsCounter(meter)
-
-	if !enableAuthenticatedTenantMetrics {
-		return durationHistogram, nil, activeRequests
+	instruments := httpServerInstruments{
+		duration:       newHTTPServerDurationHistogram(meter),
+		activeRequests: newActiveRequestsCounter(meter),
 	}
 
-	return durationHistogram,
-		newAuthenticatedTenantHTTPServerDurationHistogram(meter),
-		activeRequests
+	if !enableAuthenticatedTenantMetrics {
+		return instruments
+	}
+
+	instruments.tenantRequests = newAuthenticatedTenantHTTPRequestsCounter(meter)
+	instruments.tenantErrors = newAuthenticatedTenantHTTPErrorsCounter(meter)
+	instruments.tenantLatency = newAuthenticatedTenantHTTPLatencyHistogram(meter)
+
+	return instruments
 }
 
 // WithTelemetry is a middleware that adds tracing to the context.
@@ -228,17 +290,23 @@ func newHTTPServerInstruments(
 // telemetry, nil MeterProvider, nil MetricsFactory, excluded routes, and
 // instrument creation errors all silently skip the metric without affecting
 // the request path or existing span behavior.
+// For the opt-in per-tenant variant see WithAuthenticatedTenantHTTPMetrics.
+// The two are mutually exclusive - registering both double-records every metric.
 func (tm *TelemetryMiddleware) WithTelemetry(tl *tracing.Telemetry, excludedRoutes ...string) fiber.Handler {
 	return tm.withTelemetry(tl, false, excludedRoutes...)
 }
 
 // WithAuthenticatedTenantHTTPMetrics adds the standard HTTP telemetry and the
-// separate lerian.http.server.request.duration.by_tenant histogram. The tenant
-// metric is recorded only when an authentication layer has explicitly
+// separate opt-in per-tenant request/error counters and latency histogram. The tenant
+// metrics are recorded only when an authentication layer has explicitly
 // populated the request context with
 // observability.ContextWithAuthenticatedTenantID. Client-controlled headers,
 // baggage, metadata, and generic span attributes are never accepted as an
 // identity source.
+//
+// This method already includes the standard HTTP telemetry. Do NOT also register
+// WithTelemetry on the same app: both would record http.server.request.duration,
+// doubling every observation of the global RED metric.
 func (tm *TelemetryMiddleware) WithAuthenticatedTenantHTTPMetrics(
 	tl *tracing.Telemetry,
 	excludedRoutes ...string,
@@ -261,8 +329,7 @@ func (tm *TelemetryMiddleware) withTelemetry(
 		bootstrapTelemetry = tm.Telemetry
 	}
 
-	durationHistogram, authenticatedTenantDurationHistogram, activeRequests :=
-		newHTTPServerInstruments(bootstrapTelemetry, enableAuthenticatedTenantMetrics)
+	instruments := newHTTPServerInstruments(bootstrapTelemetry, enableAuthenticatedTenantMetrics)
 
 	// Same hoisting rationale as the histogram above: read once at
 	// construction time rather than on every request.
@@ -308,21 +375,17 @@ func (tm *TelemetryMiddleware) withTelemetry(
 		// before c.Next() and decrement on return via the returned closure, so
 		// the counter reflects concurrency across both the tracing and
 		// no-tracer paths below. No-op when the instrument is nil.
-		activeDone := trackActiveRequest(c.Context(), activeRequests, method)
+		activeDone := trackActiveRequest(c.Context(), instruments.activeRequests, method)
 		defer activeDone()
 
 		if effectiveTelemetry.TracerProvider == nil {
 			returnedErr := c.Next()
 			statusCode, chainErr, _ := resolveHTTPResponse(c, returnedErr)
 
-			recordHTTPServerDuration(c, durationHistogram, method, requestStart, statusCode)
-			recordAuthenticatedTenantHTTPServerDuration(
-				c,
-				authenticatedTenantDurationHistogram,
-				method,
-				requestStart,
-				statusCode,
-			)
+			durationSeconds := time.Since(requestStart).Seconds()
+
+			recordHTTPServerDuration(c, instruments.duration, method, durationSeconds, statusCode)
+			recordAuthenticatedTenantHTTPMetrics(c, instruments, durationSeconds, statusCode)
 
 			return chainErr
 		}
@@ -393,14 +456,10 @@ func (tm *TelemetryMiddleware) withTelemetry(
 			handlerErr:     handlerErr,
 		})
 
-		recordHTTPServerDuration(c, durationHistogram, method, requestStart, statusCode)
-		recordAuthenticatedTenantHTTPServerDuration(
-			c,
-			authenticatedTenantDurationHistogram,
-			method,
-			requestStart,
-			statusCode,
-		)
+		durationSeconds := time.Since(requestStart).Seconds()
+
+		recordHTTPServerDuration(c, instruments.duration, method, durationSeconds, statusCode)
+		recordAuthenticatedTenantHTTPMetrics(c, instruments, durationSeconds, statusCode)
 
 		return chainErr
 	}
@@ -541,40 +600,16 @@ func applyTelemetrySpanAttributes(
 	}
 }
 
-// recordHTTPServerDuration emits the http.server.request.duration histogram
-// observation for a completed Fiber request. It is a no-op when the histogram
-// is nil (telemetry/MeterProvider/MetricsFactory absent or instrument creation
-// failed) so callers can invoke it unconditionally without nil checks.
-//
-// Attribute set follows OpenTelemetry HTTP semantic conventions:
-//   - http.request.method: captured before c.Next() to survive fasthttp recycling
-//   - http.route: c.Route().Path - low-cardinality route template, never raw paths;
-//     omitted entirely when no route matched (Fiber's catch-all 404), so scanner/
-//     unmatched traffic does not pollute the root-route series.
-//   - http.response.status_code: the effective status the client will observe,
-//     as resolved by resolveHTTPResponse so it matches the value logging and
-//     span attribution already agreed on for this request.
-//   - error.type: only set when effective status >= 500, using the numeric
-//     status code as a stable, low-cardinality label.
-//
-// Tenant and customer identity are deliberately excluded. Request duration
-// histograms are infrastructure telemetry and may only use stable transport
-// dimensions; identity would create an unbounded series per customer.
-func recordHTTPServerDuration(
-	c fiber.Ctx,
-	hist metric.Float64Histogram,
-	method string,
-	start time.Time,
-	statusCode int,
-) {
-	if hist == nil || c == nil {
-		return
-	}
-
-	attrs := []attribute.KeyValue{
+// httpServerDurationAttrs builds the standard HTTP server duration attribute
+// set. Tenant identity is deliberately excluded: the stable semantic-convention
+// metric must remain byte-for-byte compatible with its existing contract.
+func httpServerDurationAttrs(c fiber.Ctx, method string, statusCode int) []attribute.KeyValue {
+	attrs := make([]attribute.KeyValue, 0, 4)
+	attrs = append(attrs,
 		attribute.String("http.request.method", method),
 		attribute.Int("http.response.status_code", statusCode),
-	}
+	)
+
 	if routePath, present := routeAttribute(c); present {
 		attrs = append(attrs, attribute.String("http.route", routePath))
 	}
@@ -583,22 +618,46 @@ func recordHTTPServerDuration(
 		attrs = append(attrs, attribute.String("error.type", errType))
 	}
 
-	durationSeconds := time.Since(start).Seconds()
-	hist.Record(c.Context(), durationSeconds, metric.WithAttributes(attrs...))
+	return attrs
 }
 
-// recordAuthenticatedTenantHTTPServerDuration emits the opt-in HTTP duration
-// histogram only when the application authentication layer has explicitly
-// attested a tenant in the request context. Transport-controlled identity
-// sources are intentionally ignored.
-func recordAuthenticatedTenantHTTPServerDuration(
+// recordHTTPServerDuration emits the standard http.server.request.duration
+// histogram. Its name, unit, description, buckets, and attributes are unchanged.
+func recordHTTPServerDuration(
 	c fiber.Ctx,
 	hist metric.Float64Histogram,
 	method string,
-	start time.Time,
+	durationSeconds float64,
 	statusCode int,
 ) {
 	if hist == nil || c == nil {
+		return
+	}
+
+	attrs := httpServerDurationAttrs(c, method, statusCode)
+	hist.Record(c.Context(), durationSeconds, metric.WithAttributes(attrs...))
+}
+
+// recordAuthenticatedTenantHTTPMetrics emits the opt-in per-tenant metrics only
+// when the application authentication layer has explicitly attested a tenant in
+// the request context. Transport-controlled identity sources (headers, baggage,
+// gRPC metadata, AttrBag, span attributes) are intentionally ignored.
+//
+// The request and error counters carry only tenant and route. Separate
+// instruments keep each at 1,500 attribute sets in the documented 50-tenant,
+// 30-route scenario; adding status to one counter would create 9,000 sets and
+// overflow the OTel SDK's default 2,000-set limit. The latency histogram carries
+// only tenant and a bounded status class. Method, exact per-route status, and
+// per-route latency remain trace-level questions.
+func recordAuthenticatedTenantHTTPMetrics(
+	c fiber.Ctx,
+	instruments httpServerInstruments,
+	durationSeconds float64,
+	statusCode int,
+) {
+	if c == nil || (instruments.tenantRequests == nil &&
+		instruments.tenantErrors == nil &&
+		instruments.tenantLatency == nil) {
 		return
 	}
 
@@ -607,20 +666,45 @@ func recordAuthenticatedTenantHTTPServerDuration(
 		return
 	}
 
-	attrs := []attribute.KeyValue{
-		attribute.String("http.request.method", method),
-		attribute.Int("http.response.status_code", statusCode),
-		attribute.String(constant.AttrKeyTenantID, tenantID.String()),
-	}
+	tenantAttr := attribute.String(constant.AttrKeyTenantID, tenantID.String())
+	ctx := c.Context()
+	routeAttrs := make([]attribute.KeyValue, 0, 2)
+	routeAttrs = append(routeAttrs, tenantAttr)
+
 	if routePath, present := routeAttribute(c); present {
-		attrs = append(attrs, attribute.String("http.route", routePath))
+		routeAttrs = append(routeAttrs, attribute.String("http.route", routePath))
 	}
 
-	if errType := classifyHTTPErrorType(statusCode); errType != "" {
-		attrs = append(attrs, attribute.String("error.type", errType))
+	if instruments.tenantRequests != nil {
+		instruments.tenantRequests.Add(ctx, 1, metric.WithAttributes(routeAttrs...))
 	}
 
-	hist.Record(c.Context(), time.Since(start).Seconds(), metric.WithAttributes(attrs...))
+	if instruments.tenantErrors != nil && isHTTPServerError(statusCode) {
+		instruments.tenantErrors.Add(ctx, 1, metric.WithAttributes(routeAttrs...))
+	}
+
+	if instruments.tenantLatency != nil {
+		latencyAttrs := []attribute.KeyValue{
+			tenantAttr,
+			attribute.String("http.response.status_class", classifyHTTPStatusClass(statusCode)),
+		}
+		instruments.tenantLatency.Record(ctx, durationSeconds, metric.WithAttributes(latencyAttrs...))
+	}
+}
+
+// isHTTPServerError reports whether statusCode is in the bounded HTTP 5xx class.
+func isHTTPServerError(statusCode int) bool {
+	return statusCode >= http.StatusInternalServerError && statusCode <= 599
+}
+
+// classifyHTTPStatusClass bounds arbitrary Fiber status integers to six stable
+// values. Exact status codes remain available on the standard metric and traces.
+func classifyHTTPStatusClass(statusCode int) string {
+	if statusCode < 100 || statusCode > 599 {
+		return "other"
+	}
+
+	return strconv.Itoa(statusCode/100) + "xx"
 }
 
 // trackActiveRequest increments the http.server.active_requests UpDownCounter by

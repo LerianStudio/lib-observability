@@ -33,6 +33,19 @@ func TestAuthenticatedTenantContextRejectsAbsentAndNilIdentity(t *testing.T) {
 	assert.False(t, ok)
 }
 
+func TestAuthenticatedTenantContextLastWriteWins(t *testing.T) {
+	t.Parallel()
+
+	first := uuid.New()
+	second := uuid.New()
+	ctx := ContextWithAuthenticatedTenantID(context.Background(), first)
+	ctx = ContextWithAuthenticatedTenantID(ctx, second)
+
+	got, ok := AuthenticatedTenantIDFromContext(ctx)
+	require.True(t, ok)
+	assert.Equal(t, second, got)
+}
+
 func TestAuthenticatedTenantContextNilIdentityClearsInheritedIdentity(t *testing.T) {
 	t.Parallel()
 

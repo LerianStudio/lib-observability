@@ -14,6 +14,7 @@ type authenticatedTenantContextKey struct{}
 // this trust level automatically.
 //
 // Call this only after validating the credential and authorizing the tenant.
+// A later call replaces an earlier authenticated tenant (last write wins).
 // Passing uuid.Nil explicitly clears any authenticated tenant inherited from a
 // parent context.
 func ContextWithAuthenticatedTenantID(ctx context.Context, tenantID uuid.UUID) context.Context {
