@@ -4,6 +4,9 @@ package sqlobs
 
 import (
 	"context"
+	"database/sql"
+	"database/sql/driver"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -16,6 +19,27 @@ import (
 // db.sql.connection.* namespace. Asserted by name so the test fails loudly if
 // the upstream namespace ever drifts.
 const connectionOpenMetric = "db.sql.connection.open"
+
+// fakeDSN is the DSN openFake dials. The fake driver ignores it; what matters to
+// these tests is that it is NOT empty, so Setup is allowed to swap the handle.
+const fakeDSN = "fake://db"
+
+// dsnRequiredDriver stands in for the production drivers (pgx, go-sql-driver)
+// that resolve the server address from the DSN: opening with an empty one fails.
+// It exists to prove WHY Setup refuses to swap a handle it has no DSN for.
+type dsnRequiredDriver struct{}
+
+func (dsnRequiredDriver) Open(dsn string) (driver.Conn, error) {
+	if dsn == "" {
+		return nil, errors.New("dsnRequiredDriver: no DSN, nothing to dial")
+	}
+
+	return &fakeConn{}, nil
+}
+
+func init() {
+	sql.Register("sqlobs-dsn-required", dsnRequiredDriver{})
+}
 
 // collectMetricNames returns every metric name the reader currently exposes.
 func collectMetricNames(t *testing.T, reader *sdkmetric.ManualReader) []string {
@@ -41,6 +65,7 @@ func TestSetup_InstrumentsAndRegistersPoolStats(t *testing.T) {
 	mp, reader, tp, _ := newHarness(t)
 
 	db, cleanup, err := Setup(openFake(t), SystemPostgreSQL,
+		WithDSN(fakeDSN),
 		WithMeterProvider(mp),
 		WithTracerProvider(tp),
 		WithPoolRole(PoolRolePrimary),
@@ -49,7 +74,10 @@ func TestSetup_InstrumentsAndRegistersPoolStats(t *testing.T) {
 	require.NotNil(t, db)
 	require.NotNil(t, cleanup)
 
-	t.Cleanup(func() { _ = cleanup() })
+	t.Cleanup(func() {
+		_ = cleanup()
+		_ = db.Close()
+	})
 
 	_, err = db.ExecContext(context.Background(), "INSERT INTO accounts VALUES (1)")
 	require.NoError(t, err)
@@ -77,12 +105,16 @@ func TestSetup_ClosesOriginalHandle(t *testing.T) {
 	raw := openFake(t)
 
 	db, cleanup, err := Setup(raw, SystemPostgreSQL,
+		WithDSN(fakeDSN),
 		WithMeterProvider(mp),
 		WithTracerProvider(tp),
 	)
 	require.NoError(t, err)
 
-	t.Cleanup(func() { _ = cleanup() })
+	t.Cleanup(func() {
+		_ = cleanup()
+		_ = db.Close()
+	})
 
 	assert.Error(t, raw.PingContext(context.Background()),
 		"the uninstrumented handle must be closed by Setup")
@@ -91,13 +123,64 @@ func TestSetup_ClosesOriginalHandle(t *testing.T) {
 		"the returned handle must be usable")
 }
 
+// TestSetup_WithoutDSNKeepsCallerPoolAlive is the ADR-008 contract at its
+// sharpest: instrumentation may degrade, never disconnect. With no WithDSN there
+// is nothing to re-open the driver with, so Setup must refuse the swap outright
+// — hand back the caller's own handle, still open, and say why.
+func TestSetup_WithoutDSNKeepsCallerPoolAlive(t *testing.T) {
+	mp, _, tp, _ := newHarness(t)
+
+	raw := openFake(t)
+
+	db, cleanup, err := Setup(raw, SystemPostgreSQL,
+		WithMeterProvider(mp),
+		WithTracerProvider(tp),
+	)
+
+	require.ErrorIs(t, err, ErrDSNRequired)
+	require.NotNil(t, cleanup, "cleanup must never be nil, even on error")
+	assert.NoError(t, cleanup())
+
+	require.Same(t, raw, db, "Setup must hand back the caller's own handle, not a replacement")
+
+	_, err = db.ExecContext(context.Background(), "SELECT 1")
+	require.NoError(t, err, "the caller's pool must still be usable after a refused swap")
+}
+
+// TestInstrumentDB_WithoutDSNYieldsPoolThatCannotDial proves the premise behind
+// the refusal above: re-opening a DSN-resolving driver with an empty DSN builds a
+// pool that dies on its first query. Closing the caller's working handle in
+// exchange for this one is the data-loss path Setup must never take.
+func TestInstrumentDB_WithoutDSNYieldsPoolThatCannotDial(t *testing.T) {
+	raw, err := sql.Open("sqlobs-dsn-required", "host=db port=5432")
+	require.NoError(t, err)
+
+	t.Cleanup(func() { _ = raw.Close() })
+
+	require.NoError(t, raw.PingContext(context.Background()),
+		"the caller's own handle dials fine — it has the DSN")
+
+	instrumented, err := InstrumentDB(raw, SystemPostgreSQL)
+	require.NoError(t, err)
+	require.NotNil(t, instrumented)
+
+	t.Cleanup(func() { _ = instrumented.Close() })
+
+	assert.Error(t, instrumented.PingContext(context.Background()),
+		"an instrumented pool re-opened with an empty DSN cannot dial")
+}
+
 // TestSetup_CleanupUnregistersPoolStats verifies the returned cleanup releases
 // the gauges and is safe to call more than once (shutdown racing a pool swap).
 func TestSetup_CleanupUnregistersPoolStats(t *testing.T) {
 	mp, reader, _, _ := newHarness(t)
 
-	_, cleanup, err := Setup(openFake(t), SystemPostgreSQL, WithMeterProvider(mp))
+	db, cleanup, err := Setup(openFake(t), SystemPostgreSQL, WithDSN(fakeDSN), WithMeterProvider(mp))
 	require.NoError(t, err)
+
+	// The handle is retained purely so the fresh pool Setup opened is closed once
+	// the cleanup assertions below are done with it.
+	t.Cleanup(func() { _ = db.Close() })
 
 	require.Contains(t, collectMetricNames(t, reader), connectionOpenMetric)
 
@@ -122,11 +205,14 @@ func TestSetup_NilDB(t *testing.T) {
 // TestSetup_NoProvidersStillReturnsWorkingPool verifies no-op degradation: with
 // telemetry off the caller still gets a working handle.
 func TestSetup_NoProvidersStillReturnsWorkingPool(t *testing.T) {
-	db, cleanup, err := Setup(openFake(t), SystemPostgreSQL)
+	db, cleanup, err := Setup(openFake(t), SystemPostgreSQL, WithDSN(fakeDSN))
 	require.NoError(t, err)
 	require.NotNil(t, db)
 
-	t.Cleanup(func() { _ = cleanup() })
+	t.Cleanup(func() {
+		_ = cleanup()
+		_ = db.Close()
+	})
 
 	_, err = db.ExecContext(context.Background(), "SELECT 1")
 	assert.NoError(t, err)

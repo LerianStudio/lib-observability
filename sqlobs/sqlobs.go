@@ -47,6 +47,15 @@ const poolRoleAttrKey = "db.sql.pool.role"
 // passes a nil *sql.DB.
 var ErrNilDB = errors.New("sqlobs: nil *sql.DB")
 
+// ErrDSNRequired is returned by Setup when no WithDSN was supplied. Instrumenting
+// an existing *sql.DB means re-opening its driver, and a *sql.DB does not expose
+// the DSN it was opened with — so without one the replacement pool is built on an
+// empty DSN and cannot dial. Rather than close a working pool in exchange for a
+// dead one, Setup refuses the swap and returns the caller's handle untouched
+// (ADR-008: instrumentation never breaks connectivity). Supply WithDSN, or use
+// SetupOpen when the DSN is known at construction time.
+var ErrDSNRequired = errors.New("sqlobs: WithDSN is required to instrument an existing *sql.DB")
+
 // config holds resolved helper options.
 type config struct {
 	meterProvider  metric.MeterProvider
@@ -93,10 +102,13 @@ func WithPoolRole(role PoolRole) Option {
 
 // WithDSN supplies the data source name used to re-open the connection through
 // the instrumented driver when instrumenting an existing *sql.DB via
-// InstrumentDB. A *sql.DB does not expose its DSN, so it must be provided here;
-// when omitted, the driver is re-opened with an empty DSN (valid for drivers
-// that resolve configuration elsewhere). Prefer Open when the DSN is known at
-// construction time.
+// InstrumentDB. A *sql.DB does not expose its DSN, so it must be provided here.
+//
+// Omitting it leaves InstrumentDB re-opening the driver with an EMPTY DSN — only
+// ever valid for a driver that resolves its configuration elsewhere. Setup does
+// not accept that gamble: with no DSN it refuses the handle swap and returns
+// ErrDSNRequired rather than close a working pool for one that may not dial.
+// Prefer Open when the DSN is known at construction time.
 func WithDSN(dsn string) Option {
 	return func(c *config) {
 		c.dsn = dsn
@@ -185,10 +197,11 @@ func (c dsnConnector) Driver() driver.Driver { return c.driver }
 // FRESH, independent connection pool (built via sql.OpenDB); it does NOT share
 // the pool of the input db. To avoid two live pools against the same database,
 // the caller MUST:
-//   1. use ONLY the returned handle going forward, and Close() the original db;
-//   2. re-apply any pool tuning (SetMaxOpenConns / SetMaxIdleConns /
-//      SetConnMaxLifetime / SetConnMaxIdleTime) on the RETURNED handle — those
-//      settings are per-*sql.DB and are NOT carried over from the original.
+//  1. use ONLY the returned handle going forward, and Close() the original db;
+//  2. re-apply any pool tuning (SetMaxOpenConns / SetMaxIdleConns /
+//     SetConnMaxLifetime / SetConnMaxIdleTime) on the RETURNED handle — those
+//     settings are per-*sql.DB and are NOT carried over from the original.
+//
 // The caller keeps ownership of the connection lifecycle; this helper only adds
 // instrumentation.
 //

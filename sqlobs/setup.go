@@ -68,10 +68,11 @@ func registerStats(db *sql.DB, system System, opts ...Option) (CleanupFunc, erro
 //	    sqlobs.WithDSN(dsn), sqlobs.WithPoolRole(sqlobs.PoolRolePrimary))
 //	db.SetMaxOpenConns(25)
 //
-// WithDSN is effectively required for drivers that resolve connections from the
-// DSN (pgx included): a *sql.DB does not expose it, so without it the wrapped
-// driver is re-opened with an empty DSN. Prefer SetupOpen when the DSN is known
-// at construction time — it never creates the throwaway pool at all.
+// WithDSN IS REQUIRED, and enforced: a *sql.DB does not expose the DSN it was
+// opened with, so without one the replacement pool would be built on an empty DSN
+// and could not dial. Setup therefore refuses the swap — it returns db untouched
+// (still open), a no-op cleanup, and ErrDSNRequired. Prefer SetupOpen when the
+// DSN is known at construction time — it never creates the throwaway pool at all.
 //
 // For a dbresolver read/write split, call Setup on EACH *sql.DB (primary and
 // every replica) BEFORE building the resolver (ADR-002); the resolver itself is
@@ -80,11 +81,21 @@ func registerStats(db *sql.DB, system System, opts ...Option) (CleanupFunc, erro
 // DEGRADATION (ADR-008): instrumentation never breaks connectivity. On any
 // failure the returned *sql.DB is still a usable handle and the returned
 // CleanupFunc is still non-nil; the error is informational and the caller may
-// log it and proceed. A nil db returns ErrNilDB and never panics. With no
-// telemetry providers configured the handle is a plain working *sql.DB.
+// log it and proceed. A nil db returns ErrNilDB and never panics. A missing DSN
+// returns ErrDSNRequired with db untouched. With no telemetry providers
+// configured the handle is a plain working *sql.DB.
 func Setup(db *sql.DB, system System, opts ...Option) (*sql.DB, CleanupFunc, error) {
 	if db == nil {
 		return nil, noopCleanup, ErrNilDB
+	}
+
+	// The swap is only safe when the replacement pool can dial, and InstrumentDB
+	// always re-opens the driver by DSN. With an empty DSN the swap would close a
+	// working pool and hand back one that fails on its first query — and sql.Open
+	// being lazy means it would not even fail here, but later, in the caller's
+	// money path. Refuse instead: telemetry is never worth connectivity.
+	if newConfig(opts...).dsn == "" {
+		return db, noopCleanup, ErrDSNRequired
 	}
 
 	instrumented, err := InstrumentDB(db, system, opts...)

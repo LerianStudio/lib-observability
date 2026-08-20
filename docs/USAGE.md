@@ -144,12 +144,15 @@ import "github.com/LerianStudio/lib-observability/v3/sqlobs"
 
 db, cleanup, err := sqlobs.Setup(rawDB, sqlobs.SystemPostgreSQL, sqlobs.WithDSN(dsn))
 if err != nil { /* logar e seguir: instrumentação nunca quebra a conexão */ }
-defer cleanup() // libera as gauges de pool; idempotente
+defer cleanup()   // libera as gauges de pool; idempotente
+defer db.Close()  // o handle retornado tem pool PRÓPRIO — fechá-lo é do chamador
 
 db.SetMaxOpenConns(25) // tuning DEPOIS do Setup, no handle retornado
 ```
 
-`Setup` **fecha o `rawDB`** (o handle retornado tem pool próprio — `sql.Open` é lazy, então nada foi discado) e devolve sempre um `*sql.DB` usável e um `cleanup` não-nil, mesmo em erro. Com o DSN em mãos, `sqlobs.SetupOpen(driverName, dsn, system, opts...)` já abre instrumentado e dispensa o handle descartável.
+`Setup` **fecha o `rawDB`** (o handle retornado tem pool próprio — `sql.Open` é lazy, então nada foi discado) e devolve sempre um `*sql.DB` usável e um `cleanup` não-nil, mesmo em erro. Fechar o handle retornado continua sendo do chamador: `cleanup()` só libera as gauges, não o pool. Com o DSN em mãos, `sqlobs.SetupOpen(driverName, dsn, system, opts...)` já abre instrumentado e dispensa o handle descartável.
+
+**`WithDSN` é obrigatório** e agora é imposto: um `*sql.DB` não expõe o DSN com que foi aberto, então sem ele o pool substituto nasceria com DSN vazio e morreria na primeira query. Nesse caso `Setup` **recusa a troca** — devolve o `rawDB` intacto (ainda aberto), um `cleanup` no-op e `sqlobs.ErrDSNRequired`. Instrumentação nunca custa conectividade (ADR-008).
 
 As seções abaixo mostram os passos que o `Setup` compõe (úteis p/ o caso do dbresolver, onde cada pool é instrumentado separadamente).
 
