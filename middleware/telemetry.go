@@ -44,6 +44,12 @@ const authenticatedTenantHTTPServerRequestsMetric = "lerian.http.server.requests
 // rates without multiplying the request counter by status values.
 const authenticatedTenantHTTPServerErrorsMetric = "lerian.http.server.errors.by_tenant"
 
+// authenticatedTenantHTTPServerResponses4xxMetric is an opt-in per-tenant
+// counter for requests resulting in HTTP 4xx responses. It deliberately carries
+// only tenant and route; exact status-code diagnosis remains a trace-level
+// question so the metric cannot multiply by every possible 4xx code.
+const authenticatedTenantHTTPServerResponses4xxMetric = "lerian.http.server.responses_4xx.by_tenant"
+
 // authenticatedTenantHTTPServerLatencyMetric is an opt-in per-tenant latency
 // histogram. It deliberately omits http.route and http.request.method: each
 // label multiplies series by bucket_count+2, and the OTel SDK drops tenant
@@ -119,6 +125,26 @@ func newAuthenticatedTenantHTTPErrorsCounter(meter metric.Meter) metric.Int64Cou
 		authenticatedTenantHTTPServerErrorsMetric,
 		metric.WithUnit("{error}"),
 		metric.WithDescription("Count of HTTP server errors partitioned by authenticated tenant."),
+	)
+	if err != nil {
+		return nil
+	}
+
+	return counter
+}
+
+// newAuthenticatedTenantHTTPResponses4xxCounter builds the opt-in per-tenant
+// HTTP 4xx response counter. Returns nil if the meter is nil or instrument
+// creation fails.
+func newAuthenticatedTenantHTTPResponses4xxCounter(meter metric.Meter) metric.Int64Counter {
+	if meter == nil {
+		return nil
+	}
+
+	counter, err := meter.Int64Counter(
+		authenticatedTenantHTTPServerResponses4xxMetric,
+		metric.WithUnit("{request}"),
+		metric.WithDescription("Count of HTTP server requests resulting in 4xx responses partitioned by authenticated tenant."),
 	)
 	if err != nil {
 		return nil
@@ -251,6 +277,7 @@ type httpServerInstruments struct {
 	activeRequests metric.Int64UpDownCounter
 	tenantRequests metric.Int64Counter
 	tenantErrors   metric.Int64Counter
+	tenant4xx      metric.Int64Counter
 	tenantLatency  metric.Float64Histogram
 }
 
@@ -276,6 +303,7 @@ func newHTTPServerInstruments(
 
 	instruments.tenantRequests = newAuthenticatedTenantHTTPRequestsCounter(meter)
 	instruments.tenantErrors = newAuthenticatedTenantHTTPErrorsCounter(meter)
+	instruments.tenant4xx = newAuthenticatedTenantHTTPResponses4xxCounter(meter)
 	instruments.tenantLatency = newAuthenticatedTenantHTTPLatencyHistogram(meter)
 
 	return instruments
@@ -297,9 +325,9 @@ func (tm *TelemetryMiddleware) WithTelemetry(tl *tracing.Telemetry, excludedRout
 }
 
 // WithAuthenticatedTenantHTTPMetrics adds the standard HTTP telemetry and the
-// separate opt-in per-tenant request/error counters and latency histogram. The tenant
-// metrics are recorded only when an authentication layer has explicitly
-// populated the request context with
+// separate opt-in per-tenant request, 4xx-response, and 5xx-error counters plus
+// a latency histogram. The tenant metrics are recorded only when an
+// authentication layer has explicitly populated the request context with
 // observability.ContextWithAuthenticatedTenantID. Client-controlled headers,
 // baggage, metadata, and generic span attributes are never accepted as an
 // identity source.
@@ -643,9 +671,9 @@ func recordHTTPServerDuration(
 // the request context. Transport-controlled identity sources (headers, baggage,
 // gRPC metadata, AttrBag, span attributes) are intentionally ignored.
 //
-// The request and error counters carry only tenant and route. Separate
-// instruments keep each at 1,500 attribute sets in the documented 50-tenant,
-// 30-route scenario; adding status to one counter would create 9,000 sets and
+// The request, 4xx-response, and 5xx-error counters carry only tenant and route.
+// Separate instruments keep each at 1,500 attribute sets in the documented
+// 50-tenant, 30-route scenario; adding status to one counter would create 9,000 sets and
 // overflow the OTel SDK's default 2,000-set limit. The latency histogram carries
 // only tenant and a bounded status class. Method, exact per-route status, and
 // per-route latency remain trace-level questions.
@@ -657,6 +685,7 @@ func recordAuthenticatedTenantHTTPMetrics(
 ) {
 	if c == nil || (instruments.tenantRequests == nil &&
 		instruments.tenantErrors == nil &&
+		instruments.tenant4xx == nil &&
 		instruments.tenantLatency == nil) {
 		return
 	}
@@ -683,6 +712,10 @@ func recordAuthenticatedTenantHTTPMetrics(
 		instruments.tenantErrors.Add(ctx, 1, metric.WithAttributes(routeAttrs...))
 	}
 
+	if instruments.tenant4xx != nil && isHTTPClientError(statusCode) {
+		instruments.tenant4xx.Add(ctx, 1, metric.WithAttributes(routeAttrs...))
+	}
+
 	if instruments.tenantLatency != nil {
 		latencyAttrs := []attribute.KeyValue{
 			tenantAttr,
@@ -695,6 +728,11 @@ func recordAuthenticatedTenantHTTPMetrics(
 // isHTTPServerError reports whether statusCode is in the bounded HTTP 5xx class.
 func isHTTPServerError(statusCode int) bool {
 	return statusCode >= http.StatusInternalServerError && statusCode <= 599
+}
+
+// isHTTPClientError reports whether statusCode is in the bounded HTTP 4xx class.
+func isHTTPClientError(statusCode int) bool {
+	return statusCode >= http.StatusBadRequest && statusCode <= 499
 }
 
 // classifyHTTPStatusClass bounds arbitrary Fiber status integers to six stable

@@ -45,6 +45,9 @@ Improvements:
 
 Features:
 
+- Add opt-in `lerian.http.server.responses_4xx.by_tenant` counter for authenticated
+  tenant and normalized route, without exact status-code cardinality. (@gauchito91)
+
 - **`WithHTTPErrorHandling`**: finalizes a Fiber handler's error before outer
   logging/telemetry middleware inspect the response, invoking the app's
   effective `ErrorHandler` exactly once. Registering it is a correctness

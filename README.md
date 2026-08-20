@@ -121,7 +121,7 @@ defer span.End()
 
 The HTTP middleware never derives tenant or customer identity from `X-Tenant-Id`. That client-controlled value is not added to access logs, server spans, or the built-in HTTP metrics. `http.server.request.duration` is limited to method, route template, response status, and error class.
 
-Applications that need tenant-level HTTP telemetry can opt into three separate
+Applications that need tenant-level HTTP telemetry can opt into four separate
 `lerian.*.by_tenant` instruments. The authentication layer must first attest a
 UUID resolved from a validated credential; the metrics never fall back to a
 header, baggage, metadata, or generic span attribute.
@@ -145,6 +145,9 @@ The instruments divide responsibility deliberately:
 
 - `lerian.http.server.requests.by_tenant` counts volume by authenticated tenant
   and normalized route.
+- `lerian.http.server.responses_4xx.by_tenant` counts HTTP 4xx responses by
+  authenticated tenant and normalized route. Exact status codes stay out of the
+  metric to prevent another cardinality multiplier.
 - `lerian.http.server.errors.by_tenant` counts HTTP 5xx responses by authenticated
   tenant and normalized route. Dividing it by the request counter gives the
   route-level server-error rate.
@@ -158,13 +161,16 @@ The instruments divide responsibility deliberately:
 This split is a correctness boundary, not only a cost optimization. With the
 current 14 explicit boundaries, a Prometheus histogram costs 17 series per
 attribute set; a counter costs one. For 50 tenants, 30 routes, and 6 bounded
-status classes, the three tenant instruments produce at most 1,500 request
-sets, 1,500 error sets, and 300 latency sets (about 8,100 Prometheus series).
+status classes, the four tenant instruments produce at most 1,500 request
+sets, 1,500 4xx-response sets, 1,500 5xx-error sets, and 300 latency sets
+(about 9,600 Prometheus series).
 Each instrument stays below the OTel SDK default 2,000-set limit. Putting route
 and status on one counter would instead create 9,000 sets and collapse 7,001 into
 `otel.metric.overflow`, silently losing tenant identity. This is an operational
 budget, not a universal guarantee: each adopter must recalculate authenticated
 tenants × normalized routes and keep each counter below 2,000 attribute sets.
+For the default limit, the theoretical tenant ceiling is
+`floor(2000 / normalized routes)`; 30 routes permit at most 66 tenants.
 
 Telemetry may run before or after authentication and still observe the attested
 context. Register it first when the duration should include authentication
