@@ -124,27 +124,37 @@ func TestSetup_ClosesOriginalHandle(t *testing.T) {
 }
 
 // TestSetup_WithoutDSNKeepsCallerPoolAlive is the ADR-008 contract at its
-// sharpest: instrumentation may degrade, never disconnect. With no WithDSN there
-// is nothing to re-open the driver with, so Setup must refuse the swap outright
-// — hand back the caller's own handle, still open, and say why.
+// sharpest: instrumentation may degrade, never disconnect. With no DSN there is
+// nothing to re-open the driver with, so Setup must refuse the swap outright —
+// hand back the caller's own handle, still open, and say why. Both shapes of
+// "no DSN" are covered, since an empty string dials exactly as little as an
+// absent option.
 func TestSetup_WithoutDSNKeepsCallerPoolAlive(t *testing.T) {
-	mp, _, tp, _ := newHarness(t)
+	cases := map[string][]Option{
+		"WithDSN omitted": nil,
+		"WithDSN empty":   {WithDSN("")},
+	}
 
-	raw := openFake(t)
+	for name, dsnOpt := range cases {
+		t.Run(name, func(t *testing.T) {
+			mp, _, tp, _ := newHarness(t)
 
-	db, cleanup, err := Setup(raw, SystemPostgreSQL,
-		WithMeterProvider(mp),
-		WithTracerProvider(tp),
-	)
+			raw := openFake(t)
 
-	require.ErrorIs(t, err, ErrDSNRequired)
-	require.NotNil(t, cleanup, "cleanup must never be nil, even on error")
-	assert.NoError(t, cleanup())
+			opts := append([]Option{WithMeterProvider(mp), WithTracerProvider(tp)}, dsnOpt...)
 
-	require.Same(t, raw, db, "Setup must hand back the caller's own handle, not a replacement")
+			db, cleanup, err := Setup(raw, SystemPostgreSQL, opts...)
 
-	_, err = db.ExecContext(context.Background(), "SELECT 1")
-	require.NoError(t, err, "the caller's pool must still be usable after a refused swap")
+			require.ErrorIs(t, err, ErrDSNRequired)
+			require.NotNil(t, cleanup, "cleanup must never be nil, even on error")
+			assert.NoError(t, cleanup())
+
+			require.Same(t, raw, db, "Setup must hand back the caller's own handle, not a replacement")
+
+			_, err = db.ExecContext(context.Background(), "SELECT 1")
+			require.NoError(t, err, "the caller's pool must still be usable after a refused swap")
+		})
+	}
 }
 
 // TestInstrumentDB_WithoutDSNYieldsPoolThatCannotDial proves the premise behind

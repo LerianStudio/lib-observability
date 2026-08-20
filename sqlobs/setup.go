@@ -68,11 +68,12 @@ func registerStats(db *sql.DB, system System, opts ...Option) (CleanupFunc, erro
 //	    sqlobs.WithDSN(dsn), sqlobs.WithPoolRole(sqlobs.PoolRolePrimary))
 //	db.SetMaxOpenConns(25)
 //
-// WithDSN IS REQUIRED, and enforced: a *sql.DB does not expose the DSN it was
-// opened with, so without one the replacement pool would be built on an empty DSN
-// and could not dial. Setup therefore refuses the swap — it returns db untouched
-// (still open), a no-op cleanup, and ErrDSNRequired. Prefer SetupOpen when the
-// DSN is known at construction time — it never creates the throwaway pool at all.
+// A NON-EMPTY WithDSN IS REQUIRED, and enforced: a *sql.DB does not expose the
+// DSN it was opened with, so with none supplied (omitted, or empty) the
+// replacement pool would have nothing to dial. Setup therefore refuses the swap —
+// it returns db untouched (still open), a no-op cleanup, and ErrDSNRequired.
+// Prefer SetupOpen when the DSN is known at construction time — it never creates
+// the throwaway pool at all.
 //
 // For a dbresolver read/write split, call Setup on EACH *sql.DB (primary and
 // every replica) BEFORE building the resolver (ADR-002); the resolver itself is

@@ -150,9 +150,11 @@ defer db.Close()  // o handle retornado tem pool PRÓPRIO — fechá-lo é do ch
 db.SetMaxOpenConns(25) // tuning DEPOIS do Setup, no handle retornado
 ```
 
-`Setup` **fecha o `rawDB`** (o handle retornado tem pool próprio — `sql.Open` é lazy, então nada foi discado) e devolve sempre um `*sql.DB` usável e um `cleanup` não-nil, mesmo em erro. Fechar o handle retornado continua sendo do chamador: `cleanup()` só libera as gauges, não o pool. Com o DSN em mãos, `sqlobs.SetupOpen(driverName, dsn, system, opts...)` já abre instrumentado e dispensa o handle descartável.
+**Na troca bem-sucedida** `Setup` **fecha o `rawDB`** (o handle retornado tem pool próprio — `sql.Open` é lazy, então nada foi discado). Fechar o handle retornado continua sendo do chamador: `cleanup()` só libera as gauges, não o pool. Com o DSN em mãos, `sqlobs.SetupOpen(driverName, dsn, system, opts...)` já abre instrumentado e dispensa o handle descartável.
 
-**`WithDSN` é obrigatório** e agora é imposto: um `*sql.DB` não expõe o DSN com que foi aberto, então sem ele o pool substituto nasceria com DSN vazio e morreria na primeira query. Nesse caso `Setup` **recusa a troca** — devolve o `rawDB` intacto (ainda aberto), um `cleanup` no-op e `sqlobs.ErrDSNRequired`. Instrumentação nunca custa conectividade (ADR-008).
+**`WithDSN` é obrigatório** e agora é imposto: um `*sql.DB` não expõe o DSN com que foi aberto, então sem DSN (omitido ou vazio) o pool substituto nasceria com DSN vazio e morreria na primeira query. Nesse caso `Setup` **recusa a troca** — devolve o `rawDB` intacto (ainda aberto e NÃO fechado), um `cleanup` no-op e `sqlobs.ErrDSNRequired`. Instrumentação nunca custa conectividade (ADR-008).
+
+Em erro o `cleanup` nunca é nil e o handle devolvido segue usável — a única exceção é `rawDB == nil`, que devolve `nil` e `sqlobs.ErrNilDB`, porque não havia handle para preservar.
 
 As seções abaixo mostram os passos que o `Setup` compõe (úteis p/ o caso do dbresolver, onde cada pool é instrumentado separadamente).
 
