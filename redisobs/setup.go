@@ -69,7 +69,7 @@ func onceCleanup(release func() error) CleanupFunc {
 // no providers configured instrumentation attaches against the OTel no-op
 // providers and Setup still succeeds.
 func Setup(client redis.UniversalClient, opts ...Option) (CleanupFunc, error) {
-	if client == nil {
+	if isNilClient(client) {
 		return noopCleanup, ErrNilClient
 	}
 

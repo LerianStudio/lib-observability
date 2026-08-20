@@ -2,6 +2,7 @@ package redisobs
 
 import (
 	"errors"
+	"reflect"
 
 	constant "github.com/LerianStudio/lib-observability/v3/constants"
 	"github.com/redis/go-redis/extra/redisotel/v9"
@@ -12,8 +13,25 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// ErrNilClient is returned by Instrument when the supplied client is nil.
+// ErrNilClient is returned by Instrument and Setup when the supplied client is
+// nil, including a typed nil.
 var ErrNilClient = errors.New("redisobs: nil redis.UniversalClient")
+
+// isNilClient reports whether client carries no usable client — either an
+// untyped nil or a TYPED nil, a non-nil interface holding a nil pointer such as
+// an uninitialised *redis.Client field. The distinction matters because a typed
+// nil passes `client == nil` and then reaches redisotel, whose type switch
+// matches the concrete type and dereferences it: the caller's unset field becomes
+// a SIGSEGV inside a dependency instead of ErrNilClient.
+func isNilClient(client redis.UniversalClient) bool {
+	if client == nil {
+		return true
+	}
+
+	v := reflect.ValueOf(client)
+
+	return v.Kind() == reflect.Ptr && v.IsNil()
+}
 
 // config holds resolved helper options.
 type config struct {
@@ -98,7 +116,7 @@ func Instrument(client redis.UniversalClient, opts ...Option) error {
 // Shared by Instrument and Setup so the two entry points can never drift on the
 // PII guardrail or on which providers reach redisotel.
 func instrument(client redis.UniversalClient, closeChan chan struct{}, opts ...Option) error {
-	if client == nil {
+	if isNilClient(client) {
 		return ErrNilClient
 	}
 
