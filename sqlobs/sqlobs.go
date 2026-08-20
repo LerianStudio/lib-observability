@@ -50,11 +50,12 @@ var ErrNilDB = errors.New("sqlobs: nil *sql.DB")
 // ErrDSNRequired is returned by Setup when it has no non-empty DSN to work with
 // — WithDSN omitted, or given an empty string. Instrumenting an existing *sql.DB
 // means re-opening its driver, and a *sql.DB does not expose the DSN it was
-// opened with, so with nothing to dial the replacement pool cannot connect.
-// Rather than close a working pool in exchange for a dead one, Setup refuses the
-// swap and returns the caller's handle untouched (ADR-008: instrumentation never
-// breaks connectivity). Supply a non-empty WithDSN, or use SetupOpen when the DSN
-// is known at construction time.
+// opened with, so Setup cannot safely recreate the original connection
+// configuration: an empty-DSN replacement may fail outright or connect to
+// unintended driver defaults. Rather than trade a working pool for one it cannot
+// vouch for, Setup refuses the swap and returns the caller's handle untouched
+// (ADR-008: instrumentation never breaks connectivity). Supply a non-empty
+// WithDSN, or use SetupOpen when the DSN is known at construction time.
 var ErrDSNRequired = errors.New("sqlobs: a non-empty WithDSN is required to instrument an existing *sql.DB")
 
 // config holds resolved helper options.

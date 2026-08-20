@@ -143,6 +143,9 @@ Emite: `db.client.operation.duration` (s). Labels: db.system.name, db.operation.
 import "github.com/LerianStudio/lib-observability/v3/sqlobs"
 
 db, cleanup, err := sqlobs.Setup(rawDB, sqlobs.SystemPostgreSQL, sqlobs.WithDSN(dsn))
+if db == nil {
+    return err // só com rawDB nil (ErrNilDB): não há handle para seguir — abortar a inicialização
+}
 if err != nil { /* logar e seguir: instrumentação nunca quebra a conexão */ }
 defer cleanup()   // libera as gauges de pool; idempotente
 defer db.Close()  // o handle retornado tem pool PRÓPRIO — fechá-lo é do chamador
@@ -152,7 +155,7 @@ db.SetMaxOpenConns(25) // tuning DEPOIS do Setup, no handle retornado
 
 **Na troca bem-sucedida** `Setup` **fecha o `rawDB`** (o handle retornado tem pool próprio — `sql.Open` é lazy, então nada foi discado). Fechar o handle retornado continua sendo do chamador: `cleanup()` só libera as gauges, não o pool. Com o DSN em mãos, `sqlobs.SetupOpen(driverName, dsn, system, opts...)` já abre instrumentado e dispensa o handle descartável.
 
-**`WithDSN` é obrigatório** e agora é imposto: um `*sql.DB` não expõe o DSN com que foi aberto, então sem DSN (omitido ou vazio) o pool substituto nasceria com DSN vazio e morreria na primeira query. Nesse caso `Setup` **recusa a troca** — devolve o `rawDB` intacto (ainda aberto e NÃO fechado), um `cleanup` no-op e `sqlobs.ErrDSNRequired`. Instrumentação nunca custa conectividade (ADR-008).
+**`WithDSN` é obrigatório** e agora é imposto: um `*sql.DB` não expõe o DSN com que foi aberto, então sem DSN (omitido ou vazio) o `Setup` não tem como recriar com segurança a configuração de conexão original — o substituto de DSN vazio pode falhar na primeira query ou conectar em defaults não intencionais do driver. Nesse caso `Setup` **recusa a troca** — devolve o `rawDB` intacto (ainda aberto e NÃO fechado), um `cleanup` no-op e `sqlobs.ErrDSNRequired`. Instrumentação nunca custa conectividade (ADR-008).
 
 Em erro o `cleanup` nunca é nil e o handle devolvido segue usável — a única exceção é `rawDB == nil`, que devolve `nil` e `sqlobs.ErrNilDB`, porque não havia handle para preservar.
 
