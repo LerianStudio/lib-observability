@@ -1,5 +1,24 @@
 # Lib-observability Changelog
 
+## [3.1.0](https://github.com/LerianStudio/lib-observability/releases/tag/v3.1.0)
+
+Features:
+- Introduced `redisobs.Setup` which returns a cleanup function for pool-stat registrations, enhancing Redis observability. (@rodrigodh)
+- Added `sqlobs.Setup` for one-call SQL pool instrumentation, simplifying the setup process for SQL observability. (@rodrigodh)
+
+Fixes:
+- Addressed an issue in metrics where connectivity was not preserved during Setup and added guards for typed nils. (@fredcamaral)
+- Ensured Redis metrics are instrumented before tracing to maintain accurate observability. (@rodrigodh)
+- Resolved middleware issues by satisfying `errorlint` and `inamedparam` in `asFiberError`, and preventing typed-nil `*fiber.Error` from shadowing valid errors in joined chains. (@fredcamaral)
+- Implemented guards for typed-nil `*fiber.Error` matched by `errors.As` to prevent erroneous error handling. (@fredcamaral)
+
+Improvements:
+- Enhanced the SQL observability documentation by adding a nil-guard to the Setup example and softening the rationale for empty-DSN to allow safe recreation. (@fredcamaral)
+
+[Compare changes](https://github.com/LerianStudio/lib-observability/compare/v3.0.0...v3.1.0)
+
+---
+
 ## [3.0.0](https://github.com/LerianStudio/lib-observability/releases/tag/v3.0.0)
 
 Features:
