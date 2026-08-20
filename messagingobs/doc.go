@@ -44,7 +44,8 @@
 // Services that deliberately do not install the globals can bind explicit
 // providers with WithMeterProvider / WithTracerProvider, or pass a Telemetry
 // built by this library with WithTelemetry. The older NewPublisher/NewConsumer
-// constructors are deprecated shorthands for the latter.
+// constructors are deprecated; they keep their original semantics of resolving
+// providers ONLY from the Telemetry they are given, never from the globals.
 //
 // # No-op degradation (ADR-008)
 //

@@ -4,7 +4,9 @@ import (
 	"github.com/LerianStudio/lib-observability/v3/tracing"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/metric"
+	metricnoop "go.opentelemetry.io/otel/metric/noop"
 	"go.opentelemetry.io/otel/trace"
+	tracenoop "go.opentelemetry.io/otel/trace/noop"
 )
 
 // defaultLibraryName is the instrumentation scope used for the meter and tracer
@@ -81,6 +83,41 @@ func WithTelemetry(tl *tracing.Telemetry) Option {
 	}
 }
 
+// noopOptions pins the config to the no-op providers, so a caller that resolves
+// providers ONLY from what it was given never falls back to the globals. It is
+// applied first and overridden by the options that follow.
+func noopOptions() []Option {
+	return []Option{
+		func(c *config) {
+			c.meterProvider = metricnoop.NewMeterProvider()
+			c.tracerProvider = tracenoop.NewTracerProvider()
+		},
+	}
+}
+
+// telemetryOnlyOptions resolves a Telemetry the way the deprecated constructors
+// always did: nothing comes from the globals, the tracer needs a TracerProvider,
+// and the meter needs BOTH a MeterProvider and a MetricsFactory. Anything
+// missing stays no-op rather than silently picking up a global provider the
+// caller never asked for.
+func telemetryOnlyOptions(tl *tracing.Telemetry) []Option {
+	opts := noopOptions()
+
+	if tl == nil {
+		return opts
+	}
+
+	if tl.TracerProvider != nil {
+		opts = append(opts, WithTracerProvider(tl.TracerProvider))
+	}
+
+	if tl.MeterProvider != nil && tl.MetricsFactory != nil {
+		opts = append(opts, WithMeterProvider(tl.MeterProvider))
+	}
+
+	return append(opts, WithLibraryName(tl.LibraryName))
+}
+
 // newConfig resolves options over the global providers. Both globals are no-op
 // implementations until the service installs real ones, so the resolved config
 // is always safe to instrument against.
@@ -92,7 +129,9 @@ func newConfig(opts ...Option) config {
 	}
 
 	for _, opt := range opts {
-		opt(&cfg)
+		if opt != nil {
+			opt(&cfg)
+		}
 	}
 
 	return cfg

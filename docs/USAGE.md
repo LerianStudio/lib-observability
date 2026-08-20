@@ -218,7 +218,7 @@ if err := redisobs.Instrument(rdb); err != nil { /* tratar */ }
 
 ## 6. Mensageria (RabbitMQ) — `messagingobs` (NÃO exige Fiber)
 
-Emite `messaging.client.operation.duration` (produce) e `messaging.process.duration` (consume). **Recebe o `*tracing.Telemetry` direto** (não usa provider global).
+Emite `messaging.client.operation.duration` (produce) e `messaging.process.duration` (consume). **Usa os providers globais** instalados no bootstrap (`Telemetry.ApplyGlobals`) quando nenhuma option é passada.
 
 ### 6a. Producer
 ```go

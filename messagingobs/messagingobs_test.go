@@ -241,6 +241,50 @@ func TestProduce_ErrorSetsErrorTypeLabel(t *testing.T) {
 	assert.NotEmpty(t, errType)
 }
 
+// TestDeprecatedConstructors_IgnoreTheGlobals pins the semantics the deprecated
+// constructors always had: providers come ONLY from the Telemetry, so a nil or
+// partial one stays uninstrumented even with real globals installed. A caller
+// that passed nil to disable telemetry must not start emitting on a bump.
+func TestDeprecatedConstructors_IgnoreTheGlobals(t *testing.T) {
+	reader, spanExp := installGlobals(t)
+
+	partial, _, _ := newHarness(t)
+	partial.MetricsFactory = nil
+
+	cases := map[string]*tracing.Telemetry{
+		"nil telemetry":   nil,
+		"empty telemetry": {},
+		"missing factory": partial,
+	}
+
+	for name, tel := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, _, finish := NewPublisher(tel).Produce(context.Background(), ProduceParams{
+				DestinationTemplate: "x",
+				OperationName:       "publish",
+			})
+			finish(nil)
+
+			_, consumeFinish := NewConsumer(tel).Consume(context.Background(), ConsumeParams{
+				DestinationTemplate: "x",
+				OperationName:       "process",
+			})
+			consumeFinish(nil)
+		})
+	}
+
+	assert.Empty(t, findHistogram(t, reader, messagingClientOperationDurationMetric),
+		"the deprecated constructors must not emit on the global MeterProvider")
+	assert.Empty(t, findHistogram(t, reader, messagingProcessDurationMetric),
+		"the deprecated constructors must not emit on the global MeterProvider")
+
+	// The "missing factory" case still has a TracerProvider, which always drove
+	// the span independently of the metric gate — that is pre-existing behavior
+	// and stays, but the span goes to ITS provider, never to the global one.
+	assert.Empty(t, spanExp.GetSpans(),
+		"the deprecated constructors must not emit on the global TracerProvider")
+}
+
 // TestProduce_NoProvidersIsNoOp verifies the producer degrades to a safe no-op
 // against the (uninstalled) globals: it still returns usable trace headers and
 // never panics.
@@ -319,6 +363,7 @@ func installGlobals(t *testing.T) (*sdkmetric.ManualReader, *tracetest.InMemoryE
 	t.Helper()
 
 	prevMP, prevTP := otel.GetMeterProvider(), otel.GetTracerProvider()
+	prevPropagator := otel.GetTextMapPropagator()
 
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
 		propagation.TraceContext{}, propagation.Baggage{},
@@ -335,6 +380,7 @@ func installGlobals(t *testing.T) (*sdkmetric.ManualReader, *tracetest.InMemoryE
 	t.Cleanup(func() {
 		otel.SetMeterProvider(prevMP)
 		otel.SetTracerProvider(prevTP)
+		otel.SetTextMapPropagator(prevPropagator)
 		_ = mp.Shutdown(context.Background())
 		_ = tp.Shutdown(context.Background())
 	})
@@ -392,14 +438,24 @@ func TestConsume_ZeroOptionsUsesGlobalProviders(t *testing.T) {
 // TestOptions_ExplicitProvidersWinOverGlobals verifies an explicitly injected
 // provider is used instead of the installed global one.
 func TestOptions_ExplicitProvidersWinOverGlobals(t *testing.T) {
-	globalReader, _ := installGlobals(t)
+	globalReader, globalSpans := installGlobals(t)
 
 	ownReader := sdkmetric.NewManualReader()
 	ownMP := sdkmetric.NewMeterProvider(sdkmetric.WithReader(ownReader))
 
-	t.Cleanup(func() { _ = ownMP.Shutdown(context.Background()) })
+	ownSpans := tracetest.NewInMemoryExporter()
+	ownTP := sdktrace.NewTracerProvider(sdktrace.WithSyncer(ownSpans))
 
-	pub := NewPublisherWithOptions(WithMeterProvider(ownMP), WithLibraryName("explicit-scope"))
+	t.Cleanup(func() {
+		_ = ownMP.Shutdown(context.Background())
+		_ = ownTP.Shutdown(context.Background())
+	})
+
+	pub := NewPublisherWithOptions(
+		WithMeterProvider(ownMP),
+		WithTracerProvider(ownTP),
+		WithLibraryName("explicit-scope"),
+	)
 
 	_, _, finish := pub.Produce(context.Background(), ProduceParams{
 		DestinationTemplate: "x",
@@ -411,6 +467,11 @@ func TestOptions_ExplicitProvidersWinOverGlobals(t *testing.T) {
 		"the injected MeterProvider must receive the duration")
 	assert.Empty(t, findHistogram(t, globalReader, messagingClientOperationDurationMetric),
 		"the global MeterProvider must not be used when one was injected")
+
+	require.Len(t, ownSpans.GetSpans(), 1, "the injected TracerProvider must receive the span")
+	assert.Equal(t, "explicit-scope", ownSpans.GetSpans()[0].InstrumentationScope.Name)
+	assert.Empty(t, globalSpans.GetSpans(),
+		"the global TracerProvider must not be used when one was injected")
 }
 
 // TestOptions_NilAndEmptyValuesAreIgnored verifies the options never downgrade
@@ -428,6 +489,15 @@ func TestOptions_NilAndEmptyValuesAreIgnored(t *testing.T) {
 	assert.Equal(t, otel.GetMeterProvider(), cfg.meterProvider)
 	assert.Equal(t, otel.GetTracerProvider(), cfg.tracerProvider)
 	assert.Equal(t, defaultLibraryName, cfg.libraryName)
+}
+
+// TestNilOptionIsIgnored verifies a nil Option in the variadic list does not
+// panic the constructor.
+func TestNilOptionIsIgnored(t *testing.T) {
+	assert.NotPanics(t, func() {
+		require.NotNil(t, NewPublisherWithOptions(nil))
+		require.NotNil(t, NewConsumerWithOptions(nil))
+	})
 }
 
 // TestNilReceiversAreSafe verifies a nil helper never panics, so a caller

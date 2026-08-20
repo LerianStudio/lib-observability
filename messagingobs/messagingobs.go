@@ -121,12 +121,16 @@ type Publisher struct {
 
 // NewPublisher returns a Publisher bound to the given Telemetry.
 //
+// It resolves providers ONLY from tl, exactly as it always did: a nil or
+// partial Telemetry yields an uninstrumented helper and never falls back to the
+// globals, so an existing caller that passed nil to disable telemetry keeps
+// getting no telemetry.
+//
 // Deprecated: use NewPublisherWithOptions, which defaults to the OTel globals
-// and so can be built by a library on the service's behalf. This constructor is
-// NewPublisherWithOptions(WithTelemetry(tl)) and will be folded into it at the
-// next major.
+// and so can be built by a library on the service's behalf. This constructor
+// will be folded into it at the next major.
 func NewPublisher(tl *tracing.Telemetry) *Publisher {
-	return NewPublisherWithOptions(WithTelemetry(tl))
+	return NewPublisherWithOptions(telemetryOnlyOptions(tl)...)
 }
 
 // NewPublisherWithOptions returns a Publisher for the resolved providers. With
@@ -204,11 +208,13 @@ type Consumer struct {
 
 // NewConsumer returns a Consumer bound to the given Telemetry.
 //
+// Like NewPublisher, it resolves providers ONLY from tl and never falls back to
+// the globals.
+//
 // Deprecated: use NewConsumerWithOptions, which defaults to the OTel globals.
-// This constructor is NewConsumerWithOptions(WithTelemetry(tl)) and will be
-// folded into it at the next major.
+// This constructor will be folded into it at the next major.
 func NewConsumer(tl *tracing.Telemetry) *Consumer {
-	return NewConsumerWithOptions(WithTelemetry(tl))
+	return NewConsumerWithOptions(telemetryOnlyOptions(tl)...)
 }
 
 // NewConsumerWithOptions returns a Consumer for the resolved providers,
