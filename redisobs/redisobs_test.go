@@ -123,6 +123,29 @@ func TestInstrument_NilClientReturnsError(t *testing.T) {
 	require.Error(t, err)
 }
 
+// TestInstrument_TypedNilClientReturnsError covers the nil that actually reaches
+// this library: a caller whose client field is a *redis.Client that was never
+// assigned still satisfies redis.UniversalClient, so `client == nil` is false.
+// redisotel's type switch matches the concrete type and dereferences it, turning
+// a caller's uninitialised field into a panic inside a dependency.
+func TestInstrument_TypedNilClientReturnsError(t *testing.T) {
+	var client *redis.Client
+
+	require.ErrorIs(t, Instrument(client), ErrNilClient)
+}
+
+// TestSetup_TypedNilClientReturnsError is the same contract on the lifecycle
+// entry point, which must also hand back a callable cleanup.
+func TestSetup_TypedNilClientReturnsError(t *testing.T) {
+	var client *redis.ClusterClient
+
+	cleanup, err := Setup(client)
+
+	require.ErrorIs(t, err, ErrNilClient)
+	require.NotNil(t, cleanup, "cleanup must never be nil, even on error")
+	assert.NoError(t, cleanup())
+}
+
 // TestInstrument_NoTelemetryDoesNotError verifies that with no providers the
 // helper still succeeds (degrading to no-op providers) and never breaks the app.
 func TestInstrument_NoTelemetryDoesNotError(t *testing.T) {
