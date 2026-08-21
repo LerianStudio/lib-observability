@@ -1726,9 +1726,9 @@ func (e *cardinalityTestExporter) Export(_ context.Context, rm *metricdata.Resou
 func (*cardinalityTestExporter) ForceFlush(context.Context) error { return nil }
 func (*cardinalityTestExporter) Shutdown(context.Context) error   { return nil }
 
-func TestTelemetryConfig_MetricCardinalityLimit(t *testing.T) {
+func TestTelemetryOption_MetricCardinalityLimit(t *testing.T) {
 	// The SDK also supports this experimental environment variable. Keep the
-	// test focused on the TelemetryConfig contract, independent of the caller's
+	// test focused on the TelemetryOption contract, independent of the caller's
 	// process environment.
 	t.Setenv("OTEL_GO_X_CARDINALITY_LIMIT", "")
 
@@ -1765,8 +1765,10 @@ func TestTelemetryConfig_MetricCardinalityLimit(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			exporter := &cardinalityTestExporter{}
-			cfg := TelemetryConfig{MetricCardinalityLimit: tt.limit}
-			provider := cfg.newMeterProvider(sdkresource.Empty(), exporter)
+			resolved := telemetryOptions{}
+			WithMetricCardinalityLimit(tt.limit).apply(&resolved)
+			cfg := TelemetryConfig{}
+			provider := cfg.newMeterProvider(sdkresource.Empty(), exporter, resolved.metricCardinalityLimit)
 			t.Cleanup(func() { require.NoError(t, provider.Shutdown(context.Background())) })
 
 			counter, err := provider.Meter("cardinality-test").Int64Counter("sets")
@@ -1780,6 +1782,13 @@ func TestTelemetryConfig_MetricCardinalityLimit(t *testing.T) {
 			assert.Equal(t, tt.wantOverflow, exporter.overflow)
 		})
 	}
+}
+
+func TestNewTelemetryPreservesExactSignature(t *testing.T) {
+	t.Parallel()
+
+	var constructor func(TelemetryConfig) (*Telemetry, error) = NewTelemetry
+	assert.NotNil(t, constructor)
 }
 
 // ===========================================================================

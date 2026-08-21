@@ -170,7 +170,7 @@ and status on one counter would instead create 9,000 sets and collapse 7,001 int
 budget, not a universal guarantee: each adopter must recalculate authenticated
 tenants × normalized routes and keep each counter below the effective limit.
 The default is 2,000; applications can override it with
-`TelemetryConfig.MetricCardinalityLimit`. The SDK reserves one attribute set for
+`NewTelemetryWithOptions(cfg, WithMetricCardinalityLimit(limit))`. The SDK reserves one attribute set for
 overflow, so the theoretical tenant ceiling is
 `floor((limit - 1) / normalized routes)`; at the default limit, 30 routes permit
 at most 66 tenants. Count the stable unmatched-route fallback as a normalized
