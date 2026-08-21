@@ -121,6 +121,69 @@ defer span.End()
 
 The HTTP middleware never derives tenant or customer identity from `X-Tenant-Id`. That client-controlled value is not added to access logs, server spans, or the built-in HTTP metrics. `http.server.request.duration` is limited to method, route template, response status, and error class.
 
+Applications that need tenant-level HTTP telemetry can opt into four separate
+`lerian.*.by_tenant` instruments. The authentication layer must first attest a
+UUID resolved from a validated credential; the metrics never fall back to a
+header, baggage, metadata, or generic span attribute.
+
+> **Do not register both middlewares.** `WithAuthenticatedTenantHTTPMetrics`
+> already includes the standard `WithTelemetry` behavior. Registering both on
+> the same app records `http.server.request.duration` twice and corrupts RPS and
+> error-rate queries.
+
+```go
+mid := middleware.NewTelemetryMiddleware(telemetry)
+app.Use(mid.WithAuthenticatedTenantHTTPMetrics(telemetry))
+app.Use(func(c fiber.Ctx) error {
+    tenantID := tenantResolvedFromValidatedCredential(c) // uuid.UUID
+    c.SetContext(observability.ContextWithAuthenticatedTenantID(c.Context(), tenantID))
+    return c.Next()
+})
+```
+
+The instruments divide responsibility deliberately:
+
+- `lerian.http.server.requests.by_tenant` counts volume by authenticated tenant
+  and normalized route.
+- `lerian.http.server.responses_4xx.by_tenant` counts HTTP 4xx responses by
+  authenticated tenant and normalized route. Exact status codes stay out of the
+  metric to prevent another cardinality multiplier.
+- `lerian.http.server.responses_5xx.by_tenant` counts HTTP 5xx responses by authenticated
+  tenant and normalized route. Dividing it by the request counter gives the
+  route-level server-error rate.
+- `lerian.http.server.latency.by_tenant` provides p50/p95/p99 by authenticated
+  tenant and bounded response-status class, without route or method.
+- Per-route tenant latency and exact status diagnosis belong in traces, which
+  can carry `tenant.id` without metric-series multiplication.
+- Global RED remains in `http.server.request.duration`; deployment collectors
+  may add resource dimensions such as `client_id` without changing this contract.
+
+This split is a correctness boundary, not only a cost optimization. With the
+current 14 explicit boundaries, a Prometheus histogram costs 17 series per
+attribute set; a counter costs one. For 50 tenants, 30 routes, and 6 bounded
+status classes, the four tenant instruments produce at most 1,500 request
+sets, 1,500 4xx-response sets, 1,500 5xx-response sets, and 300 latency sets
+(about 9,600 Prometheus series).
+Each instrument stays below the OTel SDK default 2,000-set limit. Putting route
+and status on one counter would instead create 9,000 sets and collapse 7,001 into
+`otel.metric.overflow`, silently losing tenant identity. This is an operational
+budget, not a universal guarantee: each adopter must recalculate authenticated
+tenants × normalized routes and keep each counter below the effective limit.
+The default is 2,000; applications can override it with
+`TelemetryConfig.MetricCardinalityLimit`. The SDK reserves one attribute set for
+overflow, so the theoretical tenant ceiling is
+`floor((limit - 1) / normalized routes)`; at the default limit, 30 routes permit
+at most 66 tenants. Count the stable unmatched-route fallback as a normalized
+route. Size the configured limit against projected growth rather than the current
+tenant count.
+
+Telemetry may run before or after authentication and still observe the attested
+context. Register it first when the duration should include authentication
+latency. Requests without an explicitly authenticated tenant remain in the
+standard HTTP metric and are omitted from all tenant metrics. A later
+`ContextWithAuthenticatedTenantID` call replaces the earlier value; `uuid.Nil`
+clears it.
+
 ## Tenant ID propagation
 
 The gRPC middleware can still read a tenant identifier from request metadata and propagate it through telemetry as the `tenant.id` attribute / log field. HTTP applications must attach authenticated identity explicitly if their application telemetry requires it.
@@ -154,7 +217,7 @@ _ = counter.
 
 `ResolveTenantIDFromHTTP` remains available for source compatibility, but the shared HTTP middleware no longer invokes it automatically. `X-Tenant-Id` is client-controlled and must not become infrastructure telemetry identity.
 
-If an auth layer resolves the real tenant from a signed credential, it can call `observability.ContextWithSpanAttributes(ctx, attribute.String("tenant.id", real))` for explicit application spans or business metrics. The built-in HTTP duration histogram still excludes identity.
+If an auth layer resolves the real tenant from a signed credential, it can call `observability.ContextWithSpanAttributes(ctx, attribute.String("tenant.id", real))` for explicit application spans or business metrics. The standard HTTP duration histogram still excludes identity. For the opt-in tenant-attributed HTTP metrics, the auth layer must instead call `observability.ContextWithAuthenticatedTenantID`; generic span attributes are deliberately insufficient.
 
 ## Relationship to lib-commons
 

@@ -81,6 +81,31 @@ type TelemetryConfig struct {
 	// zero-value off avoids surprising callers who construct TelemetryConfig
 	// partially and inheriting a background collector they did not request.
 	EnableRuntimeMetrics bool
+	// MetricCardinalityLimit caps how many distinct attribute sets the metrics
+	// SDK retains per instrument. It follows the Go zero-value convention:
+	// zero keeps the OpenTelemetry SDK default (2000), any positive value
+	// overrides it.
+	//
+	// Past the limit the SDK does not reject the excess - it collapses it into
+	// a single otel.metric.overflow=true data point, DISCARDING the original
+	// attributes. For an identity-bearing metric such as
+	// lerian.http.server.requests.by_tenant that means the tenants beyond the
+	// limit silently disappear from per-tenant filtering, with retention
+	// decided by arrival order. Dashboards keep rendering; they just stop
+	// showing those tenants.
+	//
+	// Budget it per instrument, not globally: each instrument has its own
+	// limit. For the per-tenant counters the attribute set is
+	// tenant.id x http.route, so the ceiling is
+	// floor((limit - 1) / normalized routes): the SDK reserves one set for
+	// otel.metric.overflow. Size it against projected growth
+	// (roughly 2x tenants x routes over the next 12-18 months) rather than
+	// today's tenant count, so onboarding a customer does not require a
+	// redeploy. Raising this increases retained aggregation state in the
+	// process (cheap per counter data point, more expensive per histogram
+	// data point) and increases exported series - which is the real,
+	// intended cost of representing every tenant.
+	MetricCardinalityLimit int
 	// TrustInboundTraceContext controls whether inbound trace-context
 	// extraction (a W3C traceparent/tracestate header, over HTTP or gRPC)
 	// continues that trace, instead of starting a fresh root span for every
@@ -527,11 +552,20 @@ func (tl *TelemetryConfig) newLoggerProvider(rsc *sdkresource.Resource, exp *otl
 	return sdklog.NewLoggerProvider(sdklog.WithResource(rsc), sdklog.WithProcessor(bp))
 }
 
-func (tl *TelemetryConfig) newMeterProvider(res *sdkresource.Resource, exp *otlpmetricgrpc.Exporter) *sdkmetric.MeterProvider {
-	return sdkmetric.NewMeterProvider(
+func (tl *TelemetryConfig) newMeterProvider(res *sdkresource.Resource, exp sdkmetric.Exporter) *sdkmetric.MeterProvider {
+	opts := []sdkmetric.Option{
 		sdkmetric.WithResource(res),
 		sdkmetric.WithReader(sdkmetric.NewPeriodicReader(exp)),
-	)
+	}
+
+	// Zero keeps the SDK default (2000). See MetricCardinalityLimit: past the
+	// limit the SDK collapses excess attribute sets into
+	// otel.metric.overflow=true and drops tenant identity.
+	if tl.MetricCardinalityLimit > 0 {
+		opts = append(opts, sdkmetric.WithCardinalityLimit(tl.MetricCardinalityLimit))
+	}
+
+	return sdkmetric.NewMeterProvider(opts...)
 }
 
 func (tl *TelemetryConfig) newTracerProvider(rsc *sdkresource.Resource, exp *otlptrace.Exporter) *sdktrace.TracerProvider {
