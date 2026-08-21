@@ -480,6 +480,139 @@ func TestAuthenticatedTenantLatency_OmitsRouteAndMethod(t *testing.T) {
 		constant.AttrKeyTenantID, "http.response.status_class")
 }
 
+// TestAuthenticatedTenantLatency_AttributeSetIsFrozen pins the latency histogram
+// attribute set. Each extra label multiplies series by explicit_boundary_count+3
+// (17 today) and divides the tenant ceiling documented in
+// docs/metrics-contract.md. http.route, http.request.method and the exact
+// http.response.status_code are deliberately absent: per-route latency is a
+// trace-level question. If this test fails, the documented budget no longer
+// holds - recalculate it before changing the attribute set.
+func TestAuthenticatedTenantLatency_AttributeSetIsFrozen(t *testing.T) {
+	tel, reader := newMetricsHarness(t)
+	tenantID := uuid.New()
+
+	app := fiber.New()
+	mid := NewTelemetryMiddleware(tel)
+	app.Use(mid.WithAuthenticatedTenantHTTPMetrics(tel))
+	app.Use(func(c fiber.Ctx) error {
+		c.SetContext(observability.ContextWithAuthenticatedTenantID(c.Context(), tenantID))
+		return c.Next()
+	})
+	app.Get("/orders/:id", func(c fiber.Ctx) error { return c.SendStatus(http.StatusNotFound) })
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/orders/42", nil))
+	require.NoError(t, err)
+	defer func() { require.NoError(t, resp.Body.Close()) }()
+
+	latency := findFloat64HistogramByName(t, reader, authenticatedTenantHTTPServerLatencyMetric)
+	require.NotNil(t, latency)
+	require.Len(t, latency.DataPoints, 1)
+	dataPoint := latency.DataPoints[0]
+	require.Equal(t, 2, dataPoint.Attributes.Len())
+	assert.Equal(t, tenantID.String(), mustAttrValue(t, dataPoint.Attributes, constant.AttrKeyTenantID))
+	assert.Equal(t, "4xx", mustAttrValue(t, dataPoint.Attributes, "http.response.status_class"))
+	assertExactAttributeKeys(t, dataPoint.Attributes,
+		constant.AttrKeyTenantID, "http.response.status_class")
+}
+
+// TestAuthenticatedTenantCounters_AttributeSetIsFrozen pins the per-tenant counter
+// attribute set to tenant.id x http.route. Each extra label divides the tenant
+// ceiling - floor((cardinality limit - 1) / normalized routes) - by that label's
+// cardinality. Adding http.response.status_code here would have produced 9000
+// attribute sets for 50 tenants x 30 routes against a default limit of 2000,
+// silently dropping tenants from per-tenant filtering. Recalculate the budget in
+// docs/metrics-contract.md before changing this.
+func TestAuthenticatedTenantCounters_AttributeSetIsFrozen(t *testing.T) {
+	tel, reader := newMetricsHarness(t)
+	tenantID := uuid.New()
+
+	app := fiber.New()
+	mid := NewTelemetryMiddleware(tel)
+	app.Use(mid.WithAuthenticatedTenantHTTPMetrics(tel))
+	app.Use(func(c fiber.Ctx) error {
+		c.SetContext(observability.ContextWithAuthenticatedTenantID(c.Context(), tenantID))
+		return c.Next()
+	})
+	app.Get("/orders/:outcome", func(c fiber.Ctx) error {
+		switch c.Params("outcome") {
+		case "missing":
+			return c.SendStatus(http.StatusNotFound)
+		case "unavailable":
+			return c.SendStatus(http.StatusServiceUnavailable)
+		default:
+			return c.SendStatus(http.StatusOK)
+		}
+	})
+
+	outcomes := []string{
+		"ok", "ok", "ok", "ok", "ok",
+		"missing", "missing", "missing",
+		"unavailable", "unavailable",
+	}
+	for _, outcome := range outcomes {
+		resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/orders/"+outcome, nil))
+		require.NoError(t, err)
+		require.NoError(t, resp.Body.Close())
+	}
+
+	tests := []struct {
+		name       string
+		metricName string
+		wantValue  int64
+	}{
+		{name: "requests", metricName: authenticatedTenantHTTPServerRequestsMetric, wantValue: 10},
+		{name: "responses 4xx", metricName: authenticatedTenantHTTPServerResponses4xxMetric, wantValue: 3},
+		{name: "responses 5xx", metricName: authenticatedTenantHTTPServerResponses5xxMetric, wantValue: 2},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			counter := findInt64SumByName(t, reader, tt.metricName)
+			require.NotNil(t, counter)
+			require.Len(t, counter.DataPoints, 1)
+			dataPoint := counter.DataPoints[0]
+			assert.Equal(t, tt.wantValue, dataPoint.Value)
+			require.Equal(t, 2, dataPoint.Attributes.Len())
+			assert.Equal(t, tenantID.String(),
+				mustAttrValue(t, dataPoint.Attributes, constant.AttrKeyTenantID))
+			assert.Equal(t, "/orders/:outcome", mustAttrValue(t, dataPoint.Attributes, "http.route"))
+			assertExactAttributeKeys(t, dataPoint.Attributes, constant.AttrKeyTenantID, "http.route")
+		})
+	}
+}
+
+func TestAuthenticatedTenantCounters_UnmatchedRouteUsesBoundedFallback(t *testing.T) {
+	tel, reader := newMetricsHarness(t)
+	tenantID := uuid.New()
+
+	app := fiber.New()
+	mid := NewTelemetryMiddleware(tel)
+	app.Use(mid.WithAuthenticatedTenantHTTPMetrics(tel))
+	app.Use(func(c fiber.Ctx) error {
+		c.SetContext(observability.ContextWithAuthenticatedTenantID(c.Context(), tenantID))
+		return c.Next()
+	})
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/does-not-exist/42", nil))
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+
+	for _, metricName := range []string{
+		authenticatedTenantHTTPServerRequestsMetric,
+		authenticatedTenantHTTPServerResponses4xxMetric,
+	} {
+		counter := findInt64SumByName(t, reader, metricName)
+		require.NotNil(t, counter)
+		require.Len(t, counter.DataPoints, 1)
+		dataPoint := counter.DataPoints[0]
+		assert.Equal(t, int64(1), dataPoint.Value)
+		assert.Equal(t, tenantID.String(),
+			mustAttrValue(t, dataPoint.Attributes, constant.AttrKeyTenantID))
+		assert.Equal(t, unmatchedRouteTemplate, mustAttrValue(t, dataPoint.Attributes, "http.route"))
+		assertExactAttributeKeys(t, dataPoint.Attributes, constant.AttrKeyTenantID, "http.route")
+	}
+}
+
 func TestAuthenticatedTenantHTTPMetrics_GRPCMetadataDoesNotMintTenant(t *testing.T) {
 	tel, reader := newMetricsHarness(t)
 

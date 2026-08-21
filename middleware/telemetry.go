@@ -699,11 +699,9 @@ func recordAuthenticatedTenantHTTPMetrics(
 
 	tenantAttr := attribute.String(constant.AttrKeyTenantID, tenantID.String())
 	ctx := c.Context()
-	routeAttrs := make([]attribute.KeyValue, 0, 2)
-	routeAttrs = append(routeAttrs, tenantAttr)
-
-	if routePath, present := routeAttribute(c); present {
-		routeAttrs = append(routeAttrs, attribute.String("http.route", routePath))
+	routeAttrs := []attribute.KeyValue{
+		tenantAttr,
+		attribute.String("http.route", resolvedHTTPRoute(c)),
 	}
 
 	if instruments.tenantRequests != nil {

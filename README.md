@@ -168,9 +168,14 @@ Each instrument stays below the OTel SDK default 2,000-set limit. Putting route
 and status on one counter would instead create 9,000 sets and collapse 7,001 into
 `otel.metric.overflow`, silently losing tenant identity. This is an operational
 budget, not a universal guarantee: each adopter must recalculate authenticated
-tenants × normalized routes and keep each counter below 2,000 attribute sets.
-For the default limit, the theoretical tenant ceiling is
-`floor(2000 / normalized routes)`; 30 routes permit at most 66 tenants.
+tenants × normalized routes and keep each counter below the effective limit.
+The default is 2,000; applications can override it with
+`TelemetryConfig.MetricCardinalityLimit`. The SDK reserves one attribute set for
+overflow, so the theoretical tenant ceiling is
+`floor((limit - 1) / normalized routes)`; at the default limit, 30 routes permit
+at most 66 tenants. Count the stable unmatched-route fallback as a normalized
+route. Size the configured limit against projected growth rather than the current
+tenant count.
 
 Telemetry may run before or after authentication and still observe the attested
 context. Register it first when the duration should include authentication
