@@ -159,9 +159,11 @@ sum by (tenant_id, tenant_name) (
 ```
 
 Use `{{tenant_name}}` as the legend, but never aggregate only by
-`tenant_name`. A rename creates a temporary second attribute set for the same
-`tenant.id` until the old series expires; queries that need continuity across a
-rename must aggregate by `tenant_id`.
+`tenant_name`. A rename creates another attribute set for the same `tenant.id`.
+With the default cumulative SDK temporality, the old set can remain in the
+process aggregation state until the MeterProvider or process restarts; the
+backend series then remains for its retention period. Queries that need
+continuity across a rename must aggregate by `tenant_id`.
 
 The instruments divide responsibility deliberately:
 
@@ -184,22 +186,23 @@ This split is a correctness boundary, not only a cost optimization. With the
 current 14 explicit boundaries, a Prometheus histogram costs 17 series per
 attribute set; a counter costs one. `tenant.name` is functionally 1:1 with
 `tenant.id`, so it does not multiply the steady-state set count. The validated
-50-tenant × 30-route scenario produces 1,500 request sets, 500 4xx-response
-sets, 500 5xx-response sets, and 150 latency sets, with no overflow. The
-worst-case ceiling remains 1,500 sets in each counter and 300 latency sets when
-every route/status combination occurs.
-Each instrument stays below the OTel SDK default 2,000-set limit. Putting route
+steady-state 50-tenant × 30-route scenario produces 1,500 request sets, 500
+4xx-response sets, 500 5xx-response sets, and 150 latency sets, with no
+overflow before any retained rename overlap. Putting route
 and status on one counter would instead create 9,000 sets and collapse 7,001 into
 `otel.metric.overflow`, silently losing tenant identity. This is an operational
 budget, not a universal guarantee: each adopter must recalculate authenticated
-tenants × normalized routes and keep each counter below the effective limit.
+tenants, normalized routes, and retained tenant-name versions, then keep each
+instrument below the effective limit.
 The default is 2,000; applications can override it with
 `NewTelemetryWithOptions(cfg, WithMetricCardinalityLimit(limit))`. The SDK reserves one attribute set for
-overflow, so the theoretical tenant ceiling is
-`floor((limit - 1) / normalized routes)`; at the default limit, 30 routes permit
-at most 66 tenants. Count the stable unmatched-route fallback as a normalized
-route. Size the configured limit against projected growth rather than the current
-tenant count.
+overflow. For a counter, budget
+`normalized routes × (tenants + retained rename versions) <= limit - 1`.
+At the default limit, 30 routes and 50 tenants leave room for at most 16 retained
+full-route rename versions; the 17th can overflow. Count the stable
+unmatched-route fallback as a normalized route. Size the configured limit
+against projected tenant growth and rename history for the process lifetime,
+not only the current tenant count.
 
 Telemetry may run before or after authentication and still observe the attested
 context. Register it first when the duration should include authentication

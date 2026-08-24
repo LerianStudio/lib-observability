@@ -125,7 +125,9 @@ app.Use(func(c fiber.Ctx) error {
 
 Agregue sempre por `tenant_id`. Use `tenant_name` apenas como legenda
 (`{{tenant_name}}`) e nunca como chave isolada: o slug pode mudar ou ser
-reutilizado. Um nome ausente é omitido sem impedir a emissão da métrica.
+reutilizado. Um nome ausente é omitido sem impedir a emissão da métrica. Cada
+nome anterior pode permanecer no estado cumulativo do SDK durante a vida do
+processo; inclua esse histórico ao dimensionar `WithMetricCardinalityLimit`.
 
 Para anexar atributo de parâmetro a um span HTTP (ex.: entity id) SEM PII:
 ```go
