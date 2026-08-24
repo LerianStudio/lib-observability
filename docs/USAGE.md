@@ -102,6 +102,31 @@ app.Use(tm.WithTelemetry(tel))            // registra a instrumentação HTTP
 // opcional: app.Use(tm.EndTracingSpans)  // se usar o par end-spans
 ```
 
+Para métricas HTTP opt-in por tenant, use a identidade já validada no JWT. Não
+registre `WithTelemetry` junto com `WithAuthenticatedTenantHTTPMetrics`, pois o
+segundo já inclui a métrica HTTP padrão:
+
+```go
+tm := middleware.NewTelemetryMiddleware(tel)
+app.Use(tm.WithAuthenticatedTenantHTTPMetrics(tel))
+app.Use(func(c fiber.Ctx) error {
+    claims := claimsFromValidatedCredential(c)
+    tenantID, err := uuid.Parse(claims.TenantID) // tenantId do JWT
+    if err != nil {
+        return fiber.ErrUnauthorized
+    }
+
+    c.SetContext(observability.ContextWithAuthenticatedTenant(
+        c.Context(), tenantID, claims.TenantSlug, // tenantSlug do JWT
+    ))
+    return c.Next()
+})
+```
+
+Agregue sempre por `tenant_id`. Use `tenant_name` apenas como legenda
+(`{{tenant_name}}`) e nunca como chave isolada: o slug pode mudar ou ser
+reutilizado. Um nome ausente é omitido sem impedir a emissão da métrica.
+
 Para anexar atributo de parâmetro a um span HTTP (ex.: entity id) SEM PII:
 ```go
 middleware.SetSpanAttributeForParam(c, "account_id", id, "account") // c é fiber.Ctx (v3)

@@ -123,8 +123,8 @@ The HTTP middleware never derives tenant or customer identity from `X-Tenant-Id`
 
 Applications that need tenant-level HTTP telemetry can opt into four separate
 `lerian.*.by_tenant` instruments. The authentication layer must first attest a
-UUID resolved from a validated credential; the metrics never fall back to a
-header, baggage, metadata, or generic span attribute.
+UUID and optional display name resolved from a validated credential; the metrics
+never fall back to a header, baggage, metadata, or generic span attribute.
 
 > **Do not register both middlewares.** `WithAuthenticatedTenantHTTPMetrics`
 > already includes the standard `WithTelemetry` behavior. Registering both on
@@ -135,11 +135,33 @@ header, baggage, metadata, or generic span attribute.
 mid := middleware.NewTelemetryMiddleware(telemetry)
 app.Use(mid.WithAuthenticatedTenantHTTPMetrics(telemetry))
 app.Use(func(c fiber.Ctx) error {
-    tenantID := tenantResolvedFromValidatedCredential(c) // uuid.UUID
-    c.SetContext(observability.ContextWithAuthenticatedTenantID(c.Context(), tenantID))
+    claims := claimsFromValidatedCredential(c)
+    tenantID, err := uuid.Parse(claims.TenantID) // JWT tenantId
+    if err != nil {
+        return fiber.ErrUnauthorized
+    }
+    tenantName := claims.TenantSlug // JWT tenantSlug; optional display label
+    c.SetContext(observability.ContextWithAuthenticatedTenant(
+        c.Context(), tenantID, tenantName,
+    ))
     return c.Next()
 })
 ```
+
+`tenant.id` is the stable aggregation key. `tenant.name` is a mutable display
+label only. Keep both in Grafana queries so a reused name can never merge two
+different tenants:
+
+```promql
+sum by (tenant_id, tenant_name) (
+  rate(lerian_http_server_requests_by_tenant_total[5m])
+)
+```
+
+Use `{{tenant_name}}` as the legend, but never aggregate only by
+`tenant_name`. A rename creates a temporary second attribute set for the same
+`tenant.id` until the old series expires; queries that need continuity across a
+rename must aggregate by `tenant_id`.
 
 The instruments divide responsibility deliberately:
 
@@ -160,10 +182,12 @@ The instruments divide responsibility deliberately:
 
 This split is a correctness boundary, not only a cost optimization. With the
 current 14 explicit boundaries, a Prometheus histogram costs 17 series per
-attribute set; a counter costs one. For 50 tenants, 30 routes, and 6 bounded
-status classes, the four tenant instruments produce at most 1,500 request
-sets, 1,500 4xx-response sets, 1,500 5xx-response sets, and 300 latency sets
-(about 9,600 Prometheus series).
+attribute set; a counter costs one. `tenant.name` is functionally 1:1 with
+`tenant.id`, so it does not multiply the steady-state set count. The validated
+50-tenant × 30-route scenario produces 1,500 request sets, 500 4xx-response
+sets, 500 5xx-response sets, and 150 latency sets, with no overflow. The
+worst-case ceiling remains 1,500 sets in each counter and 300 latency sets when
+every route/status combination occurs.
 Each instrument stays below the OTel SDK default 2,000-set limit. Putting route
 and status on one counter would instead create 9,000 sets and collapse 7,001 into
 `otel.metric.overflow`, silently losing tenant identity. This is an operational
@@ -181,8 +205,9 @@ Telemetry may run before or after authentication and still observe the attested
 context. Register it first when the duration should include authentication
 latency. Requests without an explicitly authenticated tenant remain in the
 standard HTTP metric and are omitted from all tenant metrics. A later
-`ContextWithAuthenticatedTenantID` call replaces the earlier value; `uuid.Nil`
-clears it.
+`ContextWithAuthenticatedTenant` or `ContextWithAuthenticatedTenantID` call
+replaces the earlier value; `uuid.Nil` clears it. The ID-only helper remains
+supported and emits the metrics without `tenant.name`.
 
 ## Tenant ID propagation
 
