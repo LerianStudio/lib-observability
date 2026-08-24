@@ -13,8 +13,17 @@ const (
 	// everywhere tenant.id is emitted (logs, traces, metrics).
 	AttrKeyTenantID = "tenant.id"
 
+	// AttrKeyTenantName is the OpenTelemetry attribute key for the human-readable
+	// tenant name. It exists only for display; tenant.id remains the stable
+	// aggregation key because names are mutable.
+	AttrKeyTenantName = "tenant.name"
+
 	// MaxTenantIDLen caps tenant IDs extracted from request headers to keep
 	// telemetry cardinality bounded. Values exceeding the cap are dropped
 	// silently.
 	MaxTenantIDLen = 128
+
+	// MaxTenantNameLen caps the authenticated tenant display label. Unlike
+	// tenant.id, the name arrives as a free-form string and must be bounded.
+	MaxTenantNameLen = 64
 )

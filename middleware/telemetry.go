@@ -692,17 +692,23 @@ func recordAuthenticatedTenantHTTPMetrics(
 		return
 	}
 
-	tenantID, ok := observability.AuthenticatedTenantIDFromContext(c.Context())
+	tenant, ok := observability.AuthenticatedTenantFromContext(c.Context())
 	if !ok {
 		return
 	}
 
-	tenantAttr := attribute.String(constant.AttrKeyTenantID, tenantID.String())
-	ctx := c.Context()
-	routeAttrs := []attribute.KeyValue{
-		tenantAttr,
-		attribute.String("http.route", resolvedHTTPRoute(c)),
+	tenantAttrs := []attribute.KeyValue{
+		attribute.String(constant.AttrKeyTenantID, tenant.ID.String()),
 	}
+	if tenant.Name != "" {
+		tenantAttrs = append(tenantAttrs, attribute.String(constant.AttrKeyTenantName, tenant.Name))
+	}
+
+	ctx := c.Context()
+	routeAttrs := append(
+		append([]attribute.KeyValue{}, tenantAttrs...),
+		attribute.String("http.route", resolvedHTTPRoute(c)),
+	)
 
 	if instruments.tenantRequests != nil {
 		instruments.tenantRequests.Add(ctx, 1, metric.WithAttributes(routeAttrs...))
@@ -717,10 +723,10 @@ func recordAuthenticatedTenantHTTPMetrics(
 	}
 
 	if instruments.tenantLatency != nil {
-		latencyAttrs := []attribute.KeyValue{
-			tenantAttr,
+		latencyAttrs := append(
+			append([]attribute.KeyValue{}, tenantAttrs...),
 			attribute.String("http.response.status_class", classifyHTTPStatusClass(statusCode)),
-		}
+		)
 		instruments.tenantLatency.Record(ctx, durationSeconds, metric.WithAttributes(latencyAttrs...))
 	}
 }
