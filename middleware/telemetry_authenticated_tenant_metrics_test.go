@@ -932,6 +932,69 @@ func TestAuthenticatedTenantHTTPMetrics_DocumentedScenarioDoesNotOverflow(t *tes
 	}
 }
 
+func TestAuthenticatedTenantHTTPMetrics_WorstCaseBudgetDoesNotOverflow(t *testing.T) {
+	const (
+		tenantCount = 50
+		routeCount  = 30
+	)
+	statusClasses := []string{"1xx", "2xx", "3xx", "4xx", "5xx", "other"}
+
+	tel, reader := newMetricsHarness(t)
+	instruments := newHTTPServerInstruments(tel, true)
+	require.NotNil(t, instruments.tenantRequests)
+	require.NotNil(t, instruments.tenant5xx)
+	require.NotNil(t, instruments.tenant4xx)
+	require.NotNil(t, instruments.tenantLatency)
+
+	ctx := context.Background()
+	for tenantIndex := 0; tenantIndex < tenantCount; tenantIndex++ {
+		tenantAttrs := []attribute.KeyValue{
+			attribute.String(constant.AttrKeyTenantID, uuid.NewString()),
+			attribute.String(constant.AttrKeyTenantName, fmt.Sprintf("tenant-%d", tenantIndex)),
+		}
+		for routeIndex := 0; routeIndex < routeCount; routeIndex++ {
+			routeAttrs := append(
+				append([]attribute.KeyValue{}, tenantAttrs...),
+				attribute.String("http.route", fmt.Sprintf("/route/%d", routeIndex)),
+			)
+			attrs := metric.WithAttributes(routeAttrs...)
+			instruments.tenantRequests.Add(ctx, 1, attrs)
+			instruments.tenant5xx.Add(ctx, 1, attrs)
+			instruments.tenant4xx.Add(ctx, 1, attrs)
+		}
+		for _, statusClass := range statusClasses {
+			latencyAttrs := append(
+				append([]attribute.KeyValue{}, tenantAttrs...),
+				attribute.String("http.response.status_class", statusClass),
+			)
+			instruments.tenantLatency.Record(ctx, 0.1, metric.WithAttributes(latencyAttrs...))
+		}
+	}
+
+	requests := findInt64SumByName(t, reader, authenticatedTenantHTTPServerRequestsMetric)
+	require.NotNil(t, requests)
+	require.Len(t, requests.DataPoints, tenantCount*routeCount)
+	assertNoOverflowInt64(t, requests.DataPoints)
+
+	responses5xx := findInt64SumByName(t, reader, authenticatedTenantHTTPServerResponses5xxMetric)
+	require.NotNil(t, responses5xx)
+	require.Len(t, responses5xx.DataPoints, tenantCount*routeCount)
+	assertNoOverflowInt64(t, responses5xx.DataPoints)
+
+	responses4xx := findInt64SumByName(t, reader, authenticatedTenantHTTPServerResponses4xxMetric)
+	require.NotNil(t, responses4xx)
+	require.Len(t, responses4xx.DataPoints, tenantCount*routeCount)
+	assertNoOverflowInt64(t, responses4xx.DataPoints)
+
+	latency := findFloat64HistogramByName(t, reader, authenticatedTenantHTTPServerLatencyMetric)
+	require.NotNil(t, latency)
+	require.Len(t, latency.DataPoints, tenantCount*len(statusClasses))
+	for _, dp := range latency.DataPoints {
+		_, overflow := dp.Attributes.Value(attribute.Key("otel.metric.overflow"))
+		assert.False(t, overflow)
+	}
+}
+
 func assertNoOverflowInt64(t *testing.T, dataPoints []metricdata.DataPoint[int64]) {
 	t.Helper()
 	for _, dp := range dataPoints {
