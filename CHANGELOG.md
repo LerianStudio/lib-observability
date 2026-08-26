@@ -1,5 +1,29 @@
 # Lib-observability Changelog
 
+## [3.2.0](https://github.com/LerianStudio/lib-observability/releases/tag/v3.2.0)
+
+Features:
+- Added support for displaying authenticated tenant names in metrics. (@gandalf-at-lerian)
+- Introduced configuration for cardinality limits in metrics. (@gandalf-at-lerian)
+- Implemented counting of tenant HTTP 4xx responses in middleware. (@gandalf-at-lerian)
+- Added measurement of authenticated tenant HTTP latency. (@gandalf-at-lerian)
+
+Fixes:
+- Ensured compatibility of `TelemetryConfig` source in the API. (@gandalf-at-lerian)
+- Bounded the cardinality for authenticated tenants in metrics. (@gandalf-at-lerian)
+
+Improvements:
+- Updated documentation to account for tenant rename headroom in metrics. (@gandalf-at-lerian)
+- Preserved worst-case cardinality coverage in metrics tests. (@gandalf-at-lerian)
+- Aligned metric names for tenant responses in middleware. (@gandalf-at-lerian)
+- Scoped the cardinality limit documentation to the provider. (@gandalf-at-lerian)
+- Made the cardinality contract explicit in the documentation. (@gandalf-at-lerian)
+- Clarified the scope of tenant identity in the documentation. (@gandalf-at-lerian)
+
+[Compare changes](https://github.com/LerianStudio/lib-observability/compare/v3.1.0...v3.2.0)
+
+---
+
 ## [3.1.0](https://github.com/LerianStudio/lib-observability/releases/tag/v3.1.0)
 
 Features:
