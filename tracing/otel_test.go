@@ -18,7 +18,11 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/baggage"
 	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+	sdkresource "go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
@@ -1684,6 +1688,107 @@ func TestNewResource(t *testing.T) {
 	}
 	r := cfg.newResource()
 	assert.NotNil(t, r)
+}
+
+type cardinalityTestExporter struct {
+	dataPoints int
+	overflow   int
+}
+
+func (*cardinalityTestExporter) Temporality(kind sdkmetric.InstrumentKind) metricdata.Temporality {
+	return sdkmetric.DefaultTemporalitySelector(kind)
+}
+
+func (*cardinalityTestExporter) Aggregation(kind sdkmetric.InstrumentKind) sdkmetric.Aggregation {
+	return sdkmetric.DefaultAggregationSelector(kind)
+}
+
+func (e *cardinalityTestExporter) Export(_ context.Context, rm *metricdata.ResourceMetrics) error {
+	e.dataPoints = 0
+	e.overflow = 0
+	for _, scopeMetrics := range rm.ScopeMetrics {
+		for _, exportedMetric := range scopeMetrics.Metrics {
+			sum, ok := exportedMetric.Data.(metricdata.Sum[int64])
+			if !ok {
+				continue
+			}
+			e.dataPoints += len(sum.DataPoints)
+			for _, dataPoint := range sum.DataPoints {
+				if value, ok := dataPoint.Attributes.Value("otel.metric.overflow"); ok && value.AsBool() {
+					e.overflow++
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func (*cardinalityTestExporter) ForceFlush(context.Context) error { return nil }
+func (*cardinalityTestExporter) Shutdown(context.Context) error   { return nil }
+
+func TestTelemetryOption_MetricCardinalityLimit(t *testing.T) {
+	// The SDK also supports this experimental environment variable. Keep the
+	// test focused on the TelemetryOption contract, independent of the caller's
+	// process environment.
+	t.Setenv("OTEL_GO_X_CARDINALITY_LIMIT", "")
+
+	tests := []struct {
+		name           string
+		limit          int
+		attributeSets  int
+		wantDataPoints int
+		wantOverflow   int
+	}{
+		{
+			name:           "zero keeps SDK default",
+			limit:          0,
+			attributeSets:  2001,
+			wantDataPoints: 2000,
+			wantOverflow:   1,
+		},
+		{
+			name:           "positive value overrides default",
+			limit:          10,
+			attributeSets:  25,
+			wantDataPoints: 10,
+			wantOverflow:   1,
+		},
+		{
+			name:           "roomy positive value retains every set",
+			limit:          30,
+			attributeSets:  25,
+			wantDataPoints: 25,
+			wantOverflow:   0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			exporter := &cardinalityTestExporter{}
+			resolved := telemetryOptions{}
+			WithMetricCardinalityLimit(tt.limit).apply(&resolved)
+			cfg := TelemetryConfig{}
+			provider := cfg.newMeterProvider(sdkresource.Empty(), exporter, resolved.metricCardinalityLimit)
+			t.Cleanup(func() { require.NoError(t, provider.Shutdown(context.Background())) })
+
+			counter, err := provider.Meter("cardinality-test").Int64Counter("sets")
+			require.NoError(t, err)
+			for index := 0; index < tt.attributeSets; index++ {
+				counter.Add(context.Background(), 1, metric.WithAttributes(attribute.Int("set", index)))
+			}
+
+			require.NoError(t, provider.ForceFlush(context.Background()))
+			assert.Equal(t, tt.wantDataPoints, exporter.dataPoints)
+			assert.Equal(t, tt.wantOverflow, exporter.overflow)
+		})
+	}
+}
+
+func TestNewTelemetryPreservesExactSignature(t *testing.T) {
+	t.Parallel()
+
+	var constructor func(TelemetryConfig) (*Telemetry, error) = NewTelemetry
+	assert.NotNil(t, constructor)
 }
 
 // ===========================================================================

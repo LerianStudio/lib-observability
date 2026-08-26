@@ -120,6 +120,39 @@ type TelemetryConfig struct {
 	Redactor                 *Redactor
 }
 
+// TelemetryOption configures optional provider behavior without extending
+// TelemetryConfig. Keeping these settings separate preserves source
+// compatibility for callers that use unkeyed TelemetryConfig literals.
+type TelemetryOption interface {
+	apply(opts *telemetryOptions)
+}
+
+type telemetryOptions struct {
+	metricCardinalityLimit int
+}
+
+type telemetryOptionFunc func(*telemetryOptions)
+
+func (fn telemetryOptionFunc) apply(opts *telemetryOptions) {
+	fn(opts)
+}
+
+// WithMetricCardinalityLimit caps how many distinct attribute sets the metrics
+// SDK retains per instrument. A value less than or equal to zero keeps the
+// OpenTelemetry SDK default (2000); a positive value overrides it.
+//
+// Past the limit the SDK collapses excess attribute sets into a single
+// otel.metric.overflow=true data point and discards their original attributes.
+// Budget the limit per instrument. For the per-tenant counters, whose attribute
+// set is tenant.id x http.route, the tenant ceiling is
+// floor((limit - 1) / normalized routes) because the SDK reserves one set for
+// overflow.
+func WithMetricCardinalityLimit(limit int) TelemetryOption {
+	return telemetryOptionFunc(func(opts *telemetryOptions) {
+		opts.metricCardinalityLimit = limit
+	})
+}
+
 // Telemetry holds configured OpenTelemetry providers and lifecycle handlers.
 type Telemetry struct {
 	TelemetryConfig
@@ -133,6 +166,25 @@ type Telemetry struct {
 
 // NewTelemetry builds telemetry providers and exporters from configuration.
 func NewTelemetry(cfg TelemetryConfig) (*Telemetry, error) {
+	return newTelemetry(cfg, telemetryOptions{})
+}
+
+// NewTelemetryWithOptions builds telemetry providers and exporters from
+// configuration plus optional provider settings. NewTelemetry remains the
+// source-compatible default entry point.
+func NewTelemetryWithOptions(cfg TelemetryConfig, options ...TelemetryOption) (*Telemetry, error) {
+	resolved := telemetryOptions{}
+
+	for _, option := range options {
+		if option != nil {
+			option.apply(&resolved)
+		}
+	}
+
+	return newTelemetry(cfg, resolved)
+}
+
+func newTelemetry(cfg TelemetryConfig, options telemetryOptions) (*Telemetry, error) {
 	if log.IsNil(cfg.Logger) {
 		return nil, ErrNilTelemetryLogger
 	}
@@ -178,7 +230,7 @@ func NewTelemetry(cfg TelemetryConfig) (*Telemetry, error) {
 		}
 	}
 
-	return initExporters(ctx, cfg)
+	return initExporters(ctx, cfg, options)
 }
 
 // normalizeEndpoint strips URL scheme from the collector endpoint and infers security mode.
@@ -249,7 +301,7 @@ func handleEmptyEndpoint(cfg TelemetryConfig) (*Telemetry, error) {
 
 // initExporters creates OTLP exporters, providers, and a metrics factory,
 // rolling back partial allocations on failure.
-func initExporters(ctx context.Context, cfg TelemetryConfig) (*Telemetry, error) {
+func initExporters(ctx context.Context, cfg TelemetryConfig, options telemetryOptions) (*Telemetry, error) {
 	r := cfg.newResource()
 
 	// Track all allocated resources for rollback if a later step fails.
@@ -280,7 +332,7 @@ func initExporters(ctx context.Context, cfg TelemetryConfig) (*Telemetry, error)
 
 	cleanups = append(cleanups, lExp)
 
-	mp := cfg.newMeterProvider(r, mExp)
+	mp := cfg.newMeterProvider(r, mExp, options.metricCardinalityLimit)
 	cleanups = append(cleanups, mp)
 
 	tp := cfg.newTracerProvider(r, tExp)
@@ -527,11 +579,24 @@ func (tl *TelemetryConfig) newLoggerProvider(rsc *sdkresource.Resource, exp *otl
 	return sdklog.NewLoggerProvider(sdklog.WithResource(rsc), sdklog.WithProcessor(bp))
 }
 
-func (tl *TelemetryConfig) newMeterProvider(res *sdkresource.Resource, exp *otlpmetricgrpc.Exporter) *sdkmetric.MeterProvider {
-	return sdkmetric.NewMeterProvider(
+func (tl *TelemetryConfig) newMeterProvider(
+	res *sdkresource.Resource,
+	exp sdkmetric.Exporter,
+	cardinalityLimit int,
+) *sdkmetric.MeterProvider {
+	opts := []sdkmetric.Option{
 		sdkmetric.WithResource(res),
 		sdkmetric.WithReader(sdkmetric.NewPeriodicReader(exp)),
-	)
+	}
+
+	// Zero keeps the SDK default (2000). Past the limit the SDK collapses
+	// excess attribute sets into otel.metric.overflow=true and drops tenant
+	// identity.
+	if cardinalityLimit > 0 {
+		opts = append(opts, sdkmetric.WithCardinalityLimit(cardinalityLimit))
+	}
+
+	return sdkmetric.NewMeterProvider(opts...)
 }
 
 func (tl *TelemetryConfig) newTracerProvider(rsc *sdkresource.Resource, exp *otlptrace.Exporter) *sdktrace.TracerProvider {
