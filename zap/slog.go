@@ -8,17 +8,20 @@ import (
 	"go.uber.org/zap/exp/zapslog"
 )
 
-// Slog adapts a log.Logger to a stdlib *slog.Logger, so it can be handed to
+// Slog adapts any logger to a stdlib *slog.Logger, so it can be handed to
 // libraries that accept an slog-compatible logger (for example
 // lib-service-discovery's libsd.WithLogger) without exposing any
 // lib-observability type on the boundary.
+//
+// The parameter is log.Universal - one method, universal types - so a caller
+// can pass a logger declared in its own package. Any log.Logger satisfies it.
 //
 // When l is zap-backed — the production path, since czap.New returns *Logger —
 // the returned *slog.Logger writes through the very same zap core, so its output
 // stays unified with the rest of the service's logs. Any other implementation
 // (the nil logger, gomock doubles) falls back to a discarding handler rather
 // than panicking, mirroring the "unknown logger is silent" posture elsewhere.
-func Slog(l logpkg.Logger) *slog.Logger {
+func Slog(l logpkg.Universal) *slog.Logger {
 	if zl, ok := l.(*Logger); ok {
 		return slog.New(zapslog.NewHandler(zl.Raw().Core()))
 	}

@@ -49,9 +49,19 @@ func (l *Logger) must() *zap.Logger {
 // If ctx carries an active OpenTelemetry span, trace_id and span_id are
 // automatically appended so logs correlate with distributed traces.
 //
-// Unknown levels are treated as LevelInfo (consistent with GoLogger policy).
-func (l *Logger) Log(ctx context.Context, level logpkg.Level, msg string, fields ...logpkg.Field) {
-	zapFields := logFieldsToZap(fields)
+// Out-of-range policy: a level outside LevelError..LevelDebug is emitted at
+// Error - the most severe level, so a miscalibrated caller is never silently
+// dropped - with the original int attached under logpkg.BadLevelKey. This
+// matches GoLogger.
+func (l *Logger) Log(ctx context.Context, level int, msg string, fields ...any) {
+	typed := logpkg.Fields(fields...)
+
+	if !logpkg.LevelValid(level) {
+		typed = append(typed, logpkg.Int(logpkg.BadLevelKey, level))
+		level = logpkg.LevelError
+	}
+
+	zapFields := logFieldsToZap(typed)
 
 	if ctx != nil {
 		if sc := trace.SpanFromContext(ctx).SpanContext(); sc.IsValid() {
@@ -76,22 +86,22 @@ func (l *Logger) Log(ctx context.Context, level logpkg.Level, msg string, fields
 	case logpkg.LevelError:
 		l.must().Error(safeMsg, zapFields...)
 	default:
-		// Unknown level policy: treat as Info. This is consistent across both
-		// GoLogger and zap backends. See log.Level documentation.
-		l.must().Info(safeMsg, zapFields...)
+		// Unreachable: LevelValid gates the switch above and rewrites any
+		// out-of-range level to LevelError. Kept as a defensive fallback.
+		l.must().Error(safeMsg, zapFields...)
 	}
 }
 
 // With returns a child logger with additional structured fields.
 //
 //nolint:ireturn
-func (l *Logger) With(fields ...logpkg.Field) logpkg.Logger {
+func (l *Logger) With(fields ...any) logpkg.Logger {
 	if l == nil {
 		return &Logger{logger: zap.NewNop()}
 	}
 
 	return &Logger{
-		logger:          l.must().With(logFieldsToZap(fields)...),
+		logger:          l.must().With(logFieldsToZap(logpkg.Fields(fields...))...),
 		atomicLevel:     l.atomicLevel,
 		consoleEncoding: l.consoleEncoding,
 	}
@@ -118,8 +128,13 @@ func (l *Logger) WithGroup(name string) logpkg.Logger {
 }
 
 // Enabled reports whether the logger would emit a log at the given level.
-func (l *Logger) Enabled(level logpkg.Level) bool {
-	return l.must().Core().Enabled(logLevelToZap(level))
+func (l *Logger) Enabled(level int) bool {
+	typed, ok := logpkg.LevelFrom(level)
+	if !ok {
+		return false
+	}
+
+	return l.must().Core().Enabled(logLevelToZap(typed))
 }
 
 // Sync flushes buffered logs, respecting context cancellation.

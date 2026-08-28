@@ -377,11 +377,13 @@ func TestLogDefaultLevel(t *testing.T) {
 
 	logger, observed := newObservedLogger(zapcore.DebugLevel)
 
-	logger.Log(context.Background(), logpkg.Level(99), "default level")
+	logger.Log(context.Background(), 99, "default level")
 
 	entries := observed.All()
 	require.Len(t, entries, 1)
-	assert.Equal(t, zapcore.InfoLevel, entries[0].Level, "unknown level should default to Info")
+	assert.Equal(t, zapcore.ErrorLevel, entries[0].Level, "out-of-range level should be emitted at error")
+	assert.Equal(t, int64(99), entries[0].ContextMap()[logpkg.BadLevelKey],
+		"out-of-range level should be recorded under BadLevelKey")
 }
 
 func TestLogWithNilContext(t *testing.T) {
@@ -480,7 +482,7 @@ func TestEnabledReportsCorrectly(t *testing.T) {
 	tests := []struct {
 		name      string
 		coreLevel zapcore.Level
-		checkLvl  logpkg.Level
+		checkLvl  int
 		expected  bool
 	}{
 		{"debug enabled at debug", zapcore.DebugLevel, logpkg.LevelDebug, true},
