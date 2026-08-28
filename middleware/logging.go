@@ -64,10 +64,16 @@ type logMiddleware struct {
 type LogMiddlewareOption func(l *logMiddleware)
 
 // WithCustomLogger configures a custom logger for access logging.
-func WithCustomLogger(logger obslog.Logger) LogMiddlewareOption {
+//
+// The parameter is obslog.Universal - a single Log method built from universal
+// types - not obslog.Logger, so a caller can pass a logger declared in its own
+// package without importing lib-observability. obslog.Adapt converts at the
+// call and returns a full Logger unchanged, so existing callers are
+// unaffected.
+func WithCustomLogger(logger obslog.Universal) LogMiddlewareOption {
 	return func(l *logMiddleware) {
 		if !obslog.IsNil(logger) {
-			l.Logger = logger
+			l.Logger = obslog.Adapt(logger)
 		}
 	}
 }
@@ -245,7 +251,7 @@ func WithHTTPLogging(opts ...LogMiddlewareOption) fiber.Handler {
 			fields = append(fields, obslog.String("error", tracing.ErrorMessage(handlerErr)))
 		}
 
-		logger.With(fields...).Log(c.Context(), httpAccessLogLevel(info.Status), info.CLFString())
+		logger.With(fields).Log(c.Context(), httpAccessLogLevel(info.Status), info.CLFString())
 
 		return chainErr
 	}
@@ -268,7 +274,7 @@ func nextWithNormalizedHTTPError(c fiber.Ctx) error {
 	return normalizeHTTPHandlerError(c.Next())
 }
 
-func httpAccessLogLevel(statusCode int) obslog.Level {
+func httpAccessLogLevel(statusCode int) int {
 	switch {
 	case statusCode >= fiber.StatusInternalServerError:
 		return obslog.LevelError
@@ -393,7 +399,7 @@ func WithGrpcLogging(opts ...LogMiddlewareOption) grpc.UnaryServerInterceptor {
 			fields = append(fields, obslog.Err(err))
 		}
 
-		logger.Log(ctx, obslog.LevelInfo, "gRPC request finished", fields...)
+		logger.Log(ctx, obslog.LevelInfo, "gRPC request finished", fields)
 
 		return resp, err
 	}

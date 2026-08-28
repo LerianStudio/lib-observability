@@ -46,13 +46,13 @@ func unsetEnvVar(t *testing.T, key string) {
 
 type nilUnsafeLogger struct{}
 
-func (l *nilUnsafeLogger) Log(context.Context, log.Level, string, ...log.Field) {
+func (l *nilUnsafeLogger) Log(context.Context, int, string, ...any) {
 	if l == nil {
 		panic("typed-nil logger method invoked")
 	}
 }
 
-func (l *nilUnsafeLogger) With(...log.Field) log.Logger {
+func (l *nilUnsafeLogger) With(...any) log.Logger {
 	if l == nil {
 		panic("typed-nil logger method invoked")
 	}
@@ -68,7 +68,7 @@ func (l *nilUnsafeLogger) WithGroup(string) log.Logger {
 	return l
 }
 
-func (l *nilUnsafeLogger) Enabled(log.Level) bool {
+func (l *nilUnsafeLogger) Enabled(int) bool {
 	if l == nil {
 		panic("typed-nil logger method invoked")
 	}
