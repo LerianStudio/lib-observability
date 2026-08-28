@@ -3,8 +3,8 @@
 // explicit errors. Includes pre-configured domain metric recorders and system
 // infrastructure gauges.
 //
-// For consumers in OTHER modules, the package also exposes UniversalRecorder and
-// the UniversalMetrics adapter: the recording surface flattened into three calls
+// For consumers in OTHER modules, the package also exposes Recorder and
+// the AsRecorder adapter: the recording surface flattened into three calls
 // declared with universal types only, so a downstream module can declare an
 // equivalent interface in its own package and stop inheriting this module's major
 // version. See universal.go for the full rationale.

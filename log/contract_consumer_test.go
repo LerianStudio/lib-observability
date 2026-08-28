@@ -2,9 +2,9 @@
 
 // This file deliberately lives in the EXTERNAL test package (log_test) and
 // declares its interfaces using ONLY universal types. It is the regression
-// test for the reason log.UniversalLogger exists: if anyone reintroduces a
+// test for the reason log.Contract exists: if anyone reintroduces a
 // package-defined type (log.Level, log.Field, or a self-returning method)
-// into a UniversalLogger signature, the declarations below stop compiling.
+// into a Contract signature, the declarations below stop compiling.
 //
 // Read it as a stand-in for lib-commons, midaz, or any other consumer that
 // wants to depend on "something that logs" without importing this module.
@@ -24,7 +24,7 @@ import (
 // self-returning method. Only predeclared types and context.Context.
 //
 // This exact declaration, copied into a consumer's package, lets that
-// consumer accept log.Universal(...) with no import of lib-observability at
+// consumer accept log.AsContract(...) with no import of lib-observability at
 // all — which is what keeps this module's major version from crossing the
 // module boundary.
 type consumerLogger interface {
@@ -37,17 +37,17 @@ type consumerLogger interface {
 //
 //  1. the adapter satisfies a locally declared, structurally identical
 //     interface; and
-//  2. log.UniversalLogger itself is assignable to it, so the two are the
+//  2. log.Contract itself is assignable to it, so the two are the
 //     same interface type as far as Go is concerned.
 var (
-	_ consumerLogger      = log.Universal(log.NewNop())
-	_ consumerLogger      = (log.UniversalLogger)(nil)
-	_ log.UniversalLogger = (consumerLogger)(nil)
+	_ consumerLogger = log.AsContract(log.NewNop())
+	_ consumerLogger = (log.Contract)(nil)
+	_ log.Contract   = (consumerLogger)(nil)
 )
 
 // countingConsumerLogger is a consumer-side implementation built only from
 // universal types, proving the traffic also flows the other way: a consumer
-// can hand ITS logger to code expecting a log.UniversalLogger.
+// can hand ITS logger to code expecting a log.Contract.
 type countingConsumerLogger struct {
 	logs    int
 	lastKV  []any
@@ -67,13 +67,13 @@ func TestConsumerDeclaredInterfaceIsSatisfiedByAdapter(t *testing.T) {
 	inner := log.NewNop()
 
 	// The assignment itself is the assertion: it only compiles while every
-	// UniversalLogger method uses universal types.
-	var declaredLocally consumerLogger = log.Universal(inner)
+	// Contract method uses universal types.
+	var declaredLocally consumerLogger = log.AsContract(inner)
 
 	require.NotNil(t, declaredLocally)
 
 	// And back again, without a conversion.
-	var asLibType log.UniversalLogger = declaredLocally
+	var asLibType log.Contract = declaredLocally
 
 	require.NotNil(t, asLibType)
 
@@ -89,10 +89,10 @@ func TestConsumerImplementationIsAcceptedByLibHelpers(t *testing.T) {
 
 	// A consumer-authored implementation, never having seen log.Logger,
 	// flows through the library's composition helpers.
-	var u log.UniversalLogger = consumer
+	var u log.Contract = consumer
 
-	u = log.UniversalWith(u, "service", "ledger")
-	u = log.UniversalWithGroup(u, "http")
+	u = log.ContractWith(u, "service", "ledger")
+	u = log.ContractWithGroup(u, "http")
 	u.Log(context.Background(), 2, "msg", "request_id", "abc")
 
 	assert.Equal(t, 1, consumer.logs)
@@ -100,13 +100,13 @@ func TestConsumerImplementationIsAcceptedByLibHelpers(t *testing.T) {
 	assert.True(t, u.Enabled(3))
 }
 
-func TestUniversalAdapterHasNoSelfReturningMethod(t *testing.T) {
-	// UniversalWith and UniversalWithGroup are free functions precisely so
-	// that UniversalLogger has no self-returning method. If either ever
+func TestContractAdapterHasNoSelfReturningMethod(t *testing.T) {
+	// ContractWith and ContractWithGroup are free functions precisely so
+	// that Contract has no self-returning method. If either ever
 	// became a method, consumerLogger above would no longer be assignable
 	// from the adapter and this package would fail to compile.
-	u := log.Universal(log.NewNop())
+	u := log.AsContract(log.NewNop())
 
-	assert.NotNil(t, log.UniversalWith(u, "k", "v"))
-	assert.NotNil(t, log.UniversalWithGroup(u, "g"))
+	assert.NotNil(t, log.ContractWith(u, "k", "v"))
+	assert.NotNil(t, log.ContractWithGroup(u, "g"))
 }

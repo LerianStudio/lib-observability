@@ -48,9 +48,9 @@ func collectMetric(t *testing.T, reader *sdkmetric.ManualReader, name string) me
 	return metricdata.Metrics{}
 }
 
-func TestUniversalMetricsAddCounter(t *testing.T) {
+func TestContractMetricsAddCounter(t *testing.T) {
 	factory, reader := newCollectingFactory(t)
-	recorder := UniversalMetrics(factory)
+	recorder := AsRecorder(factory)
 
 	ctx := context.Background()
 
@@ -71,17 +71,17 @@ func TestUniversalMetricsAddCounter(t *testing.T) {
 	assert.Equal(t, "/health", route.AsString())
 }
 
-func TestUniversalMetricsAddCounterRejectsNegativeDelta(t *testing.T) {
+func TestContractMetricsAddCounterRejectsNegativeDelta(t *testing.T) {
 	factory, _ := newCollectingFactory(t)
 
-	err := UniversalMetrics(factory).AddCounter(context.Background(), "requests_total", "", "1", nil, -1)
+	err := AsRecorder(factory).AddCounter(context.Background(), "requests_total", "", "1", nil, -1)
 	require.ErrorIs(t, err, ErrNegativeCounterValue)
 	assert.ErrorContains(t, err, "requests_total")
 }
 
-func TestUniversalMetricsSetGauge(t *testing.T) {
+func TestContractMetricsSetGauge(t *testing.T) {
 	factory, reader := newCollectingFactory(t)
-	recorder := UniversalMetrics(factory)
+	recorder := AsRecorder(factory)
 
 	ctx := context.Background()
 
@@ -96,11 +96,11 @@ func TestUniversalMetricsSetGauge(t *testing.T) {
 	assert.Equal(t, int64(4), gauge.DataPoints[0].Value, "gauge holds the last value set")
 }
 
-func TestUniversalMetricsRecordHistogram(t *testing.T) {
+func TestContractMetricsRecordHistogram(t *testing.T) {
 	factory, reader := newCollectingFactory(t)
 
 	buckets := []float64{10, 50, 100}
-	err := UniversalMetrics(factory).RecordHistogram(
+	err := AsRecorder(factory).RecordHistogram(
 		context.Background(), "request_duration_ms", "request duration", "ms",
 		map[string]string{"route": "/health"}, 42, buckets,
 	)
@@ -117,10 +117,10 @@ func TestUniversalMetricsRecordHistogram(t *testing.T) {
 	assert.Equal(t, buckets, histogram.DataPoints[0].Bounds)
 }
 
-func TestUniversalMetricsRecordHistogramNilBucketsUsesFactoryDefaults(t *testing.T) {
+func TestContractMetricsRecordHistogramNilBucketsUsesFactoryDefaults(t *testing.T) {
 	factory, reader := newCollectingFactory(t)
 
-	require.NoError(t, UniversalMetrics(factory).RecordHistogram(
+	require.NoError(t, AsRecorder(factory).RecordHistogram(
 		context.Background(), "transaction_latency", "", "ms", nil, 5, nil,
 	))
 
@@ -132,11 +132,11 @@ func TestUniversalMetricsRecordHistogramNilBucketsUsesFactoryDefaults(t *testing
 	assert.Equal(t, DefaultLatencyBuckets, histogram.DataPoints[0].Bounds)
 }
 
-// TestUniversalMetricsRecordHistogramRounding pins the DIVERGENCE between the
+// TestContractMetricsRecordHistogramRounding pins the DIVERGENCE between the
 // float64 parameter and the int64 instrument underneath: values are rounded
 // half away from zero, so sub-integer measurements (durations in seconds)
-// collapse toward 0. See the precision note on UniversalRecorder.
-func TestUniversalMetricsRecordHistogramRounding(t *testing.T) {
+// collapse toward 0. See the precision note on Recorder.
+func TestContractMetricsRecordHistogramRounding(t *testing.T) {
 	tests := []struct {
 		name     string
 		value    float64
@@ -159,9 +159,9 @@ func TestUniversalMetricsRecordHistogramRounding(t *testing.T) {
 	}
 }
 
-func TestUniversalMetricsRecordHistogramRejectsUnrepresentableValues(t *testing.T) {
+func TestContractMetricsRecordHistogramRejectsUnrepresentableValues(t *testing.T) {
 	factory, _ := newCollectingFactory(t)
-	recorder := UniversalMetrics(factory)
+	recorder := AsRecorder(factory)
 
 	values := map[string]float64{
 		"NaN":               math.NaN(),
@@ -184,14 +184,14 @@ func TestUniversalMetricsRecordHistogramRejectsUnrepresentableValues(t *testing.
 	}
 }
 
-func TestUniversalMetricsRecordHistogramAcceptsInt64Bounds(t *testing.T) {
+func TestContractMetricsRecordHistogramAcceptsInt64Bounds(t *testing.T) {
 	min64, err := int64FromFloat(float64(math.MinInt64))
 	require.NoError(t, err)
 	assert.Equal(t, int64(math.MinInt64), min64)
 }
 
-func TestUniversalMetricsNilFactoryIsNoOp(t *testing.T) {
-	recorder := UniversalMetrics(nil)
+func TestContractMetricsNilFactoryIsNoOp(t *testing.T) {
+	recorder := AsRecorder(nil)
 	require.NotNil(t, recorder)
 
 	ctx := context.Background()
@@ -203,10 +203,10 @@ func TestUniversalMetricsNilFactoryIsNoOp(t *testing.T) {
 	})
 }
 
-func TestUniversalMetricsNilAttributesAreAccepted(t *testing.T) {
+func TestContractMetricsNilAttributesAreAccepted(t *testing.T) {
 	factory, reader := newCollectingFactory(t)
 
-	require.NoError(t, UniversalMetrics(factory).AddCounter(context.Background(), "no_labels_total", "", "1", nil, 1))
+	require.NoError(t, AsRecorder(factory).AddCounter(context.Background(), "no_labels_total", "", "1", nil, 1))
 
 	collected := collectMetric(t, reader, "no_labels_total")
 

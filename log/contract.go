@@ -5,7 +5,7 @@ import (
 	"strings"
 )
 
-// UniversalLogger mirrors Logger using only universal Go types, so that a
+// Contract mirrors Logger using only universal Go types, so that a
 // consumer module can declare an equivalent interface locally, in its own
 // package, without importing this one.
 //
@@ -27,7 +27,7 @@ import (
 // outside the declaring package by construction — no local interface can
 // name the return type.
 //
-// UniversalLogger removes both obstacles. Its signatures use only int,
+// Contract removes both obstacles. Its signatures use only int,
 // string, any, error and context.Context, all universal (predeclared or
 // stdlib) types, and it has no self-returning method. A consumer can write
 // this in its own package and accept the adapter with no import of
@@ -40,7 +40,7 @@ import (
 //	}
 //
 // The composition helpers that would have been self-returning methods are
-// free functions instead: UniversalWith and UniversalWithGroup.
+// free functions instead: ContractWith and ContractWithGroup.
 //
 // # Level scale
 //
@@ -53,14 +53,14 @@ import (
 //
 // kv carries alternating key/value pairs in the style of log/slog: a string
 // key followed by an arbitrary value. Malformed input is surfaced rather
-// than dropped, using slog's BadKey convention — see UniversalBadKey.
-type UniversalLogger interface {
+// than dropped, using slog's BadKey convention — see ContractBadKey.
+type Contract interface {
 	Log(ctx context.Context, level int, msg string, kv ...any)
 	Enabled(level int) bool
 	Sync(ctx context.Context) error
 }
 
-// Universal level constants. They carry the same numeric values as the Level
+// Contract level constants. They carry the same numeric values as the Level
 // constants of the same name, so consumers can hardcode 0..3 (or copy these
 // values into their own package) and stay on this package's scale without
 // importing it.
@@ -78,132 +78,132 @@ const (
 
 // LevelUnknownInt is the universal mirror of LevelUnknown. It is not a
 // loggable severity: passing it (or any other out-of-range int) follows the
-// out-of-range policy documented on universalAdapter.Log and
-// universalAdapter.Enabled.
+// out-of-range policy documented on contractAdapter.Log and
+// contractAdapter.Enabled.
 const LevelUnknownInt = int(LevelUnknown)
 
 const (
-	// UniversalBadKey is the key used for a kv entry this package cannot
+	// ContractBadKey is the key used for a kv entry this package cannot
 	// interpret: a non-string key, or a trailing key with no value. It is
 	// the same sentinel log/slog uses, so operators reading a mixed fleet
 	// see one convention.
-	UniversalBadKey = "!BADKEY"
+	ContractBadKey = "!BADKEY"
 
-	// UniversalBadLevelKey is the key under which the original int is
+	// ContractBadLevelKey is the key under which the original int is
 	// recorded when Log receives a level outside the defined range.
-	UniversalBadLevelKey = "!BADLEVEL"
+	ContractBadLevelKey = "!BADLEVEL"
 
 	// universalGroupKey is the key used to carry group names into a foreign
-	// UniversalLogger implementation, which has no WithGroup of its own.
+	// Contract implementation, which has no WithGroup of its own.
 	universalGroupKey = "group"
 )
 
-// universalAdapter is the UniversalLogger view of a Logger. It is the only
+// contractAdapter is the Contract view of a Logger. It is the only
 // implementation that can delegate composition to a real Logger, so
-// UniversalWith and UniversalWithGroup type-assert for it.
-type universalAdapter struct {
+// ContractWith and ContractWithGroup type-assert for it.
+type contractAdapter struct {
 	inner Logger
 }
 
-// universalBound wraps a UniversalLogger that is NOT one of ours (a consumer
+// contractBound wraps a Contract that is NOT one of ours (a consumer
 // implementation, a test double) and carries the bound key/value pairs and
 // group names it has no way to store itself, replaying them on every Log.
-type universalBound struct {
-	next   UniversalLogger
+type contractBound struct {
+	next   Contract
 	kv     []any
 	groups []string
 }
 
-// Universal adapts a Logger to the universal form described on
-// UniversalLogger.
+// AsContract adapts a Logger to the contract form described on
+// Contract.
 //
-// Universal(nil), and a Logger interface holding a typed-nil implementation,
+// AsContract(nil), and a Logger interface holding a typed-nil implementation,
 // both return a working adapter over NewNop rather than a nil interface —
 // the result is always safe to call. See IsNil.
 //
 //nolint:ireturn // returning the interface is the whole point of the adapter.
-func Universal(l Logger) UniversalLogger {
+func AsContract(l Logger) Contract {
 	if IsNil(l) {
-		return &universalAdapter{inner: NewNop()}
+		return &contractAdapter{inner: NewNop()}
 	}
 
-	return &universalAdapter{inner: l}
+	return &contractAdapter{inner: l}
 }
 
-// UniversalWith returns a UniversalLogger with kv bound to it, the free-function
+// ContractWith returns a Contract with kv bound to it, the free-function
 // equivalent of Logger.With. It is a function rather than a method because a
 // self-returning method cannot be declared by a consumer in its own package,
-// which would defeat the purpose of UniversalLogger.
+// which would defeat the purpose of Contract.
 //
 // Behavior by argument:
 //
-//   - an adapter returned by Universal — delegates to the underlying
+//   - an adapter returned by AsContract — delegates to the underlying
 //     Logger.With, so the backing implementation applies its own field
 //     handling (redaction, grouping, encoding).
-//   - any other UniversalLogger — degrades to a wrapper that prepends kv to
+//   - any other Contract — degrades to a wrapper that prepends kv to
 //     every subsequent Log call. Semantically equivalent, but the pairs are
 //     re-sent per call instead of being bound once by the implementation.
 //   - nil (or typed-nil) — returns the same safe no-op adapter as
-//     Universal(nil).
+//     AsContract(nil).
 //
-// Malformed kv follows the UniversalBadKey convention. An empty kv returns u
+// Malformed kv follows the ContractBadKey convention. An empty kv returns u
 // unchanged.
 //
 //nolint:ireturn // returning the interface is the whole point of the adapter.
-func UniversalWith(u UniversalLogger, kv ...any) UniversalLogger {
-	if IsNil(u) {
-		return Universal(nil)
+func ContractWith(c Contract, kv ...any) Contract {
+	if IsNil(c) {
+		return AsContract(nil)
 	}
 
 	if len(kv) == 0 {
-		return u
+		return c
 	}
 
-	switch typed := u.(type) {
-	case *universalAdapter:
-		return Universal(typed.inner.With(fieldsFromKV(kv)...))
-	case *universalBound:
+	switch typed := c.(type) {
+	case *contractAdapter:
+		return AsContract(typed.inner.With(fieldsFromKV(kv)...))
+	case *contractBound:
 		return typed.with(kv)
 	default:
-		return &universalBound{next: u, kv: cloneAny(kv)}
+		return &contractBound{next: c, kv: cloneAny(kv)}
 	}
 }
 
-// UniversalWithGroup returns a UniversalLogger scoped under name, the
+// ContractWithGroup returns a Contract scoped under name, the
 // free-function equivalent of Logger.WithGroup. It is a function for the same
-// reason as UniversalWith.
+// reason as ContractWith.
 //
 // Behavior by argument:
 //
-//   - an adapter returned by Universal — delegates to the underlying
+//   - an adapter returned by AsContract — delegates to the underlying
 //     Logger.WithGroup.
-//   - any other UniversalLogger — degrades to a wrapper that adds a
+//   - any other Contract — degrades to a wrapper that adds a
 //     "group" key/value pair, holding the dot-joined group path, to every
 //     subsequent Log call. A foreign implementation has no WithGroup to
 //     delegate to, so the group is expressed as data instead of structure.
 //   - nil (or typed-nil) — returns the same safe no-op adapter as
-//     Universal(nil).
+//     AsContract(nil).
 //
 // An empty or whitespace-only name returns u unchanged, matching GoLogger
 // and the zap adapter.
 //
 //nolint:ireturn // returning the interface is the whole point of the adapter.
-func UniversalWithGroup(u UniversalLogger, name string) UniversalLogger {
-	if IsNil(u) {
-		return Universal(nil)
+func ContractWithGroup(c Contract, name string) Contract {
+	if IsNil(c) {
+		return AsContract(nil)
 	}
 
 	if strings.TrimSpace(name) == "" {
-		return u
+		return c
 	}
 
-	switch typed := u.(type) {
-	case *universalAdapter:
-		return Universal(typed.inner.WithGroup(name))
-	case *universalBound:
+	switch typed := c.(type) {
+	case *contractAdapter:
+		return AsContract(typed.inner.WithGroup(name))
+	case *contractBound:
 		return typed.withGroup(name)
 	default:
-		return &universalBound{next: u, groups: []string{name}}
+		return &contractBound{next: c, groups: []string{name}}
 	}
 }
 
@@ -212,8 +212,8 @@ func UniversalWithGroup(u UniversalLogger, name string) UniversalLogger {
 // Out-of-range policy: a level outside LevelErrorInt..LevelDebugInt is never
 // cast blindly onto Level. The entry is emitted at LevelError — the most
 // severe level, so a miscalibrated caller is never silently dropped — with
-// the original int attached under UniversalBadLevelKey.
-func (u *universalAdapter) Log(ctx context.Context, level int, msg string, kv ...any) {
+// the original int attached under ContractBadLevelKey.
+func (u *contractAdapter) Log(ctx context.Context, level int, msg string, kv ...any) {
 	if u == nil {
 		return
 	}
@@ -224,7 +224,7 @@ func (u *universalAdapter) Log(ctx context.Context, level int, msg string, kv ..
 	if !ok {
 		resolved = LevelError
 
-		fields = append(fields, Int(UniversalBadLevelKey, level))
+		fields = append(fields, Int(ContractBadLevelKey, level))
 	}
 
 	u.inner.Log(ctx, resolved, msg, fields...)
@@ -237,7 +237,7 @@ func (u *universalAdapter) Log(ctx context.Context, level int, msg string, kv ..
 // consulting the wrapped Logger. Note the asymmetry with Log, which still
 // emits such an entry at LevelError: Enabled answers "is this a level you
 // should format for?", and the answer for an undefined level is no.
-func (u *universalAdapter) Enabled(level int) bool {
+func (u *contractAdapter) Enabled(level int) bool {
 	if u == nil {
 		return false
 	}
@@ -251,7 +251,7 @@ func (u *universalAdapter) Enabled(level int) bool {
 }
 
 // Sync flushes the wrapped Logger.
-func (u *universalAdapter) Sync(ctx context.Context) error {
+func (u *contractAdapter) Sync(ctx context.Context) error {
 	if u == nil {
 		return nil
 	}
@@ -260,8 +260,8 @@ func (u *universalAdapter) Sync(ctx context.Context) error {
 }
 
 // Log replays the bound group path and key/value pairs ahead of the caller's
-// own, then forwards to the wrapped UniversalLogger.
-func (u *universalBound) Log(ctx context.Context, level int, msg string, kv ...any) {
+// own, then forwards to the wrapped Contract.
+func (u *contractBound) Log(ctx context.Context, level int, msg string, kv ...any) {
 	if u == nil {
 		return
 	}
@@ -278,8 +278,8 @@ func (u *universalBound) Log(ctx context.Context, level int, msg string, kv ...a
 	u.next.Log(ctx, level, msg, merged...)
 }
 
-// Enabled delegates to the wrapped UniversalLogger.
-func (u *universalBound) Enabled(level int) bool {
+// Enabled delegates to the wrapped Contract.
+func (u *contractBound) Enabled(level int) bool {
 	if u == nil {
 		return false
 	}
@@ -287,8 +287,8 @@ func (u *universalBound) Enabled(level int) bool {
 	return u.next.Enabled(level)
 }
 
-// Sync delegates to the wrapped UniversalLogger.
-func (u *universalBound) Sync(ctx context.Context) error {
+// Sync delegates to the wrapped Contract.
+func (u *contractBound) Sync(ctx context.Context) error {
 	if u == nil {
 		return nil
 	}
@@ -297,21 +297,21 @@ func (u *universalBound) Sync(ctx context.Context) error {
 }
 
 // with returns a copy carrying the additional key/value pairs.
-func (u *universalBound) with(kv []any) *universalBound {
+func (u *contractBound) with(kv []any) *contractBound {
 	merged := make([]any, 0, len(u.kv)+len(kv))
 	merged = append(merged, u.kv...)
 	merged = append(merged, kv...)
 
-	return &universalBound{next: u.next, kv: merged, groups: cloneStrings(u.groups)}
+	return &contractBound{next: u.next, kv: merged, groups: cloneStrings(u.groups)}
 }
 
 // withGroup returns a copy carrying an additional group path segment.
-func (u *universalBound) withGroup(name string) *universalBound {
+func (u *contractBound) withGroup(name string) *contractBound {
 	groups := make([]string, 0, len(u.groups)+1)
 	groups = append(groups, u.groups...)
 	groups = append(groups, name)
 
-	return &universalBound{next: u.next, kv: cloneAny(u.kv), groups: groups}
+	return &contractBound{next: u.next, kv: cloneAny(u.kv), groups: groups}
 }
 
 // levelFromInt maps a universal level int onto Level.
@@ -335,10 +335,10 @@ func levelFromInt(level int) (Level, bool) {
 // It follows log/slog's argsToAttr rules exactly, so a malformed call is
 // visible in the output instead of being silently dropped:
 //
-//   - a non-string key becomes Field{UniversalBadKey, thatValue} and consumes
+//   - a non-string key becomes Field{ContractBadKey, thatValue} and consumes
 //     one element (the offending element is treated as a value);
 //   - a trailing string key with no value becomes
-//     Field{UniversalBadKey, thatKey} and consumes one element;
+//     Field{ContractBadKey, thatKey} and consumes one element;
 //   - a well-formed pair becomes Field{key, value} and consumes two.
 //
 // An empty or nil kv yields no fields.
@@ -352,14 +352,14 @@ func fieldsFromKV(kv []any) []Field {
 	for i := 0; i < len(kv); {
 		key, ok := kv[i].(string)
 		if !ok {
-			fields = append(fields, Any(UniversalBadKey, kv[i]))
+			fields = append(fields, Any(ContractBadKey, kv[i]))
 			i++
 
 			continue
 		}
 
 		if i+1 >= len(kv) {
-			fields = append(fields, Any(UniversalBadKey, key))
+			fields = append(fields, Any(ContractBadKey, key))
 			i++
 
 			continue
