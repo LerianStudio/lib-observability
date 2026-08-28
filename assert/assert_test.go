@@ -8,7 +8,6 @@ import (
 	"math"
 	"testing"
 
-	"github.com/LerianStudio/lib-observability/v3/log"
 	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/require"
 )
@@ -23,7 +22,7 @@ type testLogger struct {
 	messages []string
 }
 
-func (l *testLogger) Log(_ context.Context, _ log.Level, msg string, _ ...log.Field) {
+func (l *testLogger) Log(_ context.Context, _ int, msg string, _ ...any) {
 	l.messages = append(l.messages, msg)
 }
 
