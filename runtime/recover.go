@@ -7,10 +7,18 @@ import (
 	"github.com/LerianStudio/lib-observability/v3/log"
 )
 
-// Logger defines the minimal logging interface required by runtime.
-// This interface is satisfied by github.com/LerianStudio/lib-observability/log.Logger.
+// Logger is the minimal logging interface required by this package.
+//
+// Its single method uses only universal types - context.Context, int, string,
+// any - so ANY logger value in the fleet satisfies it, from any version of
+// lib-observability, and so can a logger type declared in a package that has
+// never imported lib-observability at all. See log.Logger for why that
+// matters: naming log.Level and log.Field in this signature would make this
+// package's major version propagate to every caller.
+//
+// level is on the log package scale: Error=0, Warn=1, Info=2, Debug=3.
 type Logger interface {
-	Log(ctx context.Context, level log.Level, msg string, fields ...log.Field)
+	Log(ctx context.Context, level int, msg string, fields ...any)
 }
 
 // RecoverAndLog recovers from a panic, logs it with the stack trace, and

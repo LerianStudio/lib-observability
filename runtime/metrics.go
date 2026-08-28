@@ -9,10 +9,21 @@ import (
 	"github.com/LerianStudio/lib-observability/v3/metrics"
 )
 
+// Recorder is the minimal metric-recording interface this package needs.
+//
+// It uses only universal types, so *metrics.MetricsFactory satisfies it
+// natively (see metrics.Recorder) and so can a recorder declared in a package
+// that has never imported lib-observability. Naming *metrics.MetricsFactory
+// here would make this package's major version propagate to every caller that
+// initializes panic metrics.
+type Recorder interface {
+	AddCounter(ctx context.Context, name, description, unit string, attrs map[string]string, delta int64) error
+}
+
 // PanicMetrics provides panic-related metrics using OpenTelemetry.
-// It wraps lib-observability's MetricsFactory for consistent metric handling.
+// It records through a Recorder, so any metrics factory satisfies it.
 type PanicMetrics struct {
-	factory *metrics.MetricsFactory
+	factory Recorder
 	logger  Logger
 }
 
@@ -30,7 +41,12 @@ var (
 	panicMetricsMu       sync.RWMutex
 )
 
-// InitPanicMetrics initializes panic metrics with the provided MetricsFactory.
+// InitPanicMetrics initializes panic metrics with the provided recorder.
+//
+// The parameter is the universal Recorder interface rather than
+// *metrics.MetricsFactory. Existing callers are unaffected -
+// *metrics.MetricsFactory implements Recorder directly, so
+// InitPanicMetrics(tl.MetricsFactory) still compiles unchanged.
 //
 // Backward compatibility:
 //   - InitPanicMetrics(factory)
@@ -48,11 +64,11 @@ var (
 //	}
 //	tl.ApplyGlobals()
 //	runtime.InitPanicMetrics(tl.MetricsFactory)
-func InitPanicMetrics(factory *metrics.MetricsFactory, logger ...Logger) {
+func InitPanicMetrics(factory Recorder, logger ...Logger) {
 	panicMetricsMu.Lock()
 	defer panicMetricsMu.Unlock()
 
-	if factory == nil {
+	if log.IsNil(factory) {
 		return
 	}
 
@@ -98,25 +114,20 @@ func ResetPanicMetrics() {
 //   - component: The component where the panic occurred (e.g., "transaction", "onboarding", "crm")
 //   - goroutineName: The name of the goroutine or handler (e.g., "http_handler", "rabbitmq_worker")
 func (pm *PanicMetrics) RecordPanicRecovered(ctx context.Context, component, goroutineName string) {
-	if pm == nil || pm.factory == nil {
+	if pm == nil || log.IsNil(pm.factory) {
 		return
 	}
 
-	counter, err := pm.factory.Counter(panicRecoveredMetric)
-	if err != nil {
-		if pm.logger != nil {
-			pm.logger.Log(ctx, log.LevelWarn, "failed to create panic metric counter", log.Err(err))
-		}
-
-		return
-	}
-
-	err = counter.
-		WithLabels(map[string]string{
+	err := pm.factory.AddCounter(ctx,
+		panicRecoveredMetric.Name,
+		panicRecoveredMetric.Description,
+		panicRecoveredMetric.Unit,
+		map[string]string{
 			"component":      constant.SanitizeMetricLabel(component),
 			"goroutine_name": constant.SanitizeMetricLabel(goroutineName),
-		}).
-		AddOne(ctx)
+		},
+		1,
+	)
 	if err != nil {
 		if pm.logger != nil {
 			pm.logger.Log(ctx, log.LevelWarn, "failed to record panic metric", log.Err(err))

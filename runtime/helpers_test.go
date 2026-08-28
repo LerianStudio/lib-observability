@@ -28,7 +28,7 @@ func newTestLogger() *testLogger {
 	}
 }
 
-func (logger *testLogger) Log(_ context.Context, lvl log.Level, msg string, _ ...log.Field) {
+func (logger *testLogger) Log(_ context.Context, lvl int, msg string, _ ...any) {
 	logger.mu.Lock()
 	defer logger.mu.Unlock()
 
