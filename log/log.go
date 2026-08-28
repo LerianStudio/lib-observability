@@ -26,8 +26,8 @@ import (
 // touched the thing the major was actually about.
 //
 // With universal types in the signature, a consumer can declare this in its
-// own package, import nothing, and accept any logger this module ever
-// produces, from any version, forever:
+// own package, import nothing, and accept any logger this module produces from
+// v4 onward - forever, across every future major:
 //
 //	type Logger interface {
 //		Log(ctx context.Context, level int, msg string, fields ...any)
@@ -47,8 +47,12 @@ import (
 //
 // fields accepts, in any mix:
 //
-//   - a Field produced by String, Int, Bool, Err or Any — the typed form,
+//   - a Field produced by String, Int, Bool, Err or Any - the typed form,
 //     and still the preferred one;
+//   - a *Field, which is dereferenced (a nil one is skipped);
+//   - a []Field, which carries several entries as ONE variadic element and is
+//     flattened in place. This is how a caller holding a slice passes it, since
+//     a []Field can no longer be spread into a ...any variadic;
 //   - slog-style alternating pairs: a string key followed by any value.
 //
 // Malformed input is surfaced under BadKey rather than dropped. See Fields.

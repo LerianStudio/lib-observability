@@ -18,11 +18,14 @@ import (
 // instrument-creation failures.
 //
 // Its single method uses only universal types - context.Context, int, string,
-// any - so any logger value in the fleet satisfies it, from any version of
-// lib-observability, as does a logger type declared in a package that has
-// never imported lib-observability. Naming log.Level and log.Field here would
+// any - so any logger built to this shape satisfies it: one from any FUTURE
+// version of lib-observability, or one declared in a package that has never
+// imported lib-observability at all. Naming log.Level and log.Field here would
 // make this package's major version propagate to every caller that builds a
 // factory. See log.Logger.
+//
+// The guarantee is forward-looking, not retroactive: a v2 or v3 logger does
+// NOT satisfy this, because Go requires the signature to match exactly.
 //
 // level is on the log package scale: Error=0, Warn=1, Info=2, Debug=3.
 type Logger interface {

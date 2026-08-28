@@ -159,8 +159,11 @@ logger.Log(ctx, libLog.LevelError, "failed to post transaction",
 )
 ```
 
-All 5713 structured `.Log(ctx, …)` call sites across the fleet keep compiling.
-Only the import line moves.
+This is the dominant shape, and it keeps compiling: of the 5713 structured
+`.Log(ctx, …)` call sites across the fleet, the only ones that do not are the
+two exceptions below — 11 `fields...` spreads and the handful of explicitly
+typed `log.Level` variables. For everything else the import line is the only
+change.
 
 ### Passing a `[]Field` — drop the `...`
 
@@ -287,7 +290,8 @@ go build ./... 2>&1 | tee /tmp/v4-residue.txt
 go vet -tags unit ./...
 ```
 
-Step 3 reports exactly two error shapes, and both have a one-line fix:
+Step 3 reports three error shapes. The first two are call-site fixes, one
+line each:
 
 ```
 cannot use fields (variable of type []log.Field) as []any value
@@ -297,12 +301,21 @@ cannot use lvl (variable of type log.Level) as int value
     -> wrap in int(...)
 ```
 
-plus, for the few files that implement the interface, `wrong type for method
-Log` — apply the pattern in *Before / after* above.
+The third appears only in the files that *implement* the logger interface —
+13 fleet-wide, 11 of them test doubles:
 
-For a repo with no `fields...` spread and no `log.Level` variables — which is
-midaz, tenant-manager, PAM, and every leaf service — step 1 and step 2 are the
-whole migration.
+```
+wrong type for method Log
+    have Log(context.Context, log.Level, string, ...log.Field)
+    want Log(context.Context, int, string, ...any)
+    -> apply the pattern in `Implementing the interface` above
+```
+
+For a repo with no `fields...` spread, no explicitly typed `log.Level`
+variables and no logger implementation of its own, step 1 and step 2 are the
+whole migration. Per the table above that is the leaf services — midaz,
+tenant-manager and plugin-access-manager — for their non-test code; their test
+doubles, if any, still need the third fix.
 
 ## Suggested order
 

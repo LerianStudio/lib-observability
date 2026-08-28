@@ -39,7 +39,7 @@ Causa raiz: `tracing/otel.go` importava `fiber/v3` só por 2 helpers HTTP. Isso 
 ### Símbolos movidos (BREAKING — ajustar import path nos callers)
 | Símbolo | Antes | Depois |
 |---|---|---|
-| `SetSpanAttributeForParam(c fiber.Ctx, ...)` | `tracing` (`.../v2/tracing`) | `middleware` (`.../v2/middleware`) |
+| `SetSpanAttributeForParam(c fiber.Ctx, ...)` | `tracing` (`.../v2/tracing`) | `middleware` (`.../v4/middleware`) |
 | `ExtractHTTPContext(ctx, c fiber.Ctx)` | `tracing` | `middleware` |
 | `WithTelemetryInterceptor` (gRPC) | `middleware.TelemetryMiddleware` | `grpcmiddleware.TelemetryMiddleware` |
 | `EndTracingSpansInterceptor` (gRPC) | `middleware.TelemetryMiddleware` | `grpcmiddleware.TelemetryMiddleware` |

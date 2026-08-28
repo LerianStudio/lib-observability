@@ -208,7 +208,7 @@ func universalityViolation(expr ast.Expr, scope *pkgScope, depth int) string {
 			continue
 		}
 
-		iface, isInterface := decl.(*ast.InterfaceType)
+		iface, isInterface := decl.expr.(*ast.InterfaceType)
 		if !isInterface {
 			return "it names " + name + ", a non-interface type defined by this module. " +
 				"Its identity is nominal, so every consumer that names it inherits this module's " +
@@ -222,8 +222,14 @@ func universalityViolation(expr ast.Expr, scope *pkgScope, depth int) string {
 				continue
 			}
 
+			// Method signatures must be resolved in the scope of the file
+			// that DECLARED the interface, not the file that accepts it as a
+			// parameter: the two need not import this module under the same
+			// alias, or at all.
+			inner := scope.at(decl)
+
 			for _, results := range fieldTypes(fn.Results) {
-				for _, resultName := range scope.in(name).qualify(results) {
+				for _, resultName := range inner.qualify(results) {
 					if resultName == name {
 						return "it names " + name + ", an interface with a self-returning method. " +
 							"A consumer cannot declare that interface in its own package - it has no " +
@@ -231,10 +237,17 @@ func universalityViolation(expr ast.Expr, scope *pkgScope, depth int) string {
 							"non-self-returning interface (see log.Universal) and convert with log.Adapt."
 					}
 				}
+
+				// A result that is not self-referential can still be a defined
+				// type, which binds an implementer just as tightly.
+				if reason := universalityViolation(results, inner, depth+1); reason != "" {
+					return "it names " + name + ", whose method " + methodName(method) +
+						" returns a non-universal type: " + reason
+				}
 			}
 
 			for _, param := range fieldTypes(fn.Params) {
-				if reason := universalityViolation(param, scope.in(name), depth+1); reason != "" {
+				if reason := universalityViolation(param, inner, depth+1); reason != "" {
 					return "it names " + name + ", whose method " + methodName(method) +
 						" is not universal: " + reason
 				}
@@ -257,10 +270,10 @@ const maxTypeDepth = 8
 // with runtime.Logger and assert.Logger, which are the one-method universal
 // interfaces that are the correct thing to accept. Those are the two cases
 // this test exists to tell apart.
-func collectDeclaredTypes(t *testing.T, root string) map[string]ast.Expr {
+func collectDeclaredTypes(t *testing.T, root string) map[string]declaration {
 	t.Helper()
 
-	declared := make(map[string]ast.Expr)
+	declared := make(map[string]declaration)
 	fset := token.NewFileSet()
 
 	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
@@ -299,7 +312,11 @@ func collectDeclaredTypes(t *testing.T, root string) map[string]ast.Expr {
 					continue
 				}
 
-				declared[file.Name.Name+"."+typeSpec.Name.Name] = typeSpec.Type
+				declared[file.Name.Name+"."+typeSpec.Name.Name] = declaration{
+					expr:    typeSpec.Type,
+					pkg:     file.Name.Name,
+					aliases: importAliases(file),
+				}
 			}
 		}
 
@@ -376,6 +393,15 @@ func paramNames(names []*ast.Ident) string {
 	return strings.Join(out, ", ")
 }
 
+// declaration is a type declared in this module, together with the context
+// needed to resolve the type expressions inside it: the package that declares
+// it, and the import aliases of the file it was declared in.
+type declaration struct {
+	expr    ast.Expr
+	pkg     string
+	aliases map[string]string
+}
+
 // pkgScope resolves a type expression appearing in one file to the
 // package-qualified key collectDeclaredTypes uses.
 //
@@ -385,12 +411,20 @@ func paramNames(names []*ast.Ident) string {
 // also maps import ALIASES back to real package names, since this module
 // imports its own log package as both "log" and "obslog"/"logpkg".
 type pkgScope struct {
-	declared map[string]ast.Expr
+	declared map[string]declaration
 	pkg      string
 	aliases  map[string]string
 }
 
-func newPkgScope(declared map[string]ast.Expr, file *ast.File) *pkgScope {
+func newPkgScope(declared map[string]declaration, file *ast.File) *pkgScope {
+	return &pkgScope{declared: declared, pkg: file.Name.Name, aliases: importAliases(file)}
+}
+
+// importAliases maps the name a file refers to each of THIS module's packages
+// by, back to the real package name. This module imports its own log package
+// as log, obslog and logpkg depending on the file, so a selector cannot be
+// resolved without knowing which file it appears in.
+func importAliases(file *ast.File) map[string]string {
 	aliases := make(map[string]string, len(file.Imports))
 
 	for _, imp := range file.Imports {
@@ -409,14 +443,19 @@ func newPkgScope(declared map[string]ast.Expr, file *ast.File) *pkgScope {
 		aliases[name] = real
 	}
 
-	return &pkgScope{declared: declared, pkg: file.Name.Name, aliases: aliases}
+	return aliases
 }
 
-// in returns the scope as seen from inside the package that declares key.
-func (s *pkgScope) in(key string) *pkgScope {
-	pkg := key[:strings.Index(key, ".")]
-
-	return &pkgScope{declared: s.declared, pkg: pkg, aliases: s.aliases}
+// at returns the scope as seen from inside the file that declared decl.
+//
+// Both halves matter. The package name decides what a bare identifier means -
+// "Logger" is the rich self-returning interface in log/ and the one-method
+// universal one in runtime/. The alias map decides what a selector means, and
+// it must come from the DECLARING file: the file accepting the parameter need
+// not import this module under the same alias, or at all, so reusing its
+// aliases would make a defined type look external and silently pass.
+func (s *pkgScope) at(decl declaration) *pkgScope {
+	return &pkgScope{declared: s.declared, pkg: decl.pkg, aliases: decl.aliases}
 }
 
 // qualify turns the identifiers of a type expression into package-qualified
