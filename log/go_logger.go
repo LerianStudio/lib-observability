@@ -32,41 +32,62 @@ type GoLogger struct {
 // On a nil receiver, Enabled returns false silently. Use NopLogger as the
 // documented nil-safe alternative.
 //
-// Unknown level policy: levels outside the defined range (LevelError..LevelDebug)
-// are treated as suppressed by GoLogger (since their numeric value exceeds any
-// configured threshold). The zap adapter maps unknown levels to Info. The net
-// effect is: unknown levels produce Info-level output if a zap backend is used,
-// or are suppressed in the stdlib GoLogger. Callers should use only the defined
-// Level constants.
-func (l *GoLogger) Enabled(level Level) bool {
+// Unknown level policy: a level outside the defined range
+// (LevelError..LevelDebug) is not a severity this package can answer for, so
+// Enabled reports false without consulting the configured threshold. Note the
+// asymmetry with Log, which still EMITS such an entry (at LevelError, tagged
+// with BadLevelKey): Enabled answers "is this a level you should format for?",
+// and the answer for an undefined level is no.
+func (l *GoLogger) Enabled(level int) bool {
 	if l == nil {
 		return false
 	}
 
-	return l.Level >= level
+	if !LevelValid(level) {
+		return false
+	}
+
+	return int(l.Level) >= level
 }
 
 // Log writes a single log line if the level is enabled.
-func (l *GoLogger) Log(_ context.Context, level Level, msg string, fields ...Field) {
+//
+// fields follows the Logger contract: Fields, []Field and slog-style
+// alternating key/value pairs are all accepted. See Fields.
+//
+// Out-of-range policy: a level outside LevelError..LevelDebug is never cast
+// blindly onto Level. The entry is emitted at LevelError - the most severe
+// level, so a miscalibrated caller is never silently dropped - with the
+// original int attached under BadLevelKey.
+func (l *GoLogger) Log(_ context.Context, level int, msg string, fields ...any) {
+	typed := Fields(fields...)
+
+	if !LevelValid(level) {
+		typed = append(typed, Int(BadLevelKey, level))
+		level = LevelError
+	}
+
 	if !l.Enabled(level) {
 		return
 	}
 
-	line := l.hydrateLine(level, msg, fields...)
+	line := l.hydrateLine(level, msg, typed...)
 	log.Print(line)
 }
 
 // With returns a child logger with additional persistent fields.
 //
 //nolint:ireturn
-func (l *GoLogger) With(fields ...Field) Logger {
+func (l *GoLogger) With(fields ...any) Logger {
 	if l == nil {
 		return &NopLogger{}
 	}
 
-	newFields := make([]Field, 0, len(l.fields)+len(fields))
+	typed := Fields(fields...)
+
+	newFields := make([]Field, 0, len(l.fields)+len(typed))
 	newFields = append(newFields, l.fields...)
-	newFields = append(newFields, fields...)
+	newFields = append(newFields, typed...)
 
 	newGroups := make([]string, 0, len(l.groups))
 	newGroups = append(newGroups, l.groups...)
@@ -109,9 +130,9 @@ func (l *GoLogger) WithGroup(name string) Logger {
 // Sync flushes buffered logs. It is a no-op for the stdlib logger.
 func (l *GoLogger) Sync(_ context.Context) error { return nil }
 
-func (l *GoLogger) hydrateLine(level Level, msg string, fields ...Field) string {
+func (l *GoLogger) hydrateLine(level int, msg string, fields ...Field) string {
 	parts := make([]string, 0, 4)
-	parts = append(parts, fmt.Sprintf("[%s]", level.String()))
+	parts = append(parts, fmt.Sprintf("[%s]", LevelName(level)))
 
 	if l != nil && len(l.groups) > 0 {
 		parts = append(parts, fmt.Sprintf("[group=%s]", strings.Join(l.groups, ".")))
