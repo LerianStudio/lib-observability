@@ -3,9 +3,9 @@ package middleware
 import (
 	"context"
 
-	observability "github.com/LerianStudio/lib-observability/v3"
-	"github.com/LerianStudio/lib-observability/v3/redaction"
-	"github.com/LerianStudio/lib-observability/v3/tracing"
+	observability "github.com/LerianStudio/lib-observability/v4"
+	"github.com/LerianStudio/lib-observability/v4/redaction"
+	"github.com/LerianStudio/lib-observability/v4/tracing"
 	"github.com/gofiber/fiber/v3"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/propagation"

@@ -15,10 +15,10 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
-	constant "github.com/LerianStudio/lib-observability/v3/constants"
-	"github.com/LerianStudio/lib-observability/v3/log"
-	"github.com/LerianStudio/lib-observability/v3/metrics"
-	"github.com/LerianStudio/lib-observability/v3/runtime"
+	constant "github.com/LerianStudio/lib-observability/v4/constants"
+	"github.com/LerianStudio/lib-observability/v4/log"
+	"github.com/LerianStudio/lib-observability/v4/metrics"
+	"github.com/LerianStudio/lib-observability/v4/runtime"
 )
 
 // Logger is the minimal logging interface required by this package.

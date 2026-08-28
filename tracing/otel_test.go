@@ -9,9 +9,9 @@ import (
 	"strings"
 	"testing"
 
-	observability "github.com/LerianStudio/lib-observability/v3"
-	constant "github.com/LerianStudio/lib-observability/v3/constants"
-	"github.com/LerianStudio/lib-observability/v3/log"
+	observability "github.com/LerianStudio/lib-observability/v4"
+	constant "github.com/LerianStudio/lib-observability/v4/constants"
+	"github.com/LerianStudio/lib-observability/v4/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"

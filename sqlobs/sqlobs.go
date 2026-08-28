@@ -6,7 +6,7 @@ import (
 	"database/sql/driver"
 	"errors"
 
-	constant "github.com/LerianStudio/lib-observability/v3/constants"
+	constant "github.com/LerianStudio/lib-observability/v4/constants"
 	"github.com/XSAM/otelsql"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"

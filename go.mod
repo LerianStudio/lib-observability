@@ -1,4 +1,4 @@
-module github.com/LerianStudio/lib-observability/v3
+module github.com/LerianStudio/lib-observability/v4
 
 go 1.26.3
 

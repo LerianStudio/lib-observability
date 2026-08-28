@@ -51,7 +51,7 @@ Novo construtor gRPC: `grpcmiddleware.NewTelemetryMiddleware(tl)` (mesma assinat
 
 ### Fix externo pendente (midaz — outro repo, outro PR)
 `midaz` `pkg/net/http/withBody.go:235` usa `SetSpanAttributeForParam` importando de `tracing`. Trocar para o pacote `middleware`:
-`github.com/LerianStudio/lib-observability/v3/middleware.SetSpanAttributeForParam`.
+`github.com/LerianStudio/lib-observability/v4/middleware.SetSpanAttributeForParam`.
 (Apps que consomem os interceptors gRPC via `middleware` também precisam trocar para `grpcmiddleware`.)
 
 ### Verificação (`go list -deps`, deps de gofiber)

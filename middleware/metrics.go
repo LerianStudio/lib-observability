@@ -3,7 +3,7 @@ package middleware
 import (
 	"context"
 
-	"github.com/LerianStudio/lib-observability/v3/telemetrycore"
+	"github.com/LerianStudio/lib-observability/v4/telemetrycore"
 )
 
 // DefaultMetricsCollectionInterval is re-exported from telemetrycore for

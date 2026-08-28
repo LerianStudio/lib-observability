@@ -4,7 +4,7 @@ import (
 	"errors"
 	"reflect"
 
-	constant "github.com/LerianStudio/lib-observability/v3/constants"
+	constant "github.com/LerianStudio/lib-observability/v4/constants"
 	"github.com/redis/go-redis/extra/redisotel/v9"
 	"github.com/redis/go-redis/v9"
 	"go.opentelemetry.io/otel"

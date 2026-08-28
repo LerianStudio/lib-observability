@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	constant "github.com/LerianStudio/lib-observability/v3/constants"
+	constant "github.com/LerianStudio/lib-observability/v4/constants"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

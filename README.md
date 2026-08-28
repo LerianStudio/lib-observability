@@ -80,7 +80,7 @@ Wrap the transport your app already built so its custom TLS/timeout/proxy config
 import (
     "net/http"
 
-    "github.com/LerianStudio/lib-observability/v3/httpobs"
+    "github.com/LerianStudio/lib-observability/v4/httpobs"
 )
 
 func newInstrumentedClient(baseTransport http.RoundTripper) *http.Client {
@@ -103,7 +103,7 @@ Migration note: once the transport is wrapped, remove any manual `tracer.Start(.
 For an outbound call with no wrapper — e.g. the document database — replace the hand-rolled `tracer.Start(...)` so the span is `CLIENT`:
 
 ```go
-import "github.com/LerianStudio/lib-observability/v3/tracing"
+import "github.com/LerianStudio/lib-observability/v4/tracing"
 
 // Before: outbound Mongo call rendered as INTERNAL
 //   ctx, span := tracer.Start(ctx, "mongodb.find_holder")
@@ -233,7 +233,7 @@ Values are normalized (trimmed, control chars stripped) and dropped silently whe
 Example for custom metrics:
 
 ```go
-import "github.com/LerianStudio/lib-observability/v3/middleware"
+import "github.com/LerianStudio/lib-observability/v4/middleware"
 
 counter, _ := factory.Counter("orders.created")
 _ = counter.
