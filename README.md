@@ -36,6 +36,10 @@ Policy-driven panic recovery (`KeepRunning` / `CrashProcess`) with full observab
 
 A context-scoped `Asserter` that validates domain invariants at runtime without panicking — every assertion failure returns an error, records a span event (`assertion.failed`), and increments the `assertion_failed_total` metric counter. Includes a predicates library for financial domain validation (decimal precision, balance sufficiency, transaction state transitions, debit/credit equality) alongside general-purpose checks (`NotNil`, `NotEmpty`, `NoError`, `ValidUUID`).
 
+### Universal adapters for cross-module consumers (`log`, `metrics`)
+
+`log.Universal` and `metrics.UniversalMetrics` expose the logging and metric-recording surfaces using **only universal Go types** — `int`, `string`, `any`, `map[string]string`, `context.Context`. A consumer module can declare a structurally identical interface in its own package and accept the adapter **without importing lib-observability**, so this module's major version stops crossing the module boundary. See [Universal adapters](#universal-adapters--decoupling-the-major-version) below.
+
 ### Observability constants and context carriers
 
 Shared OTEL attribute prefixes, metric names, event names, header constants (`traceparent`, `Traceparent`, `Tracestate`), label sanitization (`SanitizeMetricLabel`), and sensitive field detection for cross-cutting redaction. Context carrier helpers (`ContextWithTracer`, `ContextWithMetricFactory`, `ContextWithLogger`, `ContextWithSpanAttributes`) for propagating observability primitives through `context.Context`.
@@ -44,6 +48,86 @@ Shared OTEL attribute prefixes, metric names, event names, header constants (`tr
 
 A configurable `Redactor` with rule-based field processing supporting mask, hash (SHA-256), and drop actions. Applies automatically to span attributes via the `RedactingAttrBagSpanProcessor` and to struct-to-attribute conversion. Includes `ObfuscateStruct` for generic struct field obfuscation and integration with the sensitive field detection layer.
 
+## Universal adapters — decoupling the major version
+
+### The problem
+
+`log.Logger` declares its methods with types **defined by this package**:
+
+```go
+type Logger interface {
+	Log(ctx context.Context, level Level, msg string, fields ...Field)
+	With(fields ...Field) Logger
+	WithGroup(name string) Logger
+	Enabled(level Level) bool
+	Sync(ctx context.Context) error
+}
+```
+
+Go satisfies interfaces structurally, but the types **inside** a method signature are matched **nominally**. `log.Level` and a byte-for-byte identical `mypkg.Level` are different types, so `Enabled(mypkg.Level)` is never satisfied by a method `Enabled(log.Level)`. A consumer that only wants "something that logs" therefore cannot declare a local interface — it must import this module for `Level` and `Field`, and by importing it inherits its **major version**. Every major release then propagates through the fleet in lockstep.
+
+`With` and `WithGroup` are worse still: a self-returning method (`With(...) Logger`) is unsatisfiable from outside the declaring package by construction, because no local interface can name the return type.
+
+`*metrics.MetricsFactory` leaks the same way, and more concretely: `Counter` takes a `Metric` and returns a `*CounterBuilder`, a concrete struct used through a fluent chain.
+
+### The fix
+
+Two purely additive adapters expose the same capability through universal types only, and replace every self-returning method with a free function.
+
+**Logging** — a consumer declares this in **its own package**, importing nothing from here:
+
+```go
+// consumer module, e.g. lib-commons
+type Logger interface {
+	Log(ctx context.Context, level int, msg string, kv ...any)
+	Enabled(level int) bool
+	Sync(ctx context.Context) error
+}
+
+func NewService(logger Logger) *Service { ... }
+```
+
+and the wiring layer — the one place that does import lib-observability — passes the adapter:
+
+```go
+import "github.com/LerianStudio/lib-observability/v3/log"
+
+svc := consumer.NewService(log.Universal(myLogger))
+```
+
+Composition is done with free functions rather than methods:
+
+```go
+u := log.Universal(myLogger)
+u = log.UniversalWith(u, "service", "ledger", "attempt", 2)
+u = log.UniversalWithGroup(u, "http")
+u.Log(ctx, log.LevelInfoInt, "request accepted", "request_id", id)
+```
+
+- **Level scale** — `int` on the same numeric scale as `Level`: `LevelErrorInt` (0), `LevelWarnInt` (1), `LevelInfoInt` (2), `LevelDebugInt` (3). Out-of-range values are never cast blindly: `Log` emits at `LevelError` with the original int attached under `!BADLEVEL`, and `Enabled` reports `false`.
+- **Key/value pairs** — `log/slog` conventions. A non-string key or a trailing key with no value becomes a `!BADKEY` field instead of being silently dropped.
+- **Nil-safe** — `log.Universal(nil)`, and a `Logger` interface holding a typed-nil, both return a working no-op adapter.
+
+**Metrics** — the builder chain is flattened into one call per instrument:
+
+```go
+rec := metrics.UniversalMetrics(factory)
+
+err := rec.AddCounter(ctx, "requests_total", "total requests", "1",
+	map[string]string{"route": "/health"}, 1)
+
+err = rec.SetGauge(ctx, "queue_depth", "pending messages", "1", nil, 42)
+
+err = rec.RecordHistogram(ctx, "request_duration_ms", "request duration", "ms",
+	map[string]string{"route": "/health"}, 42, nil)
+```
+
+> **Histogram precision.** `RecordHistogram` takes a `float64`, but the instruments this library creates are OpenTelemetry **`Int64Histogram`s**. The value is rounded to the nearest integer (half away from zero), so sub-integer measurements — notably **durations in seconds** — collapse to `0`. Record durations in **milliseconds** and set `unit` accordingly. `buckets` stay `float64` and pass through unchanged. `NaN`, `±Inf`, and out-of-`int64` magnitudes return `ErrHistogramValueNotRepresentable` without touching the instrument.
+
+`metrics.UniversalMetrics(nil)` returns a no-op recorder: every method does nothing and returns `nil`.
+
+Both adapters are additive. `log.Logger`, `*metrics.MetricsFactory`, and the builder API are unchanged; existing consumers need no migration.
+
 ## Design principles
 
 - **Explicit initialization** — no implicit global state; `NewTelemetry` + `ApplyGlobals` is opt-in
@@ -51,6 +135,7 @@ A configurable `Redactor` with rule-based field processing supporting mask, hash
 - **Errors over panics** — metric/builder operations return errors; assertions return errors instead of panicking
 - **Redaction-first** — sensitive fields are masked in spans, logs, and attributes by default
 - **Interface-driven** — `Logger`, `MetricsFactory`, `ErrorReporter`, and `DLQMetrics` are all interface-bound for testability
+- **Universal types at the module boundary** — `log.Universal` and `metrics.UniversalMetrics` let consumers declare their own equivalent interface, so this module's major version does not cross the module boundary
 
 ## Outbound call instrumentation — span kind precedence
 
