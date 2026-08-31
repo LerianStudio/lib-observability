@@ -355,3 +355,67 @@ func TestContractOverNopLoggerDropsEverything(t *testing.T) {
 	require.NotNil(t, ContractWith(u, "k", "v"))
 	require.NotNil(t, ContractWithGroup(u, "g"))
 }
+
+// foreignContractProbe is a Contract implemented outside this package, so
+// ContractWith cannot delegate to an inner Logger and must normalize itself.
+type foreignContractProbe struct{ kv []any }
+
+func (f *foreignContractProbe) Log(_ context.Context, _ int, _ string, kv ...any) {
+	f.kv = append(f.kv, kv...)
+}
+func (f *foreignContractProbe) Enabled(int) bool           { return true }
+func (f *foreignContractProbe) Sync(context.Context) error { return nil }
+
+// TestContractWithNormalizesMalformedKVOnAForeignContract pins the two paths to
+// one behaviour. Pairs bound onto an adapter were normalized on the way in;
+// pairs bound onto a foreign Contract were stored and forwarded raw, so the
+// same malformed call produced BadKey on one path and the raw key on the other.
+func TestContractWithNormalizesMalformedKVOnAForeignContract(t *testing.T) {
+	t.Parallel()
+
+	cases := map[string]struct {
+		bind  []any
+		chain []any
+		want  []any
+	}{
+		"non-string key": {
+			bind: []any{42, "value"},
+			want: []any{ContractBadKey, 42, ContractBadKey, "value"},
+		},
+		"dangling key": {
+			bind: []any{"orphan"},
+			want: []any{ContractBadKey, "orphan"},
+		},
+		"malformed on a chained call": {
+			bind:  []any{"ok", 1},
+			chain: []any{42, "value"},
+			want:  []any{"ok", 1, ContractBadKey, 42, ContractBadKey, "value"},
+		},
+	}
+
+	for name, testCase := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			probe := &foreignContractProbe{}
+
+			bound := ContractWith(probe, testCase.bind...)
+			if testCase.chain != nil {
+				bound = ContractWith(bound, testCase.chain...)
+			}
+
+			bound.Log(context.Background(), LevelInfoInt, "msg")
+
+			if len(probe.kv) != len(testCase.want) {
+				t.Fatalf("kv length: got %d %#v, want %d %#v",
+					len(probe.kv), probe.kv, len(testCase.want), testCase.want)
+			}
+
+			for i := range testCase.want {
+				if probe.kv[i] != testCase.want[i] {
+					t.Errorf("kv[%d]: got %#v, want %#v", i, probe.kv[i], testCase.want[i])
+				}
+			}
+		})
+	}
+}

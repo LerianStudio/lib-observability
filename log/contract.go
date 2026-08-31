@@ -163,9 +163,9 @@ func ContractWith(c Contract, kv ...any) Contract {
 	case *contractAdapter:
 		return AsContract(typed.inner.With(fieldsFromKV(kv)...))
 	case *contractBound:
-		return typed.with(kv)
+		return typed.with(normalizedKV(kv))
 	default:
-		return &contractBound{next: c, kv: cloneAny(kv)}
+		return &contractBound{next: c, kv: normalizedKV(kv)}
 	}
 }
 
@@ -370,6 +370,24 @@ func fieldsFromKV(kv []any) []Field {
 	}
 
 	return fields
+}
+
+// normalizedKV runs kv through the same malformed-input rules the adapter path
+// applies, then flattens the result back to alternating pairs.
+//
+// Without it the two paths disagree: pairs bound onto an adapter are normalized
+// on the way in, while pairs bound onto a FOREIGN Contract were stored raw and
+// forwarded raw, so a non-string key reached the caller as itself instead of
+// under ContractBadKey. Same call, same documented contract, two behaviours.
+func normalizedKV(kv []any) []any {
+	fields := fieldsFromKV(kv)
+	out := make([]any, 0, len(fields)*2)
+
+	for _, field := range fields {
+		out = append(out, field.Key, field.Value)
+	}
+
+	return out
 }
 
 // cloneAny copies a kv slice so a bound logger never aliases caller memory.
