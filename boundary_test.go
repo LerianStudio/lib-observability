@@ -510,11 +510,17 @@ func (s *pkgScope) qualify(expr ast.Expr) []string {
 	case *ast.ArrayType:
 		return s.qualify(typed.Elt)
 	case *ast.IndexExpr:
-		// An instantiated generic: Foo[T]. The identity that propagates is
-		// Foo's, so qualify the generic type and ignore the argument.
-		return s.qualify(typed.X)
+		// An instantiated generic: Foo[T]. The consumer must name BOTH Foo and
+		// the argument to write the type, so both propagate identity. Foo[Bar]
+		// with a universal Foo is still a leak if Bar is one of ours.
+		return append(s.qualify(typed.X), s.qualify(typed.Index)...)
 	case *ast.IndexListExpr:
-		return s.qualify(typed.X)
+		names := s.qualify(typed.X)
+		for _, index := range typed.Indices {
+			names = append(names, s.qualify(index)...)
+		}
+
+		return names
 	default:
 		return nil
 	}
@@ -696,6 +702,19 @@ type Embedder interface{ Alias }
 func Take(logger Embedder) {}
 `,
 			wantHit: "self-returning",
+		},
+		"universal generic with a leaking type argument": {
+			src: `package obs
+
+import "example.test/log"
+
+type Box[T any] interface {
+	Get() T
+}
+
+func Take(logger Box[log.Field]) {}
+`,
+			wantHit: "a non-interface type defined by this module",
 		},
 		"instantiated generic": {
 			src: `package obs
