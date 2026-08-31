@@ -167,7 +167,14 @@ func checkParams(
 	found := 0
 
 	for _, param := range params.List {
-		if !isLoggerish(param.Names, loggerish) {
+		// The name heuristic is a convenience for defined types a consumer
+		// never has to name (Level and PanicPolicy are reachable through
+		// untyped constants, Metric through a composite literal it may
+		// legitimately want). It must NOT gate interfaces: a parameter whose
+		// type is an interface declared by this module forces every consumer
+		// to import the module in order to IMPLEMENT it, whatever the
+		// parameter happens to be called.
+		if !isLoggerish(param.Names, loggerish) && !namesLocalInterface(param.Type, scope) {
 			continue
 		}
 
@@ -217,16 +224,24 @@ func universalityViolation(expr ast.Expr, scope *pkgScope, depth int) string {
 		}
 
 		for _, method := range iface.Methods.List {
-			fn, ok := method.Type.(*ast.FuncType)
-			if !ok {
-				continue
-			}
-
 			// Method signatures must be resolved in the scope of the file
 			// that DECLARED the interface, not the file that accepts it as a
 			// parameter: the two need not import this module under the same
 			// alias, or at all.
 			inner := scope.at(decl)
+
+			fn, ok := method.Type.(*ast.FuncType)
+			if !ok {
+				// An embedded interface, not a method. Embedding carries the
+				// embedded interface's whole method set, so embedding a
+				// self-returning or otherwise non-universal interface couples
+				// the consumer exactly as naming it directly would.
+				if reason := universalityViolation(method.Type, inner, depth+1); reason != "" {
+					return "it names " + name + ", whose embedded interface is not universal: " + reason
+				}
+
+				continue
+			}
 
 			for _, results := range fieldTypes(fn.Results) {
 				for _, resultName := range inner.qualify(results) {
@@ -488,4 +503,51 @@ func (s *pkgScope) qualify(expr ast.Expr) []string {
 	default:
 		return nil
 	}
+}
+
+// namesLocalInterface reports whether expr resolves to an interface declared by
+// this module. Such a parameter is coupling-critical regardless of its name:
+// satisfying it is the consumer's job, and it cannot do that without naming the
+// type, which means importing this module and inheriting its major version.
+func namesLocalInterface(expr ast.Expr, scope *pkgScope) bool {
+	for _, name := range scope.qualify(expr) {
+		decl, isLocal := scope.declared[name]
+		if !isLocal {
+			continue
+		}
+
+		iface, isInterface := decl.expr.(*ast.InterfaceType)
+		if !isInterface {
+			continue
+		}
+
+		// A SEALED interface - one with an unexported method - is an opaque
+		// token, not a dependency the consumer supplies: the unexported method
+		// makes it unimplementable outside this module by design. That is the
+		// functional-option pattern (tracing.TelemetryOption), where the
+		// consumer calls tracing.WithX to obtain a value and never implements
+		// anything. Leave those to the name heuristic; a logger-shaped
+		// parameter is still checked by it.
+		if sealed(iface) {
+			continue
+		}
+
+		return true
+	}
+
+	return false
+}
+
+// sealed reports whether an interface carries an unexported method, which makes
+// it unimplementable outside the declaring package.
+func sealed(iface *ast.InterfaceType) bool {
+	for _, method := range iface.Methods.List {
+		for _, name := range method.Names {
+			if !name.IsExported() {
+				return true
+			}
+		}
+	}
+
+	return false
 }
