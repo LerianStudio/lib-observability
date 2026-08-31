@@ -528,7 +528,7 @@ func namesLocalInterface(expr ast.Expr, scope *pkgScope) bool {
 		// consumer calls tracing.WithX to obtain a value and never implements
 		// anything. Leave those to the name heuristic; a logger-shaped
 		// parameter is still checked by it.
-		if sealed(iface) {
+		if sealed(iface, scope.at(decl), 0) {
 			continue
 		}
 
@@ -540,10 +540,42 @@ func namesLocalInterface(expr ast.Expr, scope *pkgScope) bool {
 
 // sealed reports whether an interface carries an unexported method, which makes
 // it unimplementable outside the declaring package.
-func sealed(iface *ast.InterfaceType) bool {
+//
+// Embedding is followed: an interface that embeds a sealed one inherits the
+// unexported method and is just as unimplementable, so classifying it as
+// unsealed would make namesLocalInterface force a check that
+// universalityViolation then fails on the private method's own types - a false
+// positive on a legitimate option type. Each embedded interface is resolved in
+// the scope of the file that declared it, since aliases differ per file.
+func sealed(iface *ast.InterfaceType, scope *pkgScope, depth int) bool {
+	if depth > maxTypeDepth {
+		return false
+	}
+
 	for _, method := range iface.Methods.List {
 		for _, name := range method.Names {
 			if !name.IsExported() {
+				return true
+			}
+		}
+
+		if _, isFunc := method.Type.(*ast.FuncType); isFunc {
+			continue
+		}
+
+		// An embedded interface. Follow it.
+		for _, name := range scope.qualify(method.Type) {
+			decl, isLocal := scope.declared[name]
+			if !isLocal {
+				continue
+			}
+
+			embedded, isInterface := decl.expr.(*ast.InterfaceType)
+			if !isInterface {
+				continue
+			}
+
+			if sealed(embedded, scope.at(decl), depth+1) {
 				return true
 			}
 		}
