@@ -1,6 +1,6 @@
 # lib-observability — Guia de Instrumentação (v2)
 
-> Módulo: `github.com/LerianStudio/lib-observability/v3` · Go >= 1.26.3
+> Módulo: `github.com/LerianStudio/lib-observability/v4` · Go >= 1.26.3
 > Este guia é PRESCRITIVO: siga a ordem e copie os snippets. Todas as assinaturas são reais.
 > Público: engenheiro (ou IA) que vai instrumentar um serviço Lerian.
 
@@ -32,7 +32,7 @@ import (
     "os"
     "strconv"
 
-    "github.com/LerianStudio/lib-observability/v3/tracing"
+    "github.com/LerianStudio/lib-observability/v4/tracing"
 )
 
 // parseBoolEnv: false quando NÃO setada; erro em valor inválido (não engole typo
@@ -95,7 +95,7 @@ Emite: `http.server.request.duration` (s) e `http.server.active_requests`.
 Logs de acesso, nome do span SERVER e `url.path` usam somente o template da rota resolvido depois do handler (ex.: `/v1/accounts/:id`). Query string e valores nunca são retidos. Requests sem rota usam `/{unmatched}`; `http.route` fica ausente. `X-Tenant-Id` não entra em logs, spans nem labels das métricas HTTP.
 
 ```go
-import "github.com/LerianStudio/lib-observability/v3/middleware"
+import "github.com/LerianStudio/lib-observability/v4/middleware"
 
 tm := middleware.NewTelemetryMiddleware(tel)
 app.Use(tm.WithTelemetry(tel))            // registra a instrumentação HTTP
@@ -141,7 +141,7 @@ middleware.SetSpanAttributeForParam(c, "account_id", id, "account") // c é fibe
 Emite: `rpc.server.duration` / `rpc.client.duration` (s). Labels: rpc.system=grpc, rpc.method, rpc.grpc.status_code, error.type, tenant.id (server).
 
 ```go
-import "github.com/LerianStudio/lib-observability/v3/grpcmiddleware"
+import "github.com/LerianStudio/lib-observability/v4/grpcmiddleware"
 
 gm := grpcmiddleware.NewTelemetryMiddleware(tel)
 
@@ -167,7 +167,7 @@ Emite: `db.client.operation.duration` (s). Labels: db.system.name, db.operation.
 **Recomendado — `Setup` (uma chamada, defaults completos).** Compõe `InstrumentDB` + `RegisterDBStatsMetrics` e cuida das regras de posse do handle, que são a parte fácil de errar:
 
 ```go
-import "github.com/LerianStudio/lib-observability/v3/sqlobs"
+import "github.com/LerianStudio/lib-observability/v4/sqlobs"
 
 db, cleanup, err := sqlobs.Setup(rawDB, sqlobs.SystemPostgreSQL, sqlobs.WithDSN(dsn))
 if db == nil {
@@ -190,7 +190,7 @@ As seções abaixo mostram os passos que o `Setup` compõe (úteis p/ o caso do 
 
 ### 4a. Caso simples (um `*sql.DB`)
 ```go
-import "github.com/LerianStudio/lib-observability/v3/sqlobs"
+import "github.com/LerianStudio/lib-observability/v4/sqlobs"
 
 instrumented, err := sqlobs.InstrumentDB(rawDB, sqlobs.SystemPostgreSQL,
     sqlobs.WithDSN(dsn), // necessário: *sql.DB não expõe o DSN
@@ -233,7 +233,7 @@ Ao adotar `sqlobs`, **REMOVA** os `tracer.Start(ctx, "postgres.*")` manuais das 
 Valkey usa o mesmo driver go-redis → coberto. Emite `db.client.operation.duration`, db.system=redis.
 
 ```go
-import "github.com/LerianStudio/lib-observability/v3/redisobs"
+import "github.com/LerianStudio/lib-observability/v4/redisobs"
 
 rdb := redis.NewUniversalClient(opts) // seu client go-redis v9
 if err := redisobs.Instrument(rdb); err != nil { /* tratar */ }
@@ -249,7 +249,7 @@ Emite `messaging.client.operation.duration` (produce) e `messaging.process.durat
 
 ### 6a. Producer
 ```go
-import "github.com/LerianStudio/lib-observability/v3/messagingobs"
+import "github.com/LerianStudio/lib-observability/v4/messagingobs"
 
 pub := messagingobs.NewPublisher(tel)
 
@@ -291,7 +291,7 @@ Para chamadas HTTP de SAÍDA (identity provider, BACEN/SPB, tenant-manager, outr
 **Boundary:** a lib NÃO gerencia o lifecycle do client da app — ela envolve o **transport** que você passa (preservando TLS/timeout/proxy) e nunca faz dial/close por conta própria. `NewTransport` só embrulha um `http.RoundTripper`; `NewClient` é um **construtor de conveniência** que devolve um `*http.Client` já com o transport envolvido (passe seu base transport p/ preservar o TLS).
 
 ```go
-import "github.com/LerianStudio/lib-observability/v3/httpobs"
+import "github.com/LerianStudio/lib-observability/v4/httpobs"
 
 // Opção A: envolver o transport (preserva TLS/timeout do base)
 client := &http.Client{
@@ -311,7 +311,7 @@ client := httpobs.NewClient(baseTransport)
 Só para saídas que NÃO têm wrapper dedicado (ex.: MongoDB — sem otelmongo v2 estável; ou uma SDK/RPC custom). Marca o span como **CLIENT** sem você precisar lembrar do `trace.WithSpanKind`.
 
 ```go
-import "github.com/LerianStudio/lib-observability/v3/tracing"
+import "github.com/LerianStudio/lib-observability/v4/tracing"
 
 ctx, span := tracing.StartClientSpan(ctx, tracer, "mongodb.find_holder")
 defer span.End()
@@ -341,8 +341,8 @@ A lib tem uma factory + helpers de domínio. NÃO são automáticas — você ch
 
 ```go
 import (
-    "github.com/LerianStudio/lib-observability/v3/observability"
-    "github.com/LerianStudio/lib-observability/v3/metrics"
+    "github.com/LerianStudio/lib-observability/v4/observability"
+    "github.com/LerianStudio/lib-observability/v4/metrics"
     "go.opentelemetry.io/otel/attribute"
 )
 

@@ -84,12 +84,12 @@ func safeStringify(err error) (msg string, safe bool) {
 }
 
 // Log drops all log events.
-func (l *NopLogger) Log(_ context.Context, _ Level, _ string, _ ...Field) {}
+func (l *NopLogger) Log(_ context.Context, _ int, _ string, _ ...any) {}
 
 // With returns the same no-op logger.
 //
 //nolint:ireturn
-func (l *NopLogger) With(_ ...Field) Logger {
+func (l *NopLogger) With(_ ...any) Logger {
 	return l
 }
 
@@ -101,7 +101,7 @@ func (l *NopLogger) WithGroup(_ string) Logger {
 }
 
 // Enabled always returns false for NopLogger.
-func (l *NopLogger) Enabled(_ Level) bool {
+func (l *NopLogger) Enabled(_ int) bool {
 	return false
 }
 

@@ -79,10 +79,10 @@ func TestGoLogger_Enabled(t *testing.T) {
 func TestLevelConstants_MatchDocumentedNumericValues(t *testing.T) {
 	t.Parallel()
 
-	assert.Equal(t, Level(0), LevelError)
-	assert.Equal(t, Level(1), LevelWarn)
-	assert.Equal(t, Level(2), LevelInfo)
-	assert.Equal(t, Level(3), LevelDebug)
+	assert.Equal(t, Level(0), Level(LevelError))
+	assert.Equal(t, Level(1), Level(LevelWarn))
+	assert.Equal(t, Level(2), Level(LevelInfo))
+	assert.Equal(t, Level(3), Level(LevelDebug))
 }
 
 // TestGoLogger_ZeroValueEnablesError verifies the specific production
@@ -153,7 +153,7 @@ func TestNoLegacyLevelSymbolsInAPI(t *testing.T) {
 	for _, name := range legacyNames {
 		level, err := ParseLevel(name)
 		assert.Error(t, err, "ParseLevel(%q) should reject legacy level name", name)
-		assert.Equal(t, LevelUnknown, level,
+		assert.Equal(t, Level(LevelUnknown), level,
 			"ParseLevel(%q) should return LevelUnknown for rejected names", name)
 	}
 
@@ -369,7 +369,7 @@ func TestGoLogger_LevelFiltering(t *testing.T) {
 			withTestLoggerOutput(t, &buf)
 
 			logger := &GoLogger{Level: tt.loggerLvl}
-			logger.Log(context.Background(), tt.msgLvl, "test message")
+			logger.Log(context.Background(), int(tt.msgLvl), "test message")
 
 			if tt.shouldEmit {
 				assert.NotEmpty(t, buf.String(), "expected message to be emitted")
@@ -525,7 +525,7 @@ func TestNopLogger_AllMethodsAreNoOps(t *testing.T) {
 
 	t.Run("Log does not panic at any level", func(t *testing.T) {
 		assert.NotPanics(t, func() {
-			for _, level := range []Level{LevelError, LevelWarn, LevelInfo, LevelDebug} {
+			for _, level := range []int{LevelError, LevelWarn, LevelInfo, LevelDebug} {
 				nop.Log(context.Background(), level, "message",
 					String("k", "v"), Int("n", 1), Bool("b", true))
 			}
@@ -543,7 +543,7 @@ func TestNopLogger_AllMethodsAreNoOps(t *testing.T) {
 	})
 
 	t.Run("Enabled always false", func(t *testing.T) {
-		for _, level := range []Level{LevelError, LevelWarn, LevelInfo, LevelDebug} {
+		for _, level := range []int{LevelError, LevelWarn, LevelInfo, LevelDebug} {
 			assert.False(t, nop.Enabled(level))
 		}
 	})

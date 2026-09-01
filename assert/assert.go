@@ -15,16 +15,30 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
-	constant "github.com/LerianStudio/lib-observability/v3/constants"
-	"github.com/LerianStudio/lib-observability/v3/log"
-	"github.com/LerianStudio/lib-observability/v3/metrics"
-	"github.com/LerianStudio/lib-observability/v3/runtime"
+	constant "github.com/LerianStudio/lib-observability/v4/constants"
+	"github.com/LerianStudio/lib-observability/v4/log"
+	"github.com/LerianStudio/lib-observability/v4/metrics"
+	"github.com/LerianStudio/lib-observability/v4/runtime"
 )
 
-// Logger defines the minimal logging interface required by assertions.
-// This interface is satisfied by github.com/LerianStudio/lib-observability/log.Logger.
+// Logger is the minimal logging interface required by this package.
+//
+// Its single method uses only universal types - context.Context, int, string,
+// any - so any logger built to this shape satisfies it: one from any FUTURE
+// version of lib-observability, or one declared in a package that has never
+// imported lib-observability at all. Naming log.Level and log.Field in this
+// signature instead would make this package's major version propagate to
+// every caller.
+//
+// Note the direction of that guarantee. It is forward-looking, not
+// retroactive: a v2 or v3 logger, whose Log takes log.Level and ...log.Field,
+// does NOT satisfy this - Go requires the signature to match exactly. Such an
+// implementation must move to this signature (see MIGRATION-v4.md) or be
+// wrapped. What v4 buys is that this is the LAST time that has to happen.
+//
+// level is on the log package scale: Error=0, Warn=1, Info=2, Debug=3.
 type Logger interface {
-	Log(ctx context.Context, level log.Level, msg string, fields ...log.Field)
+	Log(ctx context.Context, level int, msg string, fields ...any)
 }
 
 // Asserter evaluates invariants and emits telemetry on failure.
@@ -344,7 +358,7 @@ func logAssertionStructured(logger Logger, assertion, component, operation, msg,
 		fields = append(fields, log.String("details", details))
 	}
 
-	logger.Log(context.Background(), log.LevelError, "ASSERTION FAILED", fields...)
+	logger.Log(context.Background(), log.LevelError, "ASSERTION FAILED", fields)
 }
 
 // logAssertion is kept for backward compatibility with code paths that only
@@ -361,10 +375,21 @@ func logAssertion(logger Logger, message string) {
 // AssertionSpanEventName is the event name used when recording assertion failures on spans.
 const AssertionSpanEventName = constant.EventAssertionFailed
 
+// Recorder is the minimal metric-recording interface this package needs.
+//
+// It uses only universal types, so *metrics.MetricsFactory satisfies it
+// natively (see metrics.Recorder) and so can a recorder declared in a package
+// that has never imported lib-observability. Naming *metrics.MetricsFactory
+// here would make this package's major version propagate to every caller that
+// initializes assertion metrics.
+type Recorder interface {
+	AddCounter(ctx context.Context, name, description, unit string, attrs map[string]string, delta int64) error
+}
+
 // AssertionMetrics provides assertion-related metrics using OpenTelemetry.
-// It wraps lib-observability's MetricsFactory for consistent metric handling.
+// It records through a Recorder, so any metrics factory satisfies it.
 type AssertionMetrics struct {
-	factory *metrics.MetricsFactory
+	factory Recorder
 }
 
 // assertionFailedMetric defines the metric for counting failed assertions.
@@ -379,13 +404,18 @@ var (
 	assertionMetricsMu       sync.RWMutex
 )
 
-// InitAssertionMetrics initializes assertion metrics with the provided MetricsFactory.
+// InitAssertionMetrics initializes assertion metrics with the provided recorder.
 // This should be called once during application startup after telemetry is initialized.
-func InitAssertionMetrics(factory *metrics.MetricsFactory) {
+//
+// The parameter is the universal Recorder interface rather than
+// *metrics.MetricsFactory. Existing callers are unaffected -
+// *metrics.MetricsFactory implements Recorder directly, so
+// InitAssertionMetrics(tl.MetricsFactory) still compiles unchanged.
+func InitAssertionMetrics(factory Recorder) {
 	assertionMetricsMu.Lock()
 	defer assertionMetricsMu.Unlock()
 
-	if factory == nil {
+	if log.IsNil(factory) {
 		return
 	}
 
@@ -419,23 +449,21 @@ func (am *AssertionMetrics) RecordAssertionFailed(
 	ctx context.Context,
 	component, operation, assertion string,
 ) {
-	if am == nil || am.factory == nil {
+	if am == nil || log.IsNil(am.factory) {
 		return
 	}
 
-	counter, err := am.factory.Counter(assertionFailedMetric)
-	if err != nil {
-		logAssertion(nil, fmt.Sprintf("failed to create assertion metric counter: %v", err))
-		return
-	}
-
-	err = counter.
-		WithLabels(map[string]string{
+	err := am.factory.AddCounter(ctx,
+		assertionFailedMetric.Name,
+		assertionFailedMetric.Description,
+		assertionFailedMetric.Unit,
+		map[string]string{
 			"component": constant.SanitizeMetricLabel(component),
 			"operation": constant.SanitizeMetricLabel(operation),
 			"assertion": constant.SanitizeMetricLabel(assertion),
-		}).
-		AddOne(ctx)
+		},
+		1,
+	)
 	if err != nil {
 		logAssertion(nil, fmt.Sprintf("failed to record assertion metric: %v", err))
 		return

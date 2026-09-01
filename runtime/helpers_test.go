@@ -9,7 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/LerianStudio/lib-observability/v3/log"
+	"github.com/LerianStudio/lib-observability/v4/log"
 )
 
 // testLogger is a test logger that captures log calls.
@@ -28,7 +28,7 @@ func newTestLogger() *testLogger {
 	}
 }
 
-func (logger *testLogger) Log(_ context.Context, lvl log.Level, msg string, _ ...log.Field) {
+func (logger *testLogger) Log(_ context.Context, lvl int, msg string, _ ...any) {
 	logger.mu.Lock()
 	defer logger.mu.Unlock()
 

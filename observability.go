@@ -10,8 +10,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/LerianStudio/lib-observability/v3/log"
-	"github.com/LerianStudio/lib-observability/v3/metrics"
+	"github.com/LerianStudio/lib-observability/v4/log"
+	"github.com/LerianStudio/lib-observability/v4/metrics"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -76,8 +76,14 @@ func cloneContextValues(ctx context.Context) *ContextValue {
 	return clone
 }
 
-// ContextWithLogger returns a context with the given Logger attached.
-func ContextWithLogger(ctx context.Context, logger log.Logger) context.Context {
+// ContextWithLogger returns a context with the given logger attached.
+//
+// The parameter is log.Universal - a single Log method built from universal
+// types - not log.Logger, so a caller can pass a logger type declared in its
+// own package without importing lib-observability at all. Conversion happens
+// here, via log.Adapt: a value that already implements log.Logger is stored
+// as-is with its native semantics intact, so existing callers are unaffected.
+func ContextWithLogger(ctx context.Context, logger log.Universal) context.Context {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -157,13 +163,11 @@ func extractTrackingComponents(ctx context.Context) TrackingComponents {
 }
 
 // resolveLogger applies the Null Object Pattern for logger resolution.
-// Returns a functional logger instance in all cases, eliminating nil checks downstream.
-func resolveLogger(logger log.Logger) log.Logger {
-	if !log.IsNil(logger) {
-		return logger
-	}
-
-	return log.NewNop() // Null Object Pattern - always functional
+// Returns a functional logger instance in all cases, eliminating nil checks
+// downstream. log.Adapt handles both halves: it returns a Logger unchanged and
+// substitutes NewNop for a nil or typed-nil value.
+func resolveLogger(logger log.Universal) log.Logger {
+	return log.Adapt(logger)
 }
 
 // resolveTracer ensures a valid tracer is always available using OpenTelemetry best practices.
