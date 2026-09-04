@@ -39,7 +39,7 @@ Causa raiz: `tracing/otel.go` importava `fiber/v3` só por 2 helpers HTTP. Isso 
 ### Símbolos movidos (BREAKING — ajustar import path nos callers)
 | Símbolo | Antes | Depois |
 |---|---|---|
-| `SetSpanAttributeForParam(c fiber.Ctx, ...)` | `tracing` (`.../v2/tracing`) | `middleware` (`.../v2/middleware`) |
+| `SetSpanAttributeForParam(c fiber.Ctx, ...)` | `tracing` (`.../v2/tracing`) | `middleware` (`.../v4/middleware`) |
 | `ExtractHTTPContext(ctx, c fiber.Ctx)` | `tracing` | `middleware` |
 | `WithTelemetryInterceptor` (gRPC) | `middleware.TelemetryMiddleware` | `grpcmiddleware.TelemetryMiddleware` |
 | `EndTracingSpansInterceptor` (gRPC) | `middleware.TelemetryMiddleware` | `grpcmiddleware.TelemetryMiddleware` |
@@ -51,7 +51,7 @@ Novo construtor gRPC: `grpcmiddleware.NewTelemetryMiddleware(tl)` (mesma assinat
 
 ### Fix externo pendente (midaz — outro repo, outro PR)
 `midaz` `pkg/net/http/withBody.go:235` usa `SetSpanAttributeForParam` importando de `tracing`. Trocar para o pacote `middleware`:
-`github.com/LerianStudio/lib-observability/v3/middleware.SetSpanAttributeForParam`.
+`github.com/LerianStudio/lib-observability/v4/middleware.SetSpanAttributeForParam`.
 (Apps que consomem os interceptors gRPC via `middleware` também precisam trocar para `grpcmiddleware`.)
 
 ### Verificação (`go list -deps`, deps de gofiber)

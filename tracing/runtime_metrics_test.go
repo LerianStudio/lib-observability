@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/LerianStudio/lib-observability/v3/log"
+	"github.com/LerianStudio/lib-observability/v4/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"

@@ -4,7 +4,7 @@ import (
 	"context"
 	"strings"
 
-	constant "github.com/LerianStudio/lib-observability/v3/constants"
+	constant "github.com/LerianStudio/lib-observability/v4/constants"
 	"github.com/google/uuid"
 )
 

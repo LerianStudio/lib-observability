@@ -41,7 +41,7 @@ func (m *MockLogger) EXPECT() *MockLoggerMockRecorder {
 }
 
 // Enabled mocks base method.
-func (m *MockLogger) Enabled(level Level) bool {
+func (m *MockLogger) Enabled(level int) bool {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "Enabled", level)
 	ret0, _ := ret[0].(bool)
@@ -55,7 +55,7 @@ func (mr *MockLoggerMockRecorder) Enabled(level any) *gomock.Call {
 }
 
 // Log mocks base method.
-func (m *MockLogger) Log(ctx context.Context, level Level, msg string, fields ...Field) {
+func (m *MockLogger) Log(ctx context.Context, level int, msg string, fields ...any) {
 	m.ctrl.T.Helper()
 	varargs := []any{ctx, level, msg}
 	for _, a := range fields {
@@ -86,7 +86,7 @@ func (mr *MockLoggerMockRecorder) Sync(ctx any) *gomock.Call {
 }
 
 // With mocks base method.
-func (m *MockLogger) With(fields ...Field) Logger {
+func (m *MockLogger) With(fields ...any) Logger {
 	m.ctrl.T.Helper()
 	varargs := []any{}
 	for _, a := range fields {

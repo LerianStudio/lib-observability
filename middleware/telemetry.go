@@ -17,9 +17,9 @@ import (
 	"sync"
 	"time"
 
-	observability "github.com/LerianStudio/lib-observability/v3"
-	constant "github.com/LerianStudio/lib-observability/v3/constants"
-	"github.com/LerianStudio/lib-observability/v3/tracing"
+	observability "github.com/LerianStudio/lib-observability/v4"
+	constant "github.com/LerianStudio/lib-observability/v4/constants"
+	"github.com/LerianStudio/lib-observability/v4/tracing"
 	"github.com/gofiber/fiber/v3"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/attribute"

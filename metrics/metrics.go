@@ -9,10 +9,28 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/LerianStudio/lib-observability/v3/log"
+	"github.com/LerianStudio/lib-observability/v4/log"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/metric/noop"
 )
+
+// Logger is the minimal logging interface this package needs to report
+// instrument-creation failures.
+//
+// Its single method uses only universal types - context.Context, int, string,
+// any - so any logger built to this shape satisfies it: one from any FUTURE
+// version of lib-observability, or one declared in a package that has never
+// imported lib-observability at all. Naming log.Level and log.Field here would
+// make this package's major version propagate to every caller that builds a
+// factory. See log.Logger.
+//
+// The guarantee is forward-looking, not retroactive: a v2 or v3 logger does
+// NOT satisfy this, because Go requires the signature to match exactly.
+//
+// level is on the log package scale: Error=0, Warn=1, Info=2, Debug=3.
+type Logger interface {
+	Log(ctx context.Context, level int, msg string, fields ...any)
+}
 
 // MetricsFactory provides a thread-safe factory for creating and managing OpenTelemetry metrics
 // with lazy initialization using sync.Map for high-performance concurrent access.
@@ -21,7 +39,7 @@ type MetricsFactory struct {
 	counters   sync.Map // string -> metric.Int64Counter
 	gauges     sync.Map // string -> metric.Int64Gauge
 	histograms sync.Map // string -> metric.Int64Histogram
-	logger     log.Logger
+	logger     Logger
 }
 
 var (
@@ -89,7 +107,7 @@ var (
 )
 
 // NewMetricsFactory creates a new MetricsFactory instance.
-func NewMetricsFactory(meter metric.Meter, logger log.Logger) (*MetricsFactory, error) {
+func NewMetricsFactory(meter metric.Meter, logger Logger) (*MetricsFactory, error) {
 	if meter == nil {
 		return nil, ErrNilMeter
 	}

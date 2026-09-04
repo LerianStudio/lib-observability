@@ -3,7 +3,7 @@ package middleware
 import (
 	"context"
 
-	observability "github.com/LerianStudio/lib-observability/v3"
+	observability "github.com/LerianStudio/lib-observability/v4"
 	"go.opentelemetry.io/otel/attribute"
 )
 

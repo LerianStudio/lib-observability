@@ -4,10 +4,10 @@ import (
 	"context"
 	"fmt"
 
-	observability "github.com/LerianStudio/lib-observability/v3"
-	obslog "github.com/LerianStudio/lib-observability/v3/log"
-	"github.com/LerianStudio/lib-observability/v3/runtime"
-	"github.com/LerianStudio/lib-observability/v3/tracing"
+	observability "github.com/LerianStudio/lib-observability/v4"
+	obslog "github.com/LerianStudio/lib-observability/v4/log"
+	"github.com/LerianStudio/lib-observability/v4/runtime"
+	"github.com/LerianStudio/lib-observability/v4/tracing"
 	"github.com/gofiber/fiber/v3"
 )
 

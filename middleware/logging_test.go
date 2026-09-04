@@ -17,9 +17,9 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	observability "github.com/LerianStudio/lib-observability/v3"
-	obslog "github.com/LerianStudio/lib-observability/v3/log"
-	"github.com/LerianStudio/lib-observability/v3/tracing"
+	observability "github.com/LerianStudio/lib-observability/v4"
+	obslog "github.com/LerianStudio/lib-observability/v4/log"
+	"github.com/LerianStudio/lib-observability/v4/tracing"
 	"github.com/gofiber/fiber/v3"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -33,30 +33,30 @@ type captureLogger struct {
 	mu       sync.Mutex
 	messages []string
 	fields   []obslog.Field
-	levels   []obslog.Level
+	levels   []int
 }
 
-func (l *captureLogger) Log(_ context.Context, level obslog.Level, msg string, fields ...obslog.Field) {
+func (l *captureLogger) Log(_ context.Context, level int, msg string, fields ...any) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
 	l.messages = append(l.messages, msg)
-	l.fields = append(l.fields, fields...)
+	l.fields = append(l.fields, obslog.Fields(fields...)...)
 	l.levels = append(l.levels, level)
 }
 
-func (l *captureLogger) With(fields ...obslog.Field) obslog.Logger {
+func (l *captureLogger) With(fields ...any) obslog.Logger {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	l.fields = append(l.fields, fields...)
+	l.fields = append(l.fields, obslog.Fields(fields...)...)
 
 	return l
 }
 
 func (l *captureLogger) WithGroup(_ string) obslog.Logger { return l }
 
-func (l *captureLogger) Enabled(_ obslog.Level) bool { return true }
+func (l *captureLogger) Enabled(_ int) bool { return true }
 
 func (l *captureLogger) Sync(_ context.Context) error { return nil }
 
@@ -70,11 +70,11 @@ func (l *captureLogger) snapshot() ([]string, []obslog.Field) {
 	return messages, fields
 }
 
-func (l *captureLogger) levelSnapshot() []obslog.Level {
+func (l *captureLogger) levelSnapshot() []int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	return append([]obslog.Level(nil), l.levels...)
+	return append([]int(nil), l.levels...)
 }
 
 type grpcRequestWithID struct {
@@ -651,7 +651,7 @@ func TestWithHTTPLoggingUsesStatusAwareAccessLogLevel(t *testing.T) {
 	tests := []struct {
 		name      string
 		status    int
-		wantLevel obslog.Level
+		wantLevel int
 	}{
 		{name: "2xx is info", status: http.StatusNoContent, wantLevel: obslog.LevelInfo},
 		{name: "3xx is info", status: http.StatusTemporaryRedirect, wantLevel: obslog.LevelInfo},

@@ -7,7 +7,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/LerianStudio/lib-observability/v3/tracing"
+	"github.com/LerianStudio/lib-observability/v4/tracing"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"

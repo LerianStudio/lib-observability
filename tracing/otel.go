@@ -15,11 +15,11 @@ import (
 	"time"
 	"unicode/utf8"
 
-	observability "github.com/LerianStudio/lib-observability/v3"
-	"github.com/LerianStudio/lib-observability/v3/assert"
-	constant "github.com/LerianStudio/lib-observability/v3/constants"
-	"github.com/LerianStudio/lib-observability/v3/log"
-	"github.com/LerianStudio/lib-observability/v3/metrics"
+	observability "github.com/LerianStudio/lib-observability/v4"
+	"github.com/LerianStudio/lib-observability/v4/assert"
+	constant "github.com/LerianStudio/lib-observability/v4/constants"
+	"github.com/LerianStudio/lib-observability/v4/log"
+	"github.com/LerianStudio/lib-observability/v4/metrics"
 	otelruntime "go.opentelemetry.io/contrib/instrumentation/runtime"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -115,9 +115,14 @@ type TelemetryConfig struct {
 	// mechanism that DOES read a caller-controlled `tenant-id` gRPC metadata
 	// field for span/metric labeling; see its own doc comment for that gap.
 	TrustInboundTraceContext bool
-	Logger                   log.Logger
-	Propagator               propagation.TextMapPropagator
-	Redactor                 *Redactor
+	// Logger is typed log.Universal - a single Log method built from universal
+	// types - rather than log.Logger, so a service can populate this config
+	// with a logger declared in its own package (or in a library that has
+	// decoupled from lib-observability) with no adapter. Any log.Logger
+	// satisfies it, so existing callers are unaffected.
+	Logger     log.Universal
+	Propagator propagation.TextMapPropagator
+	Redactor   *Redactor
 }
 
 // TelemetryOption configures optional provider behavior without extending
@@ -260,7 +265,7 @@ func normalizeEndpoint(cfg *TelemetryConfig) {
 // contain a URL scheme. The OTEL SDK's envconfig reads these via url.Parse(),
 // which fails on bare "host:port" values. Adding "http://" prevents noisy
 // "parse url" errors from the SDK's internal logger.
-func normalizeEndpointEnvVars(logger log.Logger) {
+func normalizeEndpointEnvVars(logger log.Universal) {
 	for _, key := range []string{
 		"OTEL_EXPORTER_OTLP_ENDPOINT",
 		"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
@@ -623,7 +628,7 @@ func isNilShutdownable(s shutdownable) bool {
 	return v.Kind() == reflect.Pointer && v.IsNil()
 }
 
-func buildShutdownHandlers(l log.Logger, components ...shutdownable) (func(), func(context.Context) error) {
+func buildShutdownHandlers(l log.Universal, components ...shutdownable) (func(), func(context.Context) error) {
 	// Normalize once at entry rather than re-checking log.IsNil(l) on every
 	// component in the loop below.
 	if log.IsNil(l) {

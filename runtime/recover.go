@@ -4,13 +4,27 @@ import (
 	"context"
 	"runtime/debug"
 
-	"github.com/LerianStudio/lib-observability/v3/log"
+	"github.com/LerianStudio/lib-observability/v4/log"
 )
 
-// Logger defines the minimal logging interface required by runtime.
-// This interface is satisfied by github.com/LerianStudio/lib-observability/log.Logger.
+// Logger is the minimal logging interface required by this package.
+//
+// Its single method uses only universal types - context.Context, int, string,
+// any - so any logger built to this shape satisfies it: one from any FUTURE
+// version of lib-observability, or one declared in a package that has never
+// imported lib-observability at all. Naming log.Level and log.Field in this
+// signature instead would make this package's major version propagate to
+// every caller.
+//
+// Note the direction of that guarantee. It is forward-looking, not
+// retroactive: a v2 or v3 logger, whose Log takes log.Level and ...log.Field,
+// does NOT satisfy this - Go requires the signature to match exactly. Such an
+// implementation must move to this signature (see MIGRATION-v4.md) or be
+// wrapped. What v4 buys is that this is the LAST time that has to happen.
+//
+// level is on the log package scale: Error=0, Warn=1, Info=2, Debug=3.
 type Logger interface {
-	Log(ctx context.Context, level log.Level, msg string, fields ...log.Field)
+	Log(ctx context.Context, level int, msg string, fields ...any)
 }
 
 // RecoverAndLog recovers from a panic, logs it with the stack trace, and
