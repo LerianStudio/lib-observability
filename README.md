@@ -148,18 +148,18 @@ app.Use(func(c fiber.Ctx) error {
 })
 ```
 
-`tenant.id` is the stable aggregation key. `tenant.name` is a mutable display
-label only. Keep both in Grafana queries so a reused name can never merge two
+`tenant.id` is the stable aggregation key. `tenant.slug` is a mutable display
+label only. Keep both in Grafana queries so a reused slug can never merge two
 different tenants:
 
 ```promql
-sum by (tenant_id, tenant_name) (
+sum by (tenant_id, tenant_slug) (
   rate(lerian_http_server_requests_by_tenant_total[5m])
 )
 ```
 
-Use `{{tenant_name}}` as the legend, but never aggregate only by
-`tenant_name`. A rename creates another attribute set for the same `tenant.id`.
+Use `{{tenant_slug}}` as the legend, but never aggregate only by
+`tenant_slug`. A rename creates another attribute set for the same `tenant.id`.
 With the default cumulative SDK temporality, the old set can remain in the
 process aggregation state until the MeterProvider or process restarts; the
 backend series then remains for its retention period. Queries that need
@@ -184,7 +184,7 @@ The instruments divide responsibility deliberately:
 
 This split is a correctness boundary, not only a cost optimization. With the
 current 14 explicit boundaries, a Prometheus histogram costs 17 series per
-attribute set; a counter costs one. `tenant.name` is functionally 1:1 with
+attribute set; a counter costs one. `tenant.slug` is functionally 1:1 with
 `tenant.id`, so it does not multiply the steady-state set count. The validated
 steady-state 50-tenant × 30-route scenario produces 1,500 request sets, 500
 4xx-response sets, 500 5xx-response sets, and 150 latency sets, with no
@@ -192,7 +192,7 @@ overflow before any retained rename overlap. Putting route
 and status on one counter would instead create 9,000 sets and collapse 7,001 into
 `otel.metric.overflow`, silently losing tenant identity. This is an operational
 budget, not a universal guarantee: each adopter must recalculate authenticated
-tenants, normalized routes, and retained tenant-name versions, then keep each
+tenants, normalized routes, and retained tenant-slug versions, then keep each
 instrument below the effective limit.
 The default is 2,000; applications can override it with
 `NewTelemetryWithOptions(cfg, WithMetricCardinalityLimit(limit))`. The SDK reserves one attribute set for
@@ -210,7 +210,7 @@ latency. Requests without an explicitly authenticated tenant remain in the
 standard HTTP metric and are omitted from all tenant metrics. A later
 `ContextWithAuthenticatedTenant` or `ContextWithAuthenticatedTenantID` call
 replaces the earlier value; `uuid.Nil` clears it. The ID-only helper remains
-supported and emits the metrics without `tenant.name`.
+supported and emits the metrics without `tenant.slug`.
 
 ## Tenant ID propagation
 
