@@ -14,9 +14,9 @@ const (
 	AttrKeyTenantID = "tenant.id"
 
 	// AttrKeyTenantName is the OpenTelemetry attribute key for the human-readable
-	// tenant name. It exists only for display; tenant.id remains the stable
-	// aggregation key because names are mutable.
-	AttrKeyTenantName = "tenant.name"
+	// tenant slug. It exists only for display; tenant.id remains the stable
+	// aggregation key because slugs are mutable and may be reused.
+	AttrKeyTenantName = "tenant.slug"
 
 	// MaxTenantIDLen caps tenant IDs extracted from request headers to keep
 	// telemetry cardinality bounded. Values exceeding the cap are dropped
