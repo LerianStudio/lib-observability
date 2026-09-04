@@ -1,5 +1,14 @@
 # Lib-observability Changelog
 
+## [4.0.1](https://github.com/LerianStudio/lib-observability/releases/tag/v4.0.1)
+
+Fixes:
+- Emit the tenant display label as `tenant.slug`. (@gauchito91)
+
+[Compare changes](https://github.com/LerianStudio/lib-observability/compare/v4.0.0...v4.0.1)
+
+---
+
 ## [4.0.0](https://github.com/LerianStudio/lib-observability/releases/tag/v4.0.0)
 
 Features:
