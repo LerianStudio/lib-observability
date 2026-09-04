@@ -1,5 +1,27 @@
 # Lib-observability Changelog
 
+## [4.0.0](https://github.com/LerianStudio/lib-observability/releases/tag/v4.0.0)
+
+Features:
+- Bumped the Go module path to `/v4` for the `v4.0.0` release. (@rodrigodh)
+- Added the universal recording surface to the factory. (@rodrigodh)
+
+Fixes:
+- Corrected the compatibility claim and closed two checker gaps. (@rodrigodh)
+- Bumped `grpc` to `v1.83.2` and `x/crypto` to `v0.56.0`. (@rodrigodh)
+
+Improvements:
+- Accepted any logger at the context and telemetry boundary. (@rodrigodh)
+- Accepted any logger and any recorder at the boundary for both assert and runtime. (@rodrigodh)
+- Moved the adapter onto the universal signatures. (@rodrigodh)
+- Declared Logger with universal types only. (@rodrigodh)
+- Bumped `golang.org/x/crypto` to `v0.55.0` for `CVE-2026-56854`. (@rodrigodh)
+- Documented the `v4` migration. (@rodrigodh)
+
+[Compare changes](https://github.com/LerianStudio/lib-observability/compare/v3.2.0...v4.0.0)
+
+---
+
 ## [3.2.0](https://github.com/LerianStudio/lib-observability/releases/tag/v3.2.0)
 
 Features:
