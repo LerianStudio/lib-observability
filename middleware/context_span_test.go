@@ -57,10 +57,10 @@ func TestSetHandlerSpanAttributes_PropagatesTenantToAttrBag(t *testing.T) {
 	// AttrBag carries tenant.id (the previously missing propagation).
 	got, ok := attrBagValue(ctx, constant.AttrKeyTenantID)
 	assert.True(t, ok, "tenant.id must be present in the AttrBag")
-	assert.Equal(t, tenantID.String(), got)
+	assert.Equal(t, canonicalTenantID(tenantID), got)
 
 	// tenantIDFromAttrBag (the exact path WithTelemetry uses) resolves it.
-	assert.Equal(t, tenantID.String(), tenantIDFromAttrBag(ctx))
+	assert.Equal(t, canonicalTenantID(tenantID), tenantIDFromAttrBag(ctx))
 
 	// context.id is also propagated.
 	gotCtxID, ok := attrBagValue(ctx, constant.AttrKeyContextID)
@@ -71,7 +71,7 @@ func TestSetHandlerSpanAttributes_PropagatesTenantToAttrBag(t *testing.T) {
 	recorded := recorder.Ended()[0]
 	gotSpanTenant, ok := spanAttrValue(recorded, constant.AttrKeyTenantID)
 	assert.True(t, ok)
-	assert.Equal(t, tenantID.String(), gotSpanTenant)
+	assert.Equal(t, canonicalTenantID(tenantID), gotSpanTenant)
 
 	gotSpanCtxID, ok := spanAttrValue(recorded, constant.AttrKeyContextID)
 	assert.True(t, ok)
@@ -91,7 +91,7 @@ func TestSetHandlerSpanAttributes_NilContextIDOmitsContextID(t *testing.T) {
 	ctx := SetHandlerSpanAttributes(context.Background(), span, tenantID, uuid.Nil)
 	span.End()
 
-	assert.Equal(t, tenantID.String(), tenantIDFromAttrBag(ctx))
+	assert.Equal(t, canonicalTenantID(tenantID), tenantIDFromAttrBag(ctx))
 
 	_, ok := attrBagValue(ctx, constant.AttrKeyContextID)
 	assert.False(t, ok, "context.id must be omitted when contextID is uuid.Nil")
@@ -108,7 +108,7 @@ func TestSetHandlerSpanAttributes_NilSpanStillPropagates(t *testing.T) {
 
 	ctx := SetHandlerSpanAttributes(context.Background(), nil, tenantID, uuid.Nil)
 
-	assert.Equal(t, tenantID.String(), tenantIDFromAttrBag(ctx))
+	assert.Equal(t, canonicalTenantID(tenantID), tenantIDFromAttrBag(ctx))
 }
 
 // TestSetHandlerSpanAttributes_NilContextDefaults guards against a nil context
@@ -119,5 +119,46 @@ func TestSetHandlerSpanAttributes_NilContextDefaults(t *testing.T) {
 	ctx := SetHandlerSpanAttributes(nil, nil, tenantID, uuid.Nil) //nolint:staticcheck // intentional nil ctx
 
 	assert.NotNil(t, ctx)
-	assert.Equal(t, tenantID.String(), tenantIDFromAttrBag(ctx))
+	assert.Equal(t, canonicalTenantID(tenantID), tenantIDFromAttrBag(ctx))
+}
+
+// The platform canonical spelling of a tenant id is the 32-character lowercase
+// dashless hex form produced by lib-commons core.CanonicalTenantID. The JWT
+// claim, the OTel baggage member and every tenant-keyed pool, cache and Redis
+// key carry that form, so a span or metric label rendered as
+// uuid.UUID.String() would split one tenant into two series. This pins the
+// dashless form against hardcoded literals rather than deriving the
+// expectation from the same helper under test.
+func TestCanonicalTenantID_RendersDashlessLowercaseHex(t *testing.T) {
+	tests := []struct {
+		name string
+		in   uuid.UUID
+		want string
+	}{
+		{
+			name: "lowercase uuid",
+			in:   uuid.MustParse("550e8400-e29b-41d4-a716-446655440000"),
+			want: "550e8400e29b41d4a716446655440000",
+		},
+		{
+			name: "uppercase input folds to lowercase",
+			in:   uuid.MustParse("0F6E2B3A-1C4D-4E5F-8A9B-0C1D2E3F4A5B"),
+			want: "0f6e2b3a1c4d4e5f8a9b0c1d2e3f4a5b",
+		},
+		{
+			name: "nil uuid",
+			in:   uuid.Nil,
+			want: "00000000000000000000000000000000",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := canonicalTenantID(tt.in)
+
+			assert.Equal(t, tt.want, got)
+			assert.Len(t, got, 32)
+			assert.NotContains(t, got, "-")
+		})
+	}
 }
