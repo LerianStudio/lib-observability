@@ -107,9 +107,17 @@ func tenantIDFromBaggage(ctx context.Context) string {
 }
 
 // resolveTenantIDForTelemetry resolves the tenant.id used by explicit telemetry
-// paths such as the gRPC request logger. The request AttrBag overrides standard
-// OTel baggage when both carry a usable value. Built-in HTTP telemetry does not
-// call this resolver because infrastructure signals must not carry identity.
+// paths: the gRPC request logger and the HTTP access log. The request AttrBag
+// overrides standard OTel baggage when both carry a usable value.
+//
+// Built-in HTTP metrics and the built-in HTTP server span do not call this
+// resolver: infrastructure signals must not carry identity, and their tenant
+// dimension comes from an attested identity instead (see
+// recordAuthenticatedTenantHTTPMetrics and identityFilteredSpanStartContext).
+// The access log is a per-request application record, not an infrastructure
+// signal, so it may carry the tenant as resolved here. Neither source is
+// client-controllable: ExtractHTTPContext strips any tenant.id carried by an
+// inbound baggage header before this resolver can observe it.
 func resolveTenantIDForTelemetry(ctx context.Context) string {
 	if tenantID := tenantIDFromAttrBag(ctx); tenantID != "" {
 		return tenantID
