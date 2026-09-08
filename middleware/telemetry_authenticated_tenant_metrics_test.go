@@ -104,7 +104,7 @@ func TestAuthenticatedTenantHTTPMetrics_RecordsExplicitlyAttestedIdentity(t *tes
 	require.Len(t, counter.DataPoints, 1)
 	counterDP := counter.DataPoints[0]
 	assert.EqualValues(t, 1, counterDP.Value)
-	assert.Equal(t, tenantID.String(), mustAttrValue(t, counterDP.Attributes, constant.AttrKeyTenantID))
+	assert.Equal(t, canonicalTenantID(tenantID), mustAttrValue(t, counterDP.Attributes, constant.AttrKeyTenantID))
 	assert.Equal(t, "/api/users/:id", mustAttrValue(t, counterDP.Attributes, "http.route"))
 	assertExactAttributeKeys(t, counterDP.Attributes, constant.AttrKeyTenantID, "http.route")
 
@@ -113,7 +113,7 @@ func TestAuthenticatedTenantHTTPMetrics_RecordsExplicitlyAttestedIdentity(t *tes
 	require.Len(t, responses5xx.DataPoints, 1)
 	errorDP := responses5xx.DataPoints[0]
 	assert.EqualValues(t, 1, errorDP.Value)
-	assert.Equal(t, tenantID.String(), mustAttrValue(t, errorDP.Attributes, constant.AttrKeyTenantID))
+	assert.Equal(t, canonicalTenantID(tenantID), mustAttrValue(t, errorDP.Attributes, constant.AttrKeyTenantID))
 	assert.Equal(t, "/api/users/:id", mustAttrValue(t, errorDP.Attributes, "http.route"))
 	assertExactAttributeKeys(t, errorDP.Attributes, constant.AttrKeyTenantID, "http.route")
 	assert.Nil(t, findInt64SumByName(t, reader, "lerian.http.server.errors.by_tenant"),
@@ -125,7 +125,7 @@ func TestAuthenticatedTenantHTTPMetrics_RecordsExplicitlyAttestedIdentity(t *tes
 	require.Len(t, latency.DataPoints, 1)
 	latencyDP := latency.DataPoints[0]
 	assert.EqualValues(t, 1, latencyDP.Count)
-	assert.Equal(t, tenantID.String(), mustAttrValue(t, latencyDP.Attributes, constant.AttrKeyTenantID))
+	assert.Equal(t, canonicalTenantID(tenantID), mustAttrValue(t, latencyDP.Attributes, constant.AttrKeyTenantID))
 	assert.Equal(t, "5xx", mustAttrValue(t, latencyDP.Attributes, "http.response.status_class"))
 	assertExactAttributeKeys(t, latencyDP.Attributes,
 		constant.AttrKeyTenantID, "http.response.status_class")
@@ -159,7 +159,7 @@ func TestAuthenticatedTenantHTTPMetrics_EmitsTenantNameWhenProvided(t *testing.T
 		sum := findInt64SumByName(t, reader, metricName)
 		require.NotNil(t, sum)
 		for _, dp := range sum.DataPoints {
-			assert.Equal(t, tenantID.String(), mustAttrValue(t, dp.Attributes, constant.AttrKeyTenantID))
+			assert.Equal(t, canonicalTenantID(tenantID), mustAttrValue(t, dp.Attributes, constant.AttrKeyTenantID))
 			assert.Equal(t, "jeff", mustAttrValue(t, dp.Attributes, constant.AttrKeyTenantName))
 		}
 	}
@@ -168,7 +168,7 @@ func TestAuthenticatedTenantHTTPMetrics_EmitsTenantNameWhenProvided(t *testing.T
 	require.NotNil(t, latency)
 	require.Len(t, latency.DataPoints, 2)
 	for _, dp := range latency.DataPoints {
-		assert.Equal(t, tenantID.String(), mustAttrValue(t, dp.Attributes, constant.AttrKeyTenantID))
+		assert.Equal(t, canonicalTenantID(tenantID), mustAttrValue(t, dp.Attributes, constant.AttrKeyTenantID))
 		assert.Equal(t, "jeff", mustAttrValue(t, dp.Attributes, constant.AttrKeyTenantName))
 	}
 }
@@ -193,7 +193,7 @@ func TestAuthenticatedTenantHTTPMetrics_OmitsTenantNameWhenAbsent(t *testing.T) 
 	requests := findInt64SumByName(t, reader, authenticatedTenantHTTPServerRequestsMetric)
 	require.NotNil(t, requests)
 	require.Len(t, requests.DataPoints, 1)
-	assert.Equal(t, tenantID.String(), mustAttrValue(t, requests.DataPoints[0].Attributes, constant.AttrKeyTenantID))
+	assert.Equal(t, canonicalTenantID(tenantID), mustAttrValue(t, requests.DataPoints[0].Attributes, constant.AttrKeyTenantID))
 	_, hasName := requests.DataPoints[0].Attributes.Value(attribute.Key(constant.AttrKeyTenantName))
 	assert.False(t, hasName)
 
@@ -236,7 +236,7 @@ func TestAuthenticatedTenantHTTPMetrics_RenameKeepsSeriesAnchoredOnID(t *testing
 	require.Len(t, requests.DataPoints, 2)
 	names := make(map[string]struct{}, 2)
 	for _, dp := range requests.DataPoints {
-		assert.Equal(t, tenantID.String(), mustAttrValue(t, dp.Attributes, constant.AttrKeyTenantID))
+		assert.Equal(t, canonicalTenantID(tenantID), mustAttrValue(t, dp.Attributes, constant.AttrKeyTenantID))
 		names[mustAttrValue(t, dp.Attributes, constant.AttrKeyTenantName)] = struct{}{}
 	}
 	assert.Equal(t, map[string]struct{}{"jeff": {}, "jefferson": {}}, names)
@@ -308,7 +308,7 @@ func TestAuthenticatedTenantHTTPMetrics_Responses5xxCounterOmitsOtherStatusClass
 	require.NotNil(t, responses4xx)
 	require.Len(t, responses4xx.DataPoints, 1)
 	assert.EqualValues(t, 1, responses4xx.DataPoints[0].Value)
-	assert.Equal(t, tenantID.String(),
+	assert.Equal(t, canonicalTenantID(tenantID),
 		mustAttrValue(t, responses4xx.DataPoints[0].Attributes, constant.AttrKeyTenantID))
 	assert.Equal(t, "/missing", mustAttrValue(t, responses4xx.DataPoints[0].Attributes, "http.route"))
 	assertExactAttributeKeys(t, responses4xx.DataPoints[0].Attributes,
@@ -581,13 +581,13 @@ func TestAuthenticatedTenantHTTPMetrics_AuthenticatedTenantWinsOverForgedHeader(
 	counter := findInt64SumByName(t, reader, authenticatedTenantHTTPServerRequestsMetric)
 	require.NotNil(t, counter)
 	require.Len(t, counter.DataPoints, 1)
-	assert.Equal(t, authenticatedTenant.String(),
+	assert.Equal(t, canonicalTenantID(authenticatedTenant),
 		mustAttrValue(t, counter.DataPoints[0].Attributes, constant.AttrKeyTenantID))
 
 	latency := findFloat64HistogramByName(t, reader, authenticatedTenantHTTPServerLatencyMetric)
 	require.NotNil(t, latency)
 	require.Len(t, latency.DataPoints, 1)
-	assert.Equal(t, authenticatedTenant.String(),
+	assert.Equal(t, canonicalTenantID(authenticatedTenant),
 		mustAttrValue(t, latency.DataPoints[0].Attributes, constant.AttrKeyTenantID))
 }
 
@@ -671,7 +671,7 @@ func TestAuthenticatedTenantLatency_AttributeSetIsFrozen(t *testing.T) {
 	require.Len(t, latency.DataPoints, 1)
 	dataPoint := latency.DataPoints[0]
 	require.Equal(t, 3, dataPoint.Attributes.Len())
-	assert.Equal(t, tenantID.String(), mustAttrValue(t, dataPoint.Attributes, constant.AttrKeyTenantID))
+	assert.Equal(t, canonicalTenantID(tenantID), mustAttrValue(t, dataPoint.Attributes, constant.AttrKeyTenantID))
 	assert.Equal(t, "jeff", mustAttrValue(t, dataPoint.Attributes, constant.AttrKeyTenantName))
 	assert.Equal(t, "4xx", mustAttrValue(t, dataPoint.Attributes, "http.response.status_class"))
 	assertExactAttributeKeys(t, dataPoint.Attributes,
@@ -737,7 +737,7 @@ func TestAuthenticatedTenantCounters_AttributeSetIsFrozen(t *testing.T) {
 			dataPoint := counter.DataPoints[0]
 			assert.Equal(t, tt.wantValue, dataPoint.Value)
 			require.Equal(t, 3, dataPoint.Attributes.Len())
-			assert.Equal(t, tenantID.String(),
+			assert.Equal(t, canonicalTenantID(tenantID),
 				mustAttrValue(t, dataPoint.Attributes, constant.AttrKeyTenantID))
 			assert.Equal(t, "jeff", mustAttrValue(t, dataPoint.Attributes, constant.AttrKeyTenantName))
 			assert.Equal(t, "/orders/:outcome", mustAttrValue(t, dataPoint.Attributes, "http.route"))
@@ -772,7 +772,7 @@ func TestAuthenticatedTenantCounters_UnmatchedRouteUsesBoundedFallback(t *testin
 		require.Len(t, counter.DataPoints, 1)
 		dataPoint := counter.DataPoints[0]
 		assert.Equal(t, int64(1), dataPoint.Value)
-		assert.Equal(t, tenantID.String(),
+		assert.Equal(t, canonicalTenantID(tenantID),
 			mustAttrValue(t, dataPoint.Attributes, constant.AttrKeyTenantID))
 		assert.Equal(t, unmatchedRouteTemplate, mustAttrValue(t, dataPoint.Attributes, "http.route"))
 		assertExactAttributeKeys(t, dataPoint.Attributes, constant.AttrKeyTenantID, "http.route")
@@ -822,7 +822,7 @@ func TestAuthenticatedTenantHTTPMetrics_AuthenticationMayRunBeforeTelemetry(t *t
 	requests := findInt64SumByName(t, reader, authenticatedTenantHTTPServerRequestsMetric)
 	require.NotNil(t, requests)
 	require.Len(t, requests.DataPoints, 1)
-	assert.Equal(t, tenantID.String(),
+	assert.Equal(t, canonicalTenantID(tenantID),
 		mustAttrValue(t, requests.DataPoints[0].Attributes, constant.AttrKeyTenantID))
 }
 
@@ -970,7 +970,44 @@ func assertTenantSet(t *testing.T, actual map[string]struct{}, expected []uuid.U
 
 	require.Len(t, actual, len(expected))
 	for _, tenantID := range expected {
-		_, ok := actual[tenantID.String()]
+		_, ok := actual[canonicalTenantID(tenantID)]
 		assert.True(t, ok, "missing tenant series %s", tenantID)
 	}
+}
+
+func TestAuthenticatedTenantHTTPMetrics_LabelsTenantIDDashless(t *testing.T) {
+	tel, reader, _ := newTelemetryHarness(t)
+	tenantID := uuid.MustParse("550e8400-e29b-41d4-a716-446655440000")
+
+	app := fiber.New()
+	mid := NewTelemetryMiddleware(tel)
+	app.Use(mid.WithAuthenticatedTenantHTTPMetrics(tel))
+	app.Use(func(c fiber.Ctx) error {
+		c.SetContext(observability.ContextWithAuthenticatedTenantID(c.Context(), tenantID))
+
+		return c.Next()
+	})
+	app.Get("/api/users/:id", func(c fiber.Ctx) error {
+		return c.SendStatus(http.StatusOK)
+	})
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/users/42", nil))
+	require.NoError(t, err)
+	defer func() { require.NoError(t, resp.Body.Close()) }()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	counter := findInt64SumByName(t, reader, authenticatedTenantHTTPServerRequestsMetric)
+	require.NotNil(t, counter)
+	require.Len(t, counter.DataPoints, 1)
+
+	label := mustAttrValue(t, counter.DataPoints[0].Attributes, constant.AttrKeyTenantID)
+	assert.Equal(t, "550e8400e29b41d4a716446655440000", label,
+		"the metric label must carry the same spelling as the baggage member and the tenant pool key")
+	assert.NotEqual(t, tenantID.String(), label, "uuid.UUID.String() would reintroduce the hyphens")
+
+	latency := findFloat64HistogramByName(t, reader, authenticatedTenantHTTPServerLatencyMetric)
+	require.NotNil(t, latency)
+	require.Len(t, latency.DataPoints, 1)
+	assert.Equal(t, "550e8400e29b41d4a716446655440000",
+		mustAttrValue(t, latency.DataPoints[0].Attributes, constant.AttrKeyTenantID))
 }
