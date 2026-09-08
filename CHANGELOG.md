@@ -1,5 +1,14 @@
 # Lib-observability Changelog
 
+## [4.0.3](https://github.com/LerianStudio/lib-observability/releases/tag/v4.0.3)
+
+Fixes:
+- Ensure the `tenant.id` is included in the HTTP access log to improve traceability and debugging. (@rodrigodh)
+
+[Compare changes](https://github.com/LerianStudio/lib-observability/compare/v4.0.2...v4.0.3)
+
+---
+
 ## [4.0.2](https://github.com/LerianStudio/lib-observability/releases/tag/v4.0.2)
 
 Fixes:
