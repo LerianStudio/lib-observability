@@ -1,5 +1,17 @@
 # Lib-observability Changelog
 
+## [4.0.2](https://github.com/LerianStudio/lib-observability/releases/tag/v4.0.2)
+
+Fixes:
+- Render `tenant.id` labels in the canonical dashless form. (@rodrigodh)
+
+Improvements:
+- Backmerge main into develop to ensure consistency and up-to-date changes. (@rodrigodh)
+
+[Compare changes](https://github.com/LerianStudio/lib-observability/compare/v4.0.1...v4.0.2)
+
+---
+
 ## [4.0.1](https://github.com/LerianStudio/lib-observability/releases/tag/v4.0.1)
 
 Fixes:
