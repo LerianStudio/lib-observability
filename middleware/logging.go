@@ -242,6 +242,21 @@ func WithHTTPLogging(opts ...LogMiddlewareOption) fiber.Handler {
 			obslog.String("http_path", info.URI),
 			obslog.Int("http_latency_ms", int(info.Duration.Milliseconds())),
 		}
+
+		// Resolved from the context as it stands AFTER c.Next(), not from the
+		// one captured above: the tenant is attested by a route-level
+		// middleware running behind the consumer's auth handler, so it does
+		// not exist yet when this middleware binds its request logger. The
+		// resolver reads the request AttrBag and OTel baggage, both of which
+		// that middleware writes through c.SetContext - so the access log
+		// agrees with the span attribute rather than reporting a second,
+		// separately derived notion of tenant. Absent tenant yields "", and
+		// no field is appended: an empty tenant.id would read as a real
+		// dimension to every log backend.
+		if tenantID := resolveTenantIDForTelemetry(c.Context()); tenantID != "" {
+			fields = append(fields, obslog.String(constant.AttrKeyTenantID, tenantID))
+		}
+
 		if handlerErr != nil {
 			// tracing.ErrorMessage, not obslog.Err(handlerErr) storing the raw
 			// error: the access log's error text must match what the span
