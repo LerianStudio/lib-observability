@@ -1,5 +1,79 @@
 # Lib-observability Changelog
 
+## [4.0.1](https://github.com/LerianStudio/lib-observability/releases/tag/v4.0.1)
+
+Fixes:
+- Emit the tenant display label as `tenant.slug`. (@gauchito91)
+
+[Compare changes](https://github.com/LerianStudio/lib-observability/compare/v4.0.0...v4.0.1)
+
+---
+
+## [4.0.0](https://github.com/LerianStudio/lib-observability/releases/tag/v4.0.0)
+
+Features:
+- Bumped the Go module path to `/v4` for the `v4.0.0` release. (@rodrigodh)
+- Added the universal recording surface to the factory. (@rodrigodh)
+
+Fixes:
+- Corrected the compatibility claim and closed two checker gaps. (@rodrigodh)
+- Bumped `grpc` to `v1.83.2` and `x/crypto` to `v0.56.0`. (@rodrigodh)
+
+Improvements:
+- Accepted any logger at the context and telemetry boundary. (@rodrigodh)
+- Accepted any logger and any recorder at the boundary for both assert and runtime. (@rodrigodh)
+- Moved the adapter onto the universal signatures. (@rodrigodh)
+- Declared Logger with universal types only. (@rodrigodh)
+- Bumped `golang.org/x/crypto` to `v0.55.0` for `CVE-2026-56854`. (@rodrigodh)
+- Documented the `v4` migration. (@rodrigodh)
+
+[Compare changes](https://github.com/LerianStudio/lib-observability/compare/v3.2.0...v4.0.0)
+
+---
+
+## [3.2.0](https://github.com/LerianStudio/lib-observability/releases/tag/v3.2.0)
+
+Features:
+- Added support for displaying authenticated tenant names in metrics. (@gandalf-at-lerian)
+- Introduced configuration for cardinality limits in metrics. (@gandalf-at-lerian)
+- Implemented counting of tenant HTTP 4xx responses in middleware. (@gandalf-at-lerian)
+- Added measurement of authenticated tenant HTTP latency. (@gandalf-at-lerian)
+
+Fixes:
+- Ensured compatibility of `TelemetryConfig` source in the API. (@gandalf-at-lerian)
+- Bounded the cardinality for authenticated tenants in metrics. (@gandalf-at-lerian)
+
+Improvements:
+- Updated documentation to account for tenant rename headroom in metrics. (@gandalf-at-lerian)
+- Preserved worst-case cardinality coverage in metrics tests. (@gandalf-at-lerian)
+- Aligned metric names for tenant responses in middleware. (@gandalf-at-lerian)
+- Scoped the cardinality limit documentation to the provider. (@gandalf-at-lerian)
+- Made the cardinality contract explicit in the documentation. (@gandalf-at-lerian)
+- Clarified the scope of tenant identity in the documentation. (@gandalf-at-lerian)
+
+[Compare changes](https://github.com/LerianStudio/lib-observability/compare/v3.1.0...v3.2.0)
+
+---
+
+## [3.1.0](https://github.com/LerianStudio/lib-observability/releases/tag/v3.1.0)
+
+Features:
+- Introduced `redisobs.Setup` which returns a cleanup function for pool-stat registrations, enhancing Redis observability. (@rodrigodh)
+- Added `sqlobs.Setup` for one-call SQL pool instrumentation, simplifying the setup process for SQL observability. (@rodrigodh)
+
+Fixes:
+- Addressed an issue in metrics where connectivity was not preserved during Setup and added guards for typed nils. (@fredcamaral)
+- Ensured Redis metrics are instrumented before tracing to maintain accurate observability. (@rodrigodh)
+- Resolved middleware issues by satisfying `errorlint` and `inamedparam` in `asFiberError`, and preventing typed-nil `*fiber.Error` from shadowing valid errors in joined chains. (@fredcamaral)
+- Implemented guards for typed-nil `*fiber.Error` matched by `errors.As` to prevent erroneous error handling. (@fredcamaral)
+
+Improvements:
+- Enhanced the SQL observability documentation by adding a nil-guard to the Setup example and softening the rationale for empty-DSN to allow safe recreation. (@fredcamaral)
+
+[Compare changes](https://github.com/LerianStudio/lib-observability/compare/v3.0.0...v3.1.0)
+
+---
+
 ## [3.0.0](https://github.com/LerianStudio/lib-observability/releases/tag/v3.0.0)
 
 Features:
