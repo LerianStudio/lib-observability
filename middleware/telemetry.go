@@ -698,7 +698,7 @@ func recordAuthenticatedTenantHTTPMetrics(
 	}
 
 	tenantAttrs := []attribute.KeyValue{
-		attribute.String(constant.AttrKeyTenantID, tenant.ID.String()),
+		attribute.String(constant.AttrKeyTenantID, canonicalTenantID(tenant.ID)),
 	}
 	if tenant.Name != "" {
 		tenantAttrs = append(tenantAttrs, attribute.String(constant.AttrKeyTenantName, tenant.Name))

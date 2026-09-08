@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"context"
+	"encoding/hex"
 	"reflect"
 
 	observability "github.com/LerianStudio/lib-observability/v4"
@@ -10,6 +11,33 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 )
+
+// canonicalTenantID renders a tenant id in the platform canonical spelling:
+// the 32-character lowercase dashless hex form.
+//
+// A uuid.UUID is a [16]byte and carries no spelling of its own; the hyphens
+// exist only in the rendering. uuid.UUID.String() renders the RFC 4122 dashed
+// form, but every other channel a tenant id travels through on this platform
+// uses the dashless form: the JWT tenantId claim, the OTel baggage member
+// written by lib-commons tmmiddleware.WithTenantDB, the Postgres and Mongo
+// connection pool keys, the tenant cache keys and the Redis key namespaces —
+// all of them the output of lib-commons core.CanonicalTenantID, which parses
+// the UUID and re-encodes it with encoding/hex for exactly this reason.
+//
+// Rendering a metric or span label with String() therefore splits one tenant
+// into two time series that no query can reconcile: dashless on the spans
+// seeded from baggage, dashed on the metrics labelled from the attested
+// identity. This helper is what keeps the two spellings identical. It applies
+// to the tenant id only — contextID, exceptionID and disputeID are ordinary
+// UUIDs with no dashless convention and keep their String() rendering.
+//
+// It is duplicated rather than imported from lib-commons because lib-commons
+// depends on lib-observability, and the reverse edge would deadlock the two
+// release trains. It takes a uuid.UUID rather than a string, so unlike
+// core.CanonicalTenantID it needs no validation and no error path.
+func canonicalTenantID(tenantID uuid.UUID) string {
+	return hex.EncodeToString(tenantID[:])
+}
 
 // isNilSpan reports whether span is nil, including typed-nil interface values
 // where a concrete nil pointer is stored in a trace.Span interface.
@@ -47,7 +75,7 @@ func SetHandlerSpanAttributes(ctx context.Context, span trace.Span, tenantID, co
 	}
 
 	attrs := []attribute.KeyValue{
-		attribute.String(constant.AttrKeyTenantID, tenantID.String()),
+		attribute.String(constant.AttrKeyTenantID, canonicalTenantID(tenantID)),
 	}
 
 	if contextID != uuid.Nil {
@@ -67,7 +95,7 @@ func SetTenantSpanAttribute(span trace.Span, tenantID uuid.UUID) {
 		return
 	}
 
-	span.SetAttributes(attribute.String(constant.AttrKeyTenantID, tenantID.String()))
+	span.SetAttributes(attribute.String(constant.AttrKeyTenantID, canonicalTenantID(tenantID)))
 }
 
 // SetExceptionSpanAttributes adds tenant.id and exception.id attributes to a trace span.
@@ -77,7 +105,7 @@ func SetExceptionSpanAttributes(span trace.Span, tenantID, exceptionID uuid.UUID
 	}
 
 	span.SetAttributes(
-		attribute.String(constant.AttrKeyTenantID, tenantID.String()),
+		attribute.String(constant.AttrKeyTenantID, canonicalTenantID(tenantID)),
 		attribute.String("exception.id", exceptionID.String()),
 	)
 }
@@ -89,7 +117,7 @@ func SetDisputeSpanAttributes(span trace.Span, tenantID, disputeID uuid.UUID) {
 	}
 
 	span.SetAttributes(
-		attribute.String(constant.AttrKeyTenantID, tenantID.String()),
+		attribute.String(constant.AttrKeyTenantID, canonicalTenantID(tenantID)),
 		attribute.String("dispute.id", disputeID.String()),
 	)
 }
