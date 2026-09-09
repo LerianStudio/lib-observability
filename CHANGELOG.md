@@ -1,5 +1,36 @@
 # Lib-observability Changelog
 
+## [4.0.4](https://github.com/LerianStudio/lib-observability/releases/tag/v4.0.4)
+
+Fixes:
+
+- Moved the OpenTelemetry log family together to ensure that consumers can build successfully. (@fredcamaral)
+
+[Compare changes](https://github.com/LerianStudio/lib-observability/compare/v4.0.3...v4.0.4)
+
+---
+
+## [4.0.3](https://github.com/LerianStudio/lib-observability/releases/tag/v4.0.3)
+
+Fixes:
+- Ensure the `tenant.id` is included in the HTTP access log to improve traceability and debugging. (@rodrigodh)
+
+[Compare changes](https://github.com/LerianStudio/lib-observability/compare/v4.0.2...v4.0.3)
+
+---
+
+## [4.0.2](https://github.com/LerianStudio/lib-observability/releases/tag/v4.0.2)
+
+Fixes:
+- Render `tenant.id` labels in the canonical dashless form. (@rodrigodh)
+
+Improvements:
+- Backmerge main into develop to ensure consistency and up-to-date changes. (@rodrigodh)
+
+[Compare changes](https://github.com/LerianStudio/lib-observability/compare/v4.0.1...v4.0.2)
+
+---
+
 ## [4.0.1](https://github.com/LerianStudio/lib-observability/releases/tag/v4.0.1)
 
 Fixes:
