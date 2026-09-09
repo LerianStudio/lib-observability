@@ -18,7 +18,7 @@ permissions:
 
 jobs:
   security:
-    uses: LerianStudio/github-actions-shared-workflows/.github/workflows/pr-security-scan.yml@v1.66.3
+    uses: LerianStudio/github-actions-shared-workflows/.github/workflows/pr-security-scan.yml@a3e72f697b0e104e6f67971d0a8ecbba590c0923 # v1.66.3
     with:
       enable_docker_scan: false
     secrets: inherit
