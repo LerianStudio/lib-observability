@@ -1,5 +1,15 @@
 # Lib-observability Changelog
 
+## [4.0.4](https://github.com/LerianStudio/lib-observability/releases/tag/v4.0.4)
+
+Fixes:
+
+- Moved the OpenTelemetry log family together to ensure that consumers can build successfully. (@fredcamaral)
+
+[Compare changes](https://github.com/LerianStudio/lib-observability/compare/v4.0.3...v4.0.4)
+
+---
+
 ## [4.0.3](https://github.com/LerianStudio/lib-observability/releases/tag/v4.0.3)
 
 Fixes:
