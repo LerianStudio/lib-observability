@@ -3,7 +3,7 @@ module github.com/LerianStudio/lib-observability/v4
 go 1.26.3
 
 require (
-	github.com/XSAM/otelsql v0.43.0
+	github.com/XSAM/otelsql v0.44.0
 	github.com/gofiber/fiber/v3 v3.5.0
 	github.com/google/uuid v1.6.0
 	github.com/redis/go-redis/extra/redisotel/v9 v9.22.0
