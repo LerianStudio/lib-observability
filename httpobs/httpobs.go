@@ -6,8 +6,10 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/LerianStudio/lib-observability/v4/constants"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
@@ -19,6 +21,8 @@ type config struct {
 	tracerProvider    trace.TracerProvider
 	propagator        propagation.TextMapPropagator
 	spanNameFormatter func(operation string, r *http.Request) string
+
+	withoutCallerAttributes bool
 }
 
 // Option configures the HTTP client instrumentation helper.
@@ -67,6 +71,28 @@ func WithSpanNameFormatter(fn func(operation string, r *http.Request) string) Op
 	}
 }
 
+// WithoutCallerAttributes keeps the CALLER off the SERVER span: no
+// user_agent.original, no client.address, no network.peer.address /
+// network.peer.port. OFF by default.
+//
+// Turn it on for a PUBLIC listener. Those four attributes are sourced from the
+// User-Agent header, the X-Forwarded-For header and the peer address, i.e. from
+// values an unauthenticated caller chooses, onto a span that also carries this
+// service's authenticated user and tenant ids. Off a public listener that makes
+// the trace both an amplification surface (a header of arbitrary length and
+// cardinality, exported verbatim) and a correlation of an attacker-supplied
+// string with an identified user.
+//
+// The HANDLER below is unaffected: it receives the User-Agent, the
+// X-Forwarded-For and the RemoteAddr that actually arrived, so access logs,
+// rate limiters and IP allowlists see the real caller. Only the instrumentation
+// is blinded. server.address (this service's own host) is kept either way.
+func WithoutCallerAttributes() Option {
+	return func(c *config) {
+		c.withoutCallerAttributes = true
+	}
+}
+
 func newConfig(opts ...Option) config {
 	cfg := config{
 		meterProvider: otel.GetMeterProvider(),
@@ -111,12 +137,19 @@ func serverSpanName(_ string, r *http.Request) string {
 		return r.Method
 	}
 
-	route := r.Pattern
-	if i := strings.IndexAny(route, " \t"); i >= 0 {
-		route = strings.TrimLeft(route[i+1:], " \t")
+	return r.Method + " " + routePath(r.Pattern)
+}
+
+// routePath cuts a ServeMux pattern's optional "METHOD " prefix, leaving the
+// "[HOST]/[PATH]" part — the route template. ServeMux allows one or more spaces
+// or tabs between the method and the rest (net/http's pattern parser cuts on
+// " \t" and trims the run), so the same separators are cut here.
+func routePath(pattern string) string {
+	if i := strings.IndexAny(pattern, " \t"); i >= 0 {
+		return strings.TrimLeft(pattern[i+1:], " \t")
 	}
 
-	return r.Method + " " + route
+	return pattern
 }
 
 // otelhttpOptions translates the resolved config into otelhttp options, using
@@ -252,6 +285,146 @@ func NewClient(base http.RoundTripper, opts ...Option) *http.Client {
 	return &http.Client{Transport: NewTransport(base, opts...)}
 }
 
+// Header names scrubbed and restored by WithoutCallerAttributes. Both are
+// already in canonical MIME form, so the header map can be indexed directly —
+// which preserves a repeated X-Forwarded-For that Header.Set would flatten.
+const (
+	userAgentHeader    = "User-Agent"
+	forwardedForHeader = "X-Forwarded-For"
+)
+
+// callerAttrsKey addresses the caller identity that scrubCallerAttributes
+// stashes on the context and restoreCallerAttributes reads back. Private type,
+// so nothing outside this package can collide with it or read it.
+type callerAttrsKey struct{}
+
+// callerAttrs is what actually arrived, held aside while the instrumentation
+// looks at the request.
+type callerAttrs struct {
+	userAgent    []string
+	forwardedFor []string
+	remoteAddr   string
+}
+
+// scrubCallerAttributes is the OUTER half of WithoutCallerAttributes: the
+// instrumentation below it sees a request with no User-Agent, no
+// X-Forwarded-For and an empty RemoteAddr, so otelhttp's SERVER semconv records
+// none of user_agent.original, client.address, network.peer.address or
+// network.peer.port (internal/semconv/server.go sources all four from exactly
+// those three fields, and omits each attribute when its source is empty).
+//
+// otelhttp reads them when it STARTS the span, before the handler runs, so they
+// cannot be filtered after the fact — the request handed to the instrumentation
+// must already be blind. Clone deep-copies the header map, so the server's own
+// request is untouched; the real values travel on the context and
+// restoreCallerAttributes puts them back one layer lower.
+func scrubCallerAttributes(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		saved := callerAttrs{
+			userAgent:    r.Header[userAgentHeader],
+			forwardedFor: r.Header[forwardedForHeader],
+			remoteAddr:   r.RemoteAddr,
+		}
+
+		clone := r.Clone(context.WithValue(r.Context(), callerAttrsKey{}, saved))
+		clone.Header.Del(userAgentHeader)
+		clone.Header.Del(forwardedForHeader)
+		clone.RemoteAddr = ""
+
+		next.ServeHTTP(w, clone)
+	})
+}
+
+// restoreCallerAttributes is the INNER half: it sits between the
+// instrumentation and the application's handler and gives the request its
+// caller identity back, so access logs, rate limiters and IP allowlists below
+// still see what actually arrived.
+//
+// otelhttp hands down r.WithContext(ctx) — a shallow copy sharing the clone's
+// header map — so writing here is what the next handler reads. The request
+// itself is deliberately NOT swapped back for the original: otelhttp wrapped
+// its Body to count http.server.request.body.size, and replacing the request
+// would throw that wrapper away.
+func restoreCallerAttributes(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if saved, ok := r.Context().Value(callerAttrsKey{}).(callerAttrs); ok {
+			if saved.userAgent != nil {
+				r.Header[userAgentHeader] = saved.userAgent
+			}
+
+			if saved.forwardedFor != nil {
+				r.Header[forwardedForHeader] = saved.forwardedFor
+			}
+
+			r.RemoteAddr = saved.remoteAddr
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+// routeTemplateAttribute is the inbound counterpart of the outbound URL
+// guarantee: it replaces the CONCRETE url.path otelhttp recorded at span start
+// with the route TEMPLATE, so "/users/42" is exported as "/users/{id}" and an
+// id or PII in the path never leaves the process. Traffic that matched no route
+// reports one stable constants.UnmatchedRouteTemplate instead of one series per
+// probed path.
+//
+// It must run BELOW the instrumentation and AFTER the handler: r.Pattern is set
+// by http.ServeMux in place, on the very request pointer otelhttp still holds
+// (net/http server.go: "h, r.Pattern, r.pat, r.matches = mux.findHandler(r)"),
+// so it is only readable once the mux has routed. SetAttributes on a key the
+// span already carries replaces the value — the SDK appends and deduplicates on
+// read, keeping the LAST write (sdk/trace/span.go dedupeAttrsFromRecord:
+// "unique[idx] = a"), and the export path deduplicates in snapshot() — so the
+// concrete path is overwritten, never exported alongside.
+//
+// http.route rides along for the same reason and from the same pattern. otelhttp
+// derives it too, but only for the METRIC: it builds the span's attributes
+// before the handler runs (internal/semconv/server.go RequestTraceAttrs), when
+// r.Pattern is still empty, and afterwards re-reads the pattern only to rename
+// the span. So without this the SERVER span carries no http.route at all. It is
+// omitted — never "/{unmatched}" — when nothing matched, as OpenTelemetry
+// requires and as the Fiber middleware already does.
+func routeTemplateAttribute(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Deferred, not sequenced after ServeHTTP: otelhttp ends the span in its
+		// own defer, so a handler that panics would otherwise export the concrete
+		// path recorded at span start. This defer sits deeper in the stack and
+		// runs first during unwinding.
+		defer func() {
+			span := trace.SpanFromContext(r.Context())
+
+			if r.Pattern == "" {
+				span.SetAttributes(attribute.String("url.path", constants.UnmatchedRouteTemplate))
+
+				return
+			}
+
+			route := routeTemplatePath(r.Pattern)
+			span.SetAttributes(
+				attribute.String("url.path", route),
+				attribute.String("http.route", route),
+			)
+		}()
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+// routeTemplatePath is routePath without the optional HOST a ServeMux pattern
+// may carry ("GET example.com/x" -> "/x"). The span NAME keeps the host, since
+// it disambiguates two routes registered on different hosts; url.path and
+// http.route are path templates by definition and must start at the slash.
+func routeTemplatePath(pattern string) string {
+	route := routePath(pattern)
+	if i := strings.IndexByte(route, '/'); i > 0 {
+		return route[i:]
+	}
+
+	return route
+}
+
 // NewHandler wraps next with OpenTelemetry HTTP SERVER instrumentation: every
 // inbound request produces a SpanKind=SERVER span and emits
 // http.server.request.duration (seconds). It is the inbound counterpart of
@@ -288,6 +461,26 @@ func NewClient(base http.RoundTripper, opts ...Option) *http.Client {
 // never a full URL, so an OAuth callback's ?code=/?state= stays out of the
 // trace. The handler below still receives the request whole, query and all.
 //
+// # url.path is the route template (always, no opt-out)
+//
+// url.path on the SERVER span is the route TEMPLATE, never the concrete path:
+// a request to /users/42 is exported as url.path="/users/{id}", and traffic
+// that matched no route as url.path="/{unmatched}". So a customer id, a CPF or
+// an account number sitting in the path never leaves the process, and the
+// attribute stays low-cardinality. This mirrors what middleware.WithTelemetry
+// does on the Fiber path. http.route is set from the same pattern (otelhttp
+// puts it only on the metric, never on the span) and is OMITTED — never the
+// fallback template — when nothing matched, as OpenTelemetry requires.
+//
+// # Caller identity (opt-in removal)
+//
+// By DEFAULT the span carries user_agent.original, client.address and
+// network.peer.address/port — the caller's own User-Agent, X-Forwarded-For and
+// peer address. WithoutCallerAttributes removes all four, for a PUBLIC
+// listener whose spans also carry authenticated user ids; the handler below
+// still sees the real values. server.address (this service's own host) is kept
+// either way.
+//
 // Degrades like NewTransport when telemetry is absent: with no TracerProvider
 // configured (neither option nor global) no span is produced, the metric
 // degrades to no-op, and the request is still served. That is the whole of the
@@ -301,5 +494,18 @@ func NewHandler(next http.Handler, opts ...Option) http.Handler {
 
 	cfg := newConfig(resolved...)
 
-	return otelhttp.NewHandler(next, "", cfg.otelhttpOptions(serverSpanName)...)
+	// Both wrappers must sit BELOW the instrumentation: url.path can only be
+	// rewritten once the mux has set r.Pattern, and the caller identity can only
+	// be given back after otelhttp has read the request.
+	inner := routeTemplateAttribute(next)
+	if cfg.withoutCallerAttributes {
+		inner = restoreCallerAttributes(inner)
+	}
+
+	instrumented := otelhttp.NewHandler(inner, "", cfg.otelhttpOptions(serverSpanName)...)
+	if cfg.withoutCallerAttributes {
+		return scrubCallerAttributes(instrumented)
+	}
+
+	return instrumented
 }
