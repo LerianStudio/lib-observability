@@ -340,6 +340,52 @@ func spanAttrSet(span sdktrace.ReadOnlySpan) attribute.Set {
 // an id, a CPF or an account number sitting in the path must not leave the
 // process. otelhttp records the concrete path at span start; the wrapper
 // overwrites it once the mux has resolved the route.
+// otelhttp ends the span in its own defer, so a handler that panics would
+// export the concrete path recorded at span start unless the rewrite is
+// deferred too.
+func TestNewHandler_PanickingHandlerStillRecordsTheRouteTemplate(t *testing.T) {
+	_, _, tp, sr := newHarness(t)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /users/{id}", func(http.ResponseWriter, *http.Request) { panic("boom") })
+
+	h := NewHandler(mux, WithTracerProvider(tp))
+	req := httptest.NewRequest(http.MethodGet, "/users/42", nil)
+
+	assert.PanicsWithValue(t, "boom", func() { h.ServeHTTP(httptest.NewRecorder(), req) })
+
+	spans := serverSpans(t, sr)
+	require.Len(t, spans, 1)
+
+	path, ok := spanAttrSet(spans[0]).Value("url.path")
+	require.True(t, ok)
+	assert.Equal(t, "/users/{id}", path.AsString(), "the panic must not leak the concrete path")
+}
+
+// A host-qualified pattern names the span with its host, but url.path and
+// http.route are path templates and start at the slash.
+func TestNewHandler_HostQualifiedPatternRecordsOnlyThePathTemplate(t *testing.T) {
+	_, _, tp, sr := newHarness(t)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET example.com/x/{id}", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+
+	h := NewHandler(mux, WithTracerProvider(tp))
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/x/7", nil)
+	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	spans := serverSpans(t, sr)
+	require.Len(t, spans, 1)
+	assert.Equal(t, "GET example.com/x/{id}", spans[0].Name())
+
+	attrs := spanAttrSet(spans[0])
+	for _, key := range []string{"url.path", "http.route"} {
+		v, ok := attrs.Value(attribute.Key(key))
+		require.True(t, ok, key)
+		assert.Equal(t, "/x/{id}", v.AsString(), key)
+	}
+}
+
 func TestNewHandler_ServerSpanRecordsTheRouteTemplateNotTheConcretePath(t *testing.T) {
 	_, _, tp, sr := newHarness(t)
 

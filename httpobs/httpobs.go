@@ -388,22 +388,41 @@ func restoreCallerAttributes(next http.Handler) http.Handler {
 // requires and as the Fiber middleware already does.
 func routeTemplateAttribute(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Deferred, not sequenced after ServeHTTP: otelhttp ends the span in its
+		// own defer, so a handler that panics would otherwise export the concrete
+		// path recorded at span start. This defer sits deeper in the stack and
+		// runs first during unwinding.
+		defer func() {
+			span := trace.SpanFromContext(r.Context())
+
+			if r.Pattern == "" {
+				span.SetAttributes(attribute.String("url.path", constants.UnmatchedRouteTemplate))
+
+				return
+			}
+
+			route := routeTemplatePath(r.Pattern)
+			span.SetAttributes(
+				attribute.String("url.path", route),
+				attribute.String("http.route", route),
+			)
+		}()
+
 		next.ServeHTTP(w, r)
-
-		span := trace.SpanFromContext(r.Context())
-
-		if r.Pattern == "" {
-			span.SetAttributes(attribute.String("url.path", constants.UnmatchedRouteTemplate))
-
-			return
-		}
-
-		route := routePath(r.Pattern)
-		span.SetAttributes(
-			attribute.String("url.path", route),
-			attribute.String("http.route", route),
-		)
 	})
+}
+
+// routeTemplatePath is routePath without the optional HOST a ServeMux pattern
+// may carry ("GET example.com/x" -> "/x"). The span NAME keeps the host, since
+// it disambiguates two routes registered on different hosts; url.path and
+// http.route are path templates by definition and must start at the slash.
+func routeTemplatePath(pattern string) string {
+	route := routePath(pattern)
+	if i := strings.IndexByte(route, '/'); i > 0 {
+		return route[i:]
+	}
+
+	return route
 }
 
 // NewHandler wraps next with OpenTelemetry HTTP SERVER instrumentation: every

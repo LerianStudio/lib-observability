@@ -17,8 +17,9 @@ const (
 	AttrPrefixPanic = "panic."
 )
 
-// UnmatchedRouteTemplate is the stable http.route / url.path value reported for
-// traffic that matched no registered route. One spelling for every inbound
+// UnmatchedRouteTemplate is the stable url.path value reported for traffic that
+// matched no registered route (http.route is omitted then, as the semantic
+// conventions require). One spelling for every inbound
 // helper (Fiber middleware and httpobs.NewHandler), so a dashboard grouping on
 // the route template sees scanner traffic collapse into a single series instead
 // of one series per probed path.
