@@ -3,6 +3,7 @@ package tracing
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -38,6 +39,7 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.34.0"
 	"go.opentelemetry.io/otel/trace"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
 )
 
@@ -225,7 +227,7 @@ func newTelemetry(cfg TelemetryConfig, options telemetryOptions) (*Telemetry, er
 	}
 
 	normalizeEndpoint(&cfg)
-	normalizeEndpointEnvVars(cfg.Logger)
+	normalizeEndpointEnvVars(cfg.Logger, cfg.InsecureExporter)
 
 	if cfg.EnableTelemetry && strings.TrimSpace(cfg.CollectorExporterEndpoint) == "" {
 		return handleEmptyEndpoint(cfg)
@@ -295,9 +297,20 @@ func normalizeEndpoint(cfg *TelemetryConfig) {
 
 // normalizeEndpointEnvVars ensures OTEL exporter endpoint environment variables
 // contain a URL scheme. The OTEL SDK's envconfig reads these via url.Parse(),
-// which fails on bare "host:port" values. Adding "http://" prevents noisy
-// "parse url" errors from the SDK's internal logger.
-func normalizeEndpointEnvVars(logger log.Universal) {
+// which fails on bare "host:port" values, so adding a scheme prevents noisy
+// "parse url" errors from the SDK's internal logger. The scheme follows
+// InsecureExporter — "https://" for a secure exporter, "http://" for an
+// insecure one — so the environment the SDK reads agrees with the connection
+// the library makes.
+//
+// It mutates the calling process's environment via os.Setenv: anything that
+// re-reads these variables later sees the normalized value.
+func normalizeEndpointEnvVars(logger log.Universal, insecure bool) {
+	scheme := "https://"
+	if insecure {
+		scheme = "http://"
+	}
+
 	for _, key := range []string{
 		"OTEL_EXPORTER_OTLP_ENDPOINT",
 		"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
@@ -310,7 +323,7 @@ func normalizeEndpointEnvVars(logger log.Universal) {
 
 		// Failure here means the SDK will later choke on the bare host:port value,
 		// so surface it rather than swallowing it silently.
-		if err := os.Setenv(key, "http://"+v); err != nil && logger != nil {
+		if err := os.Setenv(key, scheme+v); err != nil && logger != nil {
 			logger.Log(context.Background(), log.LevelWarn,
 				"failed to normalize OTEL endpoint env var",
 				log.String("key", key), log.Err(err))
@@ -616,10 +629,23 @@ func (tl *TelemetryConfig) newResource() *sdkresource.Resource {
 	)
 }
 
+// exporterTLSCredentials builds the transport credentials used by every OTLP
+// exporter when InsecureExporter is false. Passing them explicitly is what makes
+// the caller's choice win: otlpconfig applies the OTEL_EXPORTER_OTLP_* env vars
+// first and the constructor options after, so without an explicit option a
+// scheme-less (or http://) endpoint in the environment would downgrade the
+// connection to plaintext. A nil *tls.Config would use the SDK default; the
+// floor here is TLS 1.2.
+func exporterTLSCredentials() credentials.TransportCredentials {
+	return credentials.NewTLS(&tls.Config{MinVersion: tls.VersionTLS12})
+}
+
 func (tl *TelemetryConfig) newLoggerExporter(ctx context.Context) (*otlploggrpc.Exporter, error) {
 	opts := []otlploggrpc.Option{otlploggrpc.WithEndpoint(tl.CollectorExporterEndpoint)}
 	if tl.InsecureExporter {
 		opts = append(opts, otlploggrpc.WithInsecure())
+	} else {
+		opts = append(opts, otlploggrpc.WithTLSCredentials(exporterTLSCredentials()))
 	}
 
 	return otlploggrpc.New(ctx, opts...)
@@ -629,6 +655,8 @@ func (tl *TelemetryConfig) newMetricExporter(ctx context.Context) (*otlpmetricgr
 	opts := []otlpmetricgrpc.Option{otlpmetricgrpc.WithEndpoint(tl.CollectorExporterEndpoint)}
 	if tl.InsecureExporter {
 		opts = append(opts, otlpmetricgrpc.WithInsecure())
+	} else {
+		opts = append(opts, otlpmetricgrpc.WithTLSCredentials(exporterTLSCredentials()))
 	}
 
 	return otlpmetricgrpc.New(ctx, opts...)
@@ -638,6 +666,8 @@ func (tl *TelemetryConfig) newTracerExporter(ctx context.Context) (*otlptrace.Ex
 	opts := []otlptracegrpc.Option{otlptracegrpc.WithEndpoint(tl.CollectorExporterEndpoint)}
 	if tl.InsecureExporter {
 		opts = append(opts, otlptracegrpc.WithInsecure())
+	} else {
+		opts = append(opts, otlptracegrpc.WithTLSCredentials(exporterTLSCredentials()))
 	}
 
 	return otlptracegrpc.New(ctx, opts...)
