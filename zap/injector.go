@@ -3,8 +3,10 @@ package zap
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
+	"time"
 
 	"go.opentelemetry.io/contrib/bridges/otelzap"
 	"go.uber.org/zap"
@@ -37,6 +39,10 @@ type Config struct {
 	Environment     Environment
 	Level           string
 	OTelLibraryName string
+	// Output receives every encoded log entry when set. Nil keeps today's
+	// behaviour: zap's own stderr sink. The caller owns the writer's lifecycle
+	// (rotation, redaction, closing); the logger only writes and Syncs it.
+	Output io.Writer
 }
 
 func (c Config) validate() error {
@@ -74,6 +80,10 @@ func New(cfg Config) (*Logger, error) {
 	coreOptions := []zap.Option{
 		zap.AddCallerSkip(callerSkipFrames),
 		zap.WrapCore(func(core zapcore.Core) zapcore.Core {
+			if cfg.Output != nil {
+				core = outputCore(baseConfig, level, cfg.Output)
+			}
+
 			return zapcore.NewTee(core, otelzap.NewCore(cfg.OTelLibraryName))
 		}),
 	}
@@ -88,6 +98,25 @@ func New(cfg Config) (*Logger, error) {
 		atomicLevel:     level,
 		consoleEncoding: baseConfig.Encoding == encodingConsole,
 	}, nil
+}
+
+// outputCore mirrors the core zap.Config.Build would have produced for stderr -
+// same encoder, same level, same sampling - but writes to w instead.
+func outputCore(baseConfig zap.Config, level zap.AtomicLevel, w io.Writer) zapcore.Core {
+	var encoder zapcore.Encoder
+	if baseConfig.Encoding == encodingConsole {
+		encoder = zapcore.NewConsoleEncoder(baseConfig.EncoderConfig)
+	} else {
+		encoder = zapcore.NewJSONEncoder(baseConfig.EncoderConfig)
+	}
+
+	core := zapcore.NewCore(encoder, zapcore.Lock(zapcore.AddSync(w)), level)
+
+	if s := baseConfig.Sampling; s != nil {
+		core = zapcore.NewSamplerWithOptions(core, time.Second, s.Initial, s.Thereafter)
+	}
+
+	return core
 }
 
 func resolveLevel(cfg Config) (zap.AtomicLevel, error) {
