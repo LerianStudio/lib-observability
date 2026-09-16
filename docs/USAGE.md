@@ -17,7 +17,7 @@ A lib emite **métricas OTLP** que vão: `app → OTel SDK (lib) → collector �
 
 **PEGADINHA CRÍTICA (nº1 de bugs):** nada é emitido se a telemetria não estiver ligada corretamente. A regra de ouro:
 - `NewTelemetry(cfg)` com `EnableTelemetry: true` + `CollectorExporterEndpoint` preenchido.
-- `NewTelemetry` chama `ApplyGlobals()` internamente → registra o MeterProvider como GLOBAL. **Os helpers `sqlobs`/`redisobs` usam o provider global por padrão** (`otel.GetMeterProvider()`). Se a telemetria não for criada via `NewTelemetry` (ou `ApplyGlobals` não rodar), esses helpers rodam **sem erro e sem emitir nada** (provider no-op). Se em dúvida, passe o provider explícito com `WithMeterProvider(tel.MeterProvider)`.
+- `tel.ApplyGlobals()` logo depois de `NewTelemetry` → registra os providers como GLOBAIS. **`NewTelemetry` NÃO faz isso no caminho de sucesso**; só o fallback sem endpoint instala os no-op sozinho. **Os helpers `sqlobs`/`redisobs`/`httpobs` usam o provider global por padrão** (`otel.GetMeterProvider()`): sem `ApplyGlobals`, rodam **sem erro e sem emitir nada** (provider no-op). Se em dúvida, passe o provider explícito com `WithMeterProvider(tel.MeterProvider)`.
 
 ---
 
@@ -84,12 +84,17 @@ if err != nil {
     // NÃO siga para o defer (deferir shutdown de um tel nil causa panic).
     log.Fatalf("telemetry init: %v", err)
 }
+// Registra tracer/meter/logger providers e propagador como globais do processo.
+// Sem isto, sqlobs/redisobs/httpobs (e qualquer otel.Tracer(...)) ficam no no-op.
+if err := tel.ApplyGlobals(); err != nil {
+    log.Fatalf("telemetry globals: %v", err)
+}
 ctx := context.Background() // ctx de shutdown
 defer tel.ShutdownTelemetryWithContext(ctx) // flush/close no shutdown (ou tel.ShutdownTelemetry() sem ctx)
 ```
 
 - Endpoint, service name, env etc. vêm SEMPRE de env (Helm). O `.env.example` do serviço documenta os valores por ambiente. O código só lê `os.Getenv(...)`.
-- `NewTelemetry` já registra os providers globais (ApplyGlobals). Não precisa chamar de novo.
+- `NewTelemetry` **não** registra os providers globais no caminho de sucesso: `tel.ApplyGlobals()` é obrigatório logo depois (o exemplo acima chama). Só o fallback sem endpoint (`ErrEmptyEndpoint`) aplica os providers no-op sozinho.
 - **Segurança do exporter:** em ambiente `production`/`prd`, `InsecureExporter: true` faz o `NewTelemetry` **retornar erro** (o serviço não sobe) a menos que a env `ALLOW_INSECURE_OTEL="<justificativa>"` esteja definida. Em produção o `OTEL_EXPORTER_OTLP_ENDPOINT` deve ser `https://...` e `InsecureExporter` false. Insecure só em `development`/`local` (cluster interno sem TLS). Como isso vem de env, é o Helm de cada ambiente que decide — o código não fixa nada.
 - `EnableTelemetry: false` (env `ENABLE_TELEMETRY=false`) → telemetria no-op segura (nada quebra, nada emite). Padrão em dev/teste.
 - `EnableRuntimeMetrics: true` → emite `go.*` automaticamente (sem mais código).
