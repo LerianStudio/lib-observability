@@ -10,7 +10,7 @@ Full OpenTelemetry SDK lifecycle management: OTLP/gRPC exporter setup for traces
 
 ### Metrics (`metrics`)
 
-Thread-safe `MetricsFactory` with lazy instrument caching and a fluent builder API for Counters, Gauges, and Histograms. Provides `.WithLabels()` / `.WithAttributes()` chaining followed by `.Add()`, `.Set()`, or `.Record()` — all with explicit error returns. Includes pre-configured domain metric recorders (accounts, transactions, routes, operations) and system infrastructure gauges (CPU, memory). Ships a `NewNopFactory()` for tests and disabled-metrics environments.
+Thread-safe `MetricsFactory` with lazy instrument caching and a fluent builder API for Counters, Gauges, and Histograms, each in an int64 (`Counter`, `Gauge`, `Histogram`) and a float64 (`Float64Counter`, `Float64Gauge`, `Float64Histogram`) form — use float64 for fractional values such as cost and for durations in seconds, which is the unit the default histogram buckets assume. Provides `.WithLabels()` / `.WithAttributes()` chaining followed by `.Add()`, `.Set()`, or `.Record()` — all with explicit error returns. Includes pre-configured domain metric recorders (accounts, transactions, routes, operations) and system infrastructure gauges (CPU, memory). Ships a `NewNopFactory()` for tests and disabled-metrics environments.
 
 ### Outbound HTTP client instrumentation (`httpobs`)
 
