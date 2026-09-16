@@ -573,6 +573,38 @@ func (tl *Telemetry) ShutdownTelemetryWithContext(ctx context.Context) error {
 	return ErrNilShutdown
 }
 
+// ForceFlush flushes whatever the configured providers still hold in memory
+// WITHOUT shutting them down, so a short-lived job, a CLI run, or a burst worth
+// investigating becomes visible in the collector immediately instead of waiting
+// for the next batch interval. Shutdown remains the only thing that closes the
+// providers; this may be called any number of times while the process runs.
+//
+// It flushes the TracerProvider, the MeterProvider, and the LoggerProvider when
+// each is present, and joins their errors so one failing signal does not hide
+// the others. Nil-safe: a nil receiver returns nil, and so does the noop
+// telemetry built when telemetry is disabled or the collector endpoint is empty.
+func (tl *Telemetry) ForceFlush(ctx context.Context) error {
+	if tl == nil {
+		return nil
+	}
+
+	var errs []error
+
+	if tl.TracerProvider != nil {
+		errs = append(errs, tl.TracerProvider.ForceFlush(ctx))
+	}
+
+	if tl.MeterProvider != nil {
+		errs = append(errs, tl.MeterProvider.ForceFlush(ctx))
+	}
+
+	if tl.LoggerProvider != nil {
+		errs = append(errs, tl.LoggerProvider.ForceFlush(ctx))
+	}
+
+	return errors.Join(errs...)
+}
+
 func (tl *TelemetryConfig) newResource() *sdkresource.Resource {
 	return sdkresource.NewWithAttributes(
 		semconv.SchemaURL,
