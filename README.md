@@ -6,7 +6,7 @@
 
 ### Telemetry bootstrap and tracing (`tracing`)
 
-Full OpenTelemetry SDK lifecycle management: OTLP/gRPC exporter setup for traces, metrics, and logs; `TracerProvider`, `MeterProvider`, and `LoggerProvider` construction via a single `NewTelemetry(cfg)` call; global provider opt-in with `ApplyGlobals()`; head sampling with `SampleRatio` (0 keeps the SDK default of recording every trace; a value in `(0, 1]` installs `ParentBased(TraceIDRatioBased(ratio))`, and anything else fails `NewTelemetry` with `ErrInvalidSampleRatio`); `ForceFlush(ctx)` to push buffered traces, metrics, and logs without shutting the providers down; and graceful shutdown with `ShutdownTelemetry()`. Includes trace context propagation for HTTP, gRPC, and message queues (Kafka/Redpanda/RabbitMQ), span error/event recording helpers, struct-to-attribute conversion with automatic sensitive field redaction, and custom `SpanProcessor` implementations for context-carried attribute injection.
+Full OpenTelemetry SDK lifecycle management: OTLP/gRPC exporter setup for traces, metrics, and logs; `TracerProvider`, `MeterProvider`, and `LoggerProvider` construction via a single `NewTelemetry(cfg)` call; global provider opt-in with `ApplyGlobals()`; head sampling with `SampleRatio` (0 keeps the SDK default of recording every trace; a value in `(0, 1]` installs `ParentBased(TraceIDRatioBased(ratio))`, and anything else fails `NewTelemetry` with `ErrInvalidSampleRatio`); `ForceFlush(ctx)` to push buffered traces, metrics, and logs without shutting the providers down; and graceful shutdown with `ShutdownTelemetry()`. The exporters pass transport security explicitly — TLS credentials (TLS 1.2 floor) when `InsecureExporter` is false, plaintext when it is true — so an `OTEL_EXPORTER_OTLP_*` endpoint without a scheme no longer downgrades the connection; those environment variables are normalized in place with the matching scheme. Includes trace context propagation for HTTP, gRPC, and message queues (Kafka/Redpanda/RabbitMQ), span error/event recording helpers, struct-to-attribute conversion with automatic sensitive field redaction, and custom `SpanProcessor` implementations for context-carried attribute injection.
 
 ### Metrics (`metrics`)
 
@@ -115,7 +115,9 @@ defer span.End()
 // ... perform the document-database call ...
 ```
 
-> **PII in outbound URLs:** `httpobs` keeps the duration metric labels and the span name bounded and PII-free. However `otelhttp` always records `url.full` (the raw request URL, including path and query) as a standard attribute on the client span, and OpenTelemetry-Go offers no supported hook to strip it. If your outbound URLs can carry identifiers/PII in the path or query, redact `url.full` in the OTel Collector (transform processor) — that is where span-attribute PII/cardinality redaction belongs.
+> **Credentials in outbound URLs (guaranteed, no opt-out):** the URL recorded on a span never carries the query string, the fragment, userinfo or an opaque request target — `url.full` keeps `scheme://host/path` of a hierarchical URL and only `scheme://host` of an opaque one. An API key in the query (Gemini's `?key=`, a pre-signed S3/GCS signature, any `?token=`) is therefore never exported to the collector. **The request on the wire is unchanged**: the full URL is restored below the instrumentation, so the call, its propagation headers and its byte accounting are unaffected. Inbound (`NewHandler`) needs nothing — the `SERVER` span records `url.path` and never the query, so an OAuth callback's `?code=` is already safe.
+>
+> The **path** is kept, since it is what makes a span readable. If your outbound paths carry identifiers/PII, redact `url.full` in the OTel Collector (transform processor) — that is where path-shaped PII/cardinality redaction belongs.
 
 ## HTTP server telemetry safety
 

@@ -96,7 +96,7 @@ defer tel.ShutdownTelemetryWithContext(ctx) // flush/close no shutdown (ou tel.S
 
 - Endpoint, service name, env etc. vêm SEMPRE de env (Helm). O `.env.example` do serviço documenta os valores por ambiente. O código só lê `os.Getenv(...)`.
 - `NewTelemetry` **não** registra os providers globais no caminho de sucesso: `tel.ApplyGlobals()` é obrigatório logo depois (o exemplo acima chama). Só o fallback sem endpoint (`ErrEmptyEndpoint`) aplica os providers no-op sozinho.
-- **Segurança do exporter:** em ambiente `production`/`prd`, `InsecureExporter: true` faz o `NewTelemetry` **retornar erro** (o serviço não sobe) a menos que a env `ALLOW_INSECURE_OTEL="<justificativa>"` esteja definida. Em produção o `OTEL_EXPORTER_OTLP_ENDPOINT` deve ser `https://...` e `InsecureExporter` false. Insecure só em `development`/`local` (cluster interno sem TLS). Como isso vem de env, é o Helm de cada ambiente que decide — o código não fixa nada.
+- **Segurança do exporter:** em ambiente `production`/`prd`, `InsecureExporter: true` faz o `NewTelemetry` **retornar erro** (o serviço não sobe) a menos que a env `ALLOW_INSECURE_OTEL="<justificativa>"` esteja definida. Em produção o `OTEL_EXPORTER_OTLP_ENDPOINT` deve ser `https://...` e `InsecureExporter` false. Insecure só em `development`/`local` (cluster interno sem TLS). Como isso vem de env, é o Helm de cada ambiente que decide — o código não fixa nada. Com `InsecureExporter: false` os exporters passam credenciais TLS explicitamente (piso TLS 1.2), então um `OTEL_EXPORTER_OTLP_ENDPOINT` sem esquema não derruba mais a conexão para texto puro — a própria env é normalizada no processo com o esquema correspondente (`https://` quando seguro, `http://` quando insecure).
 - `EnableTelemetry: false` (env `ENABLE_TELEMETRY=false`) → telemetria no-op segura (nada quebra, nada emite). Padrão em dev/teste.
 - `EnableRuntimeMetrics: true` → emite `go.*` automaticamente (sem mais código).
 - `SampleRatio` → amostragem de cabeça (head sampling). `0` = **unset**, mantém o default do SDK (`ParentBased(AlwaysSample)`: todo trace é gravado) — o comportamento de sempre. Um valor em `(0, 1]` instala `ParentBased(TraceIDRatioBased(ratio))`: `0.05` grava ~5% dos traces RAIZ, e um request que chega com pai já amostrado continua sendo gravado (trace nunca corta no meio). Qualquer outro valor (negativo, > 1, NaN) faz `NewTelemetry` retornar `ErrInvalidSampleRatio` **antes** de construir qualquer provider — o serviço não sobe com config errada. Vem de env (Helm), como o resto.
@@ -323,6 +323,7 @@ client := &http.Client{
 client := httpobs.NewClient(baseTransport)
 ```
 - Labels: `http.request.method`, `http.response.status_code`, `server.address`, `error.type`. Nome do span bounded ("HTTP GET") — nunca URL/path.
+- **Credencial na URL nunca vai para o span (garantia, sem opt-out):** a URL gravada no span (`url.full`) nunca carrega query string, fragment, userinfo nem target opaco — todos são removidos antes da instrumentação ver o request; de uma URL hierárquica sobra `scheme://host/path`, de uma opaca só `scheme://host`. Uma API key na query (`?key=` do Gemini, assinatura de URL pré-assinada de S3/GCS, qualquer `?token=`) não chega ao collector. **O request no fio NÃO muda**: a URL completa é restaurada abaixo da instrumentação, então a chamada, os headers de propagação e a contagem de bytes seguem intactos. O **path** é mantido (é o que torna o span legível) — se o path carrega id/PII, redija `url.full` no OTel Collector (transform processor).
 - O caller DEVE ler e fechar o response body (o span fecha no close/EOF do body).
 - Opções: `WithMeterProvider`, `WithTracerProvider`, `WithPropagators`, `WithSpanNameFormatter`.
 
@@ -341,7 +342,7 @@ srv := &http.Server{
 }
 ```
 - Nome do span: método + **template da rota** (`r.Pattern`, que o `ServeMux` do Go 1.22+ preenche) — `GET /v1/accounts/{id}`; sem rota casada, só o método. O path concreto NUNCA entra no nome. Registrar com método (`mux.Handle("GET /v1/accounts/{id}", h)`) dá o MESMO nome que registrar sem: o prefixo de método do próprio pattern é descartado, nunca repetido. `WithSpanNameFormatter` sobrescreve e DEVE continuar low-cardinality.
-- Body de request/response e header `Authorization` nunca são gravados.
+- Body de request/response e header `Authorization` nunca são gravados. A **query string** também não: o span SERVER grava `url.path` e nunca a URL inteira, então o `?code=`/`?state=` de um callback OAuth fica fora do trace. O handler abaixo continua recebendo o request inteiro, query incluída.
 - **Trace context de entrada é IGNORADO por padrão** (fail-closed, mesma postura do `TrustInboundTraceContext`): todo request começa um trace RAIZ novo, porque quem consegue setar `traceparent` escolheria o trace id deste serviço e forçaria a decisão de amostragem. Para continuar o trace de um chamador CONFIÁVEL, passe o propagador explicitamente: `httpobs.WithPropagators(otel.GetTextMapPropagator())`.
 
 ## 6.6 Saída sem wrapper (último recurso) — `tracing.StartClientSpan`

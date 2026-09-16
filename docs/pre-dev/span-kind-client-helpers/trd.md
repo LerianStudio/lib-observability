@@ -149,7 +149,7 @@ Dev/IA vai instrumentar uma saída
 - **Rationale:** a causa-raiz do problema (PRD §1) é falta de padrão claro; a ferramenta sozinha não corrige o comportamento. A regra torna o caminho certo óbvio e o errado explicitamente desaconselhado.
 - **Consequences:** a documentação vira parte do entregável com critério de aceite próprio (CA4/CA5); qualquer PR que adicione um wrapper novo deve estender a convenção.
 
-**ADR-008: Redação de `url.full` no collector, não na lib (descoberto na implementação 2026-07-27)**
+**ADR-008: Redação de `url.full` no collector, não na lib (descoberto na implementação 2026-07-27)** — **SUPERSEDIDO em parte (2026-09-16):** a premissa "não há via limpa de remover o atributo" só vale para remover DEPOIS; `httpobs` passou a entregar à instrumentação um request já sem query/fragment/userinfo e a restaurar a URL completa abaixo dela, então `url.full` nunca carrega credencial. O collector segue responsável pelo que sobra: id/PII no **path**.
 - **Context:** a instrumentação HTTP-cliente de mercado (otelhttp v0.69.0) **sempre** grava `url.full` (URL crua, com path e query) como atributo do span CLIENT. Se a URL de saída carrega PII (CPF/id/Pix no path/query — confirmado pelo usuário que ocorre), isso vaza para o trace. O CA7 pedia "nunca expõe url.path/query".
 - **Options:** (a) filtrar/redigir `url.full` dentro da lib; (b) redigir no OTel Collector (transform processor); (c) aceitar cru.
 - **Decision:** (b) — redação no collector.

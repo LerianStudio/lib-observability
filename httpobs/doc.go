@@ -38,17 +38,32 @@
 //
 // # PII / cardinality guardrail (docs/metrics-contract.md)
 //
-// The two surfaces this package OWNS are kept bounded and PII-free:
-//   - the duration metric labels never include url.path/url.query; and
+// The three surfaces this package OWNS are kept bounded and PII-free:
+//   - the duration metric labels never include url.path/url.query;
 //   - the span name is bounded by default ("HTTP <METHOD>", e.g. "HTTP GET") and
-//     never folds a concrete URL path into the name.
+//     never folds a concrete URL path into the name; and
+//   - the URL recorded on a span NEVER carries the query string, the fragment,
+//     userinfo or an opaque request target — url.full keeps scheme://host/path
+//     of a hierarchical URL and only scheme://host of an opaque one.
 //
-// Enforced by tests. Note (ADR-008): otelhttp always sets url.full (the raw
-// request URL, path and query) as a standard semconv attribute on the CLIENT
-// span, and OTel-Go offers no supported hook to remove it. If outbound URLs may
-// carry identifiers/PII in the path or query, redact url.full in the OTel
-// Collector (transform processor) — that is where PII/cardinality redaction of
-// span attributes belongs.
+// Enforced by tests.
+//
+// # Credentials in the URL (always, no opt-out)
+//
+// An API key in the query string (Google Gemini's ?key=, a pre-signed S3/GCS
+// signature, any ?token=/?access_token=) would otherwise be exported verbatim to
+// the collector, because url.full is a standard semconv attribute the
+// instrumentation records from the request URL. NewTransport therefore hands the
+// instrumentation a request whose URL has been stripped of query, fragment,
+// userinfo and opaque target, and restores the full URL below it: the REQUEST ON THE WIRE IS
+// UNCHANGED, and so are the propagation headers and the request-size accounting.
+// This is behaviour, not an option — a credential in a span is never acceptable.
+//
+// The PATH is kept (it is what makes a span readable), so an identifier in the
+// path still reaches the trace: redact that in the OTel Collector (transform
+// processor), which is where path-shaped PII/cardinality redaction belongs.
+// Inbound (NewHandler) needs nothing: the SERVER span records url.path and never
+// the query string, so a ?code=/?state= callback is already safe.
 //
 // # No-op degradation (ADR-005)
 //
