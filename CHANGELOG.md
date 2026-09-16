@@ -1,5 +1,27 @@
 # Lib-observability Changelog
 
+## [4.1.0](https://github.com/LerianStudio/lib-observability/releases/tag/v4.1.0)
+
+Features:
+- Introduced `NewHandler` for `net/http` servers to enhance HTTP observability. (@fredcamaral)
+- Added telemetry names for `gen_ai` and introduced a `sqlite` database system. (@fredcamaral)
+- Implemented builders for float64 counter, gauge, and histogram metrics. (@fredcamaral)
+- Added `ForceFlush` to the Telemetry API for improved tracing control. (@fredcamaral)
+- Introduced `SampleRatio` configuration to the telemetry settings for tracing. (@fredcamaral)
+- Enabled `Config.Output` in the Zap logger to direct log entries to a specified writer. (@fredcamaral)
+
+Fixes:
+- Addressed an issue in metrics where NaN and non-increasing histogram boundaries are now refused. (@fredcamaral)
+- Resolved a problem in `httpobs` by removing the separator from the span name in every `ServeMux` method. (@fredcamaral)
+
+Improvements:
+- Updated documentation to clarify that the logger provider is registered only when present. (@fredcamaral)
+- Enhanced documentation to specify that `ApplyGlobals` is the caller's responsibility and mapped every inbound server helper. (@fredcamaral)
+
+[Compare changes](https://github.com/LerianStudio/lib-observability/compare/v4.0.4...v4.1.0)
+
+---
+
 ## [4.0.4](https://github.com/LerianStudio/lib-observability/releases/tag/v4.0.4)
 
 Fixes:
