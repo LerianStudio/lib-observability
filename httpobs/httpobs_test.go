@@ -284,7 +284,9 @@ func TestNewTransport_SpanURLDropsOpaqueTarget(t *testing.T) {
 		assert.NotContains(t, kv.Value.Emit(), "SECRET", "the opaque target leaked into span attribute %s", kv.Key)
 	}
 
-	assert.Contains(t, got.requestURI, "key=SECRET", "the wire must still carry the opaque target whole")
+	// RequestURI() prints an Opaque that starts with "//" as scheme + ":" + Opaque.
+	assert.Equal(t, "http://"+host+"/v1/x?key=SECRET", got.requestURI,
+		"the wire must still carry the opaque target whole")
 }
 
 // A URL with nothing to hide is recorded whole: the guarantee removes
