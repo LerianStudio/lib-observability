@@ -115,7 +115,9 @@ defer span.End()
 // ... perform the document-database call ...
 ```
 
-> **PII in outbound URLs:** `httpobs` keeps the duration metric labels and the span name bounded and PII-free. However `otelhttp` always records `url.full` (the raw request URL, including path and query) as a standard attribute on the client span, and OpenTelemetry-Go offers no supported hook to strip it. If your outbound URLs can carry identifiers/PII in the path or query, redact `url.full` in the OTel Collector (transform processor) — that is where span-attribute PII/cardinality redaction belongs.
+> **Credentials in outbound URLs (guaranteed, no opt-out):** the URL recorded on a span never carries the query string, the fragment or userinfo — `url.full` is always `scheme://host/path`. An API key in the query (Gemini's `?key=`, a pre-signed S3/GCS signature, any `?token=`) is therefore never exported to the collector. **The request on the wire is unchanged**: the full URL is restored below the instrumentation, so the call, its propagation headers and its byte accounting are unaffected. Inbound (`NewHandler`) needs nothing — the `SERVER` span records `url.path` and never the query, so an OAuth callback's `?code=` is already safe.
+>
+> The **path** is kept, since it is what makes a span readable. If your outbound paths carry identifiers/PII, redact `url.full` in the OTel Collector (transform processor) — that is where path-shaped PII/cardinality redaction belongs.
 
 ## HTTP server telemetry safety
 

@@ -255,6 +255,45 @@ func TestNewHandler_NoProvidersStillServesAndProducesNoSpan(t *testing.T) {
 	assert.Empty(t, serverSpans(t, sr), "no SERVER span without a TracerProvider")
 }
 
+// An OAuth callback route receives ?code=…&state=…. otelhttp's SERVER semconv
+// records url.path and NEVER the query or a full URL (internal/semconv/server.go:
+// "attrs = append(attrs, semconv.URLPath(req.URL.Path))"), so nothing has to be
+// scrubbed on the inbound side. This pins that, and that the handler below still
+// reads the query it was sent.
+func TestNewHandler_ServerSpanNeverRecordsTheQueryString(t *testing.T) {
+	_, _, tp, sr := newHarness(t)
+
+	const secret = "SECRET"
+
+	var gotCode string
+
+	h := NewHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotCode = r.URL.Query().Get("code")
+
+		w.WriteHeader(http.StatusOK)
+	}), WithTracerProvider(tp))
+	serveOne(t, h, "/v1/callback?code="+secret+"&state=xyz", nil)
+
+	assert.Equal(t, secret, gotCode, "the handler must still receive the full query")
+
+	spans := serverSpans(t, sr)
+	require.Len(t, spans, 1)
+
+	var pathSeen bool
+
+	for _, kv := range spans[0].Attributes() {
+		assert.NotContains(t, kv.Value.Emit(), secret, "the query credential leaked into attribute %s", kv.Key)
+
+		if string(kv.Key) == "url.path" {
+			pathSeen = true
+
+			assert.Equal(t, "/v1/callback", kv.Value.AsString())
+		}
+	}
+
+	assert.True(t, pathSeen, "server span must carry url.path")
+}
+
 // The Authorization header and the request/response bodies must never reach the
 // span. otelhttp does not record them; this pins that the wrapper adds nothing.
 func TestNewHandler_NeverRecordsSecretsOrBodies(t *testing.T) {
