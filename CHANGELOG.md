@@ -1,5 +1,21 @@
 # Lib-observability Changelog
 
+## [4.3.0](https://github.com/LerianStudio/lib-observability/releases/tag/v4.3.0)
+
+Features:
+- Server spans now carry the route template instead of the caller's path. (@fredcamaral)
+
+Fixes:
+- The route template is rewritten during a panic and without the host. (@fredcamaral)
+
+Improvements:
+- Made the attribute set addressable before reading it in tests. (@fredcamaral)
+- Shared the unmatched-route template in constants. (@fredcamaral)
+
+[Compare changes](https://github.com/LerianStudio/lib-observability/compare/v4.2.0...v4.3.0)
+
+---
+
 ## [4.2.0](https://github.com/LerianStudio/lib-observability/releases/tag/v4.2.0)
 
 Features:
