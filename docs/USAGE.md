@@ -67,6 +67,7 @@ tel, err := tracing.NewTelemetry(tracing.TelemetryConfig{
     CollectorExporterEndpoint: os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"), // do Helm — NUNCA literal
     EnableTelemetry:           enableTel,
     EnableRuntimeMetrics:      true, // liga go.* (goroutines/heap/gc). opt-in.
+    SampleRatio:               sampleRatio, // 0 = amostra tudo (default do SDK). opt-in.
     InsecureExporter:          insecure,
 })
 if err != nil {
@@ -83,6 +84,7 @@ defer tel.ShutdownTelemetryWithContext(ctx) // flush/close no shutdown (ou tel.S
 - **Segurança do exporter:** em ambiente `production`/`prd`, `InsecureExporter: true` faz o `NewTelemetry` **retornar erro** (o serviço não sobe) a menos que a env `ALLOW_INSECURE_OTEL="<justificativa>"` esteja definida. Em produção o `OTEL_EXPORTER_OTLP_ENDPOINT` deve ser `https://...` e `InsecureExporter` false. Insecure só em `development`/`local` (cluster interno sem TLS). Como isso vem de env, é o Helm de cada ambiente que decide — o código não fixa nada.
 - `EnableTelemetry: false` (env `ENABLE_TELEMETRY=false`) → telemetria no-op segura (nada quebra, nada emite). Padrão em dev/teste.
 - `EnableRuntimeMetrics: true` → emite `go.*` automaticamente (sem mais código).
+- `SampleRatio` → amostragem de cabeça (head sampling). `0` = **unset**, mantém o default do SDK (`ParentBased(AlwaysSample)`: todo trace é gravado) — o comportamento de sempre. Um valor em `(0, 1]` instala `ParentBased(TraceIDRatioBased(ratio))`: `0.05` grava ~5% dos traces RAIZ, e um request que chega com pai já amostrado continua sendo gravado (trace nunca corta no meio). Qualquer outro valor (negativo, > 1, NaN) faz `NewTelemetry` retornar `ErrInvalidSampleRatio` **antes** de construir qualquer provider — o serviço não sobe com config errada. Vem de env (Helm), como o resto.
 
 ---
 
