@@ -84,7 +84,8 @@ if err != nil {
     // NÃO siga para o defer (deferir shutdown de um tel nil causa panic).
     log.Fatalf("telemetry init: %v", err)
 }
-// Registra tracer/meter/logger providers e propagador como globais do processo.
+// Registra tracer/meter e propagador como globais do processo; o LoggerProvider
+// entra junto quando existe (sem exporter de logs, não há o que registrar).
 // Sem isto, sqlobs/redisobs/httpobs (e qualquer otel.Tracer(...)) ficam no no-op.
 if err := tel.ApplyGlobals(); err != nil {
     log.Fatalf("telemetry globals: %v", err)
