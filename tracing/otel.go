@@ -59,6 +59,9 @@ var (
 	ErrNilShutdown = errors.New("telemetry shutdown function is nil")
 	// ErrNilProvider is returned when ApplyGlobals is called with nil providers.
 	ErrNilProvider = errors.New("telemetry providers must not be nil when applying globals")
+	// ErrInvalidSampleRatio is returned when TelemetryConfig.SampleRatio is
+	// outside the accepted range: 0 (unset) or (0, 1].
+	ErrInvalidSampleRatio = errors.New("telemetry sample ratio must be 0 (unset) or within (0, 1]")
 )
 
 // TelemetryConfig configures tracing, metrics, logging, and propagation behavior.
@@ -115,6 +118,21 @@ type TelemetryConfig struct {
 	// mechanism that DOES read a caller-controlled `tenant-id` gRPC metadata
 	// field for span/metric labeling; see its own doc comment for that gap.
 	TrustInboundTraceContext bool
+	// SampleRatio is the head sampling probability applied to a trace that
+	// arrives with no sampled parent. It follows the Go zero-value convention:
+	// 0 means UNSET and keeps the SDK default, ParentBased(AlwaysSample), so
+	// every root trace is recorded - the behavior every caller had before this
+	// field existed. A value in (0, 1] installs
+	// sdktrace.ParentBased(sdktrace.TraceIDRatioBased(ratio)): a root trace is
+	// recorded with that probability, while a request arriving with an
+	// already-sampled parent still follows the parent's decision, so a trace is
+	// never truncated halfway through. Any other value - negative, greater than
+	// 1, or NaN - makes NewTelemetry return ErrInvalidSampleRatio before any
+	// provider is built.
+	//
+	// It is honored only on the real provider path. With telemetry disabled, or
+	// with an empty collector endpoint, the noop providers ignore it.
+	SampleRatio float64
 	// Logger is typed log.Universal - a single Log method built from universal
 	// types - rather than log.Logger, so a service can populate this config
 	// with a logger declared in its own package (or in a library that has
@@ -194,6 +212,10 @@ func newTelemetry(cfg TelemetryConfig, options telemetryOptions) (*Telemetry, er
 		return nil, ErrNilTelemetryLogger
 	}
 
+	if err := validateSampleRatio(cfg.SampleRatio); err != nil {
+		return nil, err
+	}
+
 	if cfg.Propagator == nil {
 		cfg.Propagator = propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{})
 	}
@@ -236,6 +258,16 @@ func newTelemetry(cfg TelemetryConfig, options telemetryOptions) (*Telemetry, er
 	}
 
 	return initExporters(ctx, cfg, options)
+}
+
+// validateSampleRatio rejects a SampleRatio outside 0 (unset) or (0, 1]. NaN
+// fails both comparisons and is therefore rejected as well.
+func validateSampleRatio(ratio float64) error {
+	if ratio == 0 || (ratio > 0 && ratio <= 1) {
+		return nil
+	}
+
+	return fmt.Errorf("%w: got %v", ErrInvalidSampleRatio, ratio)
 }
 
 // normalizeEndpoint strips URL scheme from the collector endpoint and infers security mode.
@@ -541,6 +573,38 @@ func (tl *Telemetry) ShutdownTelemetryWithContext(ctx context.Context) error {
 	return ErrNilShutdown
 }
 
+// ForceFlush flushes whatever the configured providers still hold in memory
+// WITHOUT shutting them down, so a short-lived job, a CLI run, or a burst worth
+// investigating becomes visible in the collector immediately instead of waiting
+// for the next batch interval. Shutdown remains the only thing that closes the
+// providers; this may be called any number of times while the process runs.
+//
+// It flushes the TracerProvider, the MeterProvider, and the LoggerProvider when
+// each is present, and joins their errors so one failing signal does not hide
+// the others. Nil-safe: a nil receiver returns nil, and so does the noop
+// telemetry built when telemetry is disabled or the collector endpoint is empty.
+func (tl *Telemetry) ForceFlush(ctx context.Context) error {
+	if tl == nil {
+		return nil
+	}
+
+	var errs []error
+
+	if tl.TracerProvider != nil {
+		errs = append(errs, tl.TracerProvider.ForceFlush(ctx))
+	}
+
+	if tl.MeterProvider != nil {
+		errs = append(errs, tl.MeterProvider.ForceFlush(ctx))
+	}
+
+	if tl.LoggerProvider != nil {
+		errs = append(errs, tl.LoggerProvider.ForceFlush(ctx))
+	}
+
+	return errors.Join(errs...)
+}
+
 func (tl *TelemetryConfig) newResource() *sdkresource.Resource {
 	return sdkresource.NewWithAttributes(
 		semconv.SchemaURL,
@@ -604,12 +668,29 @@ func (tl *TelemetryConfig) newMeterProvider(
 	return sdkmetric.NewMeterProvider(opts...)
 }
 
+// sampler returns the head sampler for the real TracerProvider, or nil when
+// SampleRatio is unset (0) and the SDK default ParentBased(AlwaysSample) must
+// be preserved. The ratio is validated by validateSampleRatio before this runs.
+func (tl *TelemetryConfig) sampler() sdktrace.Sampler {
+	if tl.SampleRatio <= 0 {
+		return nil
+	}
+
+	return sdktrace.ParentBased(sdktrace.TraceIDRatioBased(tl.SampleRatio))
+}
+
 func (tl *TelemetryConfig) newTracerProvider(rsc *sdkresource.Resource, exp *otlptrace.Exporter) *sdktrace.TracerProvider {
-	return sdktrace.NewTracerProvider(
+	opts := []sdktrace.TracerProviderOption{
 		sdktrace.WithResource(rsc),
 		sdktrace.WithSpanProcessor(RedactingAttrBagSpanProcessor{Redactor: tl.Redactor}),
 		sdktrace.WithBatcher(exp),
-	)
+	}
+
+	if s := tl.sampler(); s != nil {
+		opts = append(opts, sdktrace.WithSampler(s))
+	}
+
+	return sdktrace.NewTracerProvider(opts...)
 }
 
 type shutdownable interface {

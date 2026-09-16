@@ -2,7 +2,10 @@
 // transport with OpenTelemetry client instrumentation. Every outbound request is
 // classified as a call to an external dependency (span kind CLIENT) and emits
 // http.client.request.duration, giving RED visibility of the dependencies a
-// service calls (identity provider, BACEN/SPB, tenant-manager, etc.).
+// service calls (identity provider, BACEN/SPB, tenant-manager, etc.), and the
+// matching inbound helper for a stdlib net/http server (NewHandler: span kind
+// SERVER, http.server.request.duration). A Fiber v3 app uses middleware instead
+// - never both on the same server.
 //
 // It is a thin wrapper over go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp:
 // httpobs applies the library's corporate defaults and does not reimplement span,
@@ -50,6 +53,14 @@
 //
 // base nil -> http.DefaultTransport. With no MeterProvider the metric degrades to
 // no-op. With no TracerProvider NO CLIENT span is produced (metric may still be
-// recorded): the telemetry-enabled path MUST pass WithTracerProvider. The helper
-// never panics and never breaks the client.
+// recorded): the telemetry-enabled path MUST pass WithTracerProvider. Absent
+// providers never make the helper panic or break the client. NewHandler degrades
+// the same way and still serves the wrapped handler; a nil or panicking handler
+// or base transport is the caller's, as with any middleware.
+//
+// # Inbound trace context (NewHandler, fail-closed)
+//
+// NewHandler IGNORES the inbound traceparent/tracestate by default and starts a
+// new root trace per request; pass otel.GetTextMapPropagator() via
+// WithPropagators to continue a trusted caller's trace. See NewHandler.
 package httpobs
