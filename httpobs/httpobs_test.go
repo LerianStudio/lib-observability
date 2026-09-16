@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -254,6 +255,36 @@ func TestNewTransport_SpanURLDropsQueryFragmentAndUserinfo(t *testing.T) {
 	assert.Equal(t, "Basic "+base64.StdEncoding.EncodeToString([]byte("user:pw")), got.authorization,
 		"the userinfo-derived Authorization must reach the server")
 	assert.NotEmpty(t, got.traceparent, "trace context must still be propagated")
+}
+
+// A URL built with Opaque (the form net/url documents for request targets
+// that must not be re-encoded) prints Opaque verbatim from String(), query
+// included, and none of the other fields apply — so it is scrubbed too.
+func TestNewTransport_SpanURLDropsOpaqueTarget(t *testing.T) {
+	mp, _, tp, sr := newHarness(t)
+
+	var got recordedRequest
+
+	srv := newRecordingServer(t, &got)
+	host := strings.TrimPrefix(srv.URL, "http://")
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, srv.URL, nil)
+	require.NoError(t, err)
+	req.URL = &url.URL{Scheme: "http", Host: host, Opaque: "//" + host + "/v1/x?key=SECRET"}
+
+	client := NewClient(nil, WithMeterProvider(mp), WithTracerProvider(tp))
+	res, err := client.Do(req)
+	require.NoError(t, err)
+	require.NoError(t, res.Body.Close())
+
+	spans := clientSpans(t, sr)
+	require.Len(t, spans, 1)
+
+	for _, kv := range spans[0].Attributes() {
+		assert.NotContains(t, kv.Value.Emit(), "SECRET", "the opaque target leaked into span attribute %s", kv.Key)
+	}
+
+	assert.Contains(t, got.requestURI, "key=SECRET", "the wire must still carry the opaque target whole")
 }
 
 // A URL with nothing to hide is recorded whole: the guarantee removes

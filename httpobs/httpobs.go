@@ -165,15 +165,19 @@ type scrubbedURLTransport struct {
 
 func (t scrubbedURLTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	if r.URL == nil ||
-		(r.URL.RawQuery == "" && !r.URL.ForceQuery && r.URL.Fragment == "" && r.URL.User == nil) {
+		(r.URL.RawQuery == "" && !r.URL.ForceQuery && r.URL.Fragment == "" &&
+			r.URL.User == nil && r.URL.Opaque == "") {
 		// Nothing a credential could hide in: spend no clone on it.
 		return t.instrumented.RoundTrip(r)
 	}
 
 	// A RoundTripper must not modify the request it was given, and Clone deep
 	// copies the URL (net/http cloneURL), so the caller's URL is untouched.
+	// Opaque is cleared too: when set, URL.String() prints it verbatim, query
+	// and all, and the fields below are never consulted.
 	clone := r.Clone(context.WithValue(r.Context(), originalURLKey{}, r.URL))
 	clone.URL.User = nil
+	clone.URL.Opaque = ""
 	clone.URL.RawQuery = ""
 	clone.URL.ForceQuery = false
 	clone.URL.Fragment = ""
