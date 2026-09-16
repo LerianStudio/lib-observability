@@ -26,7 +26,7 @@ A minimal, implementation-agnostic `Logger` interface with five methods (`Log`, 
 
 ### Zap adapter with OTEL bridge (`zap`)
 
-A [`zap`](https://github.com/uber-go/zap) adapter implementing the `Logger` interface, with automatic `trace_id` and `span_id` injection into every log entry. Bridges zap output to the OpenTelemetry Logs SDK via `otelzap`, enabling unified log collection through the OTLP pipeline. Supports environment-aware configuration (production, staging, development, local) and runtime log level adjustment.
+A [`zap`](https://github.com/uber-go/zap) adapter implementing the `Logger` interface, with automatic `trace_id` and `span_id` injection into every log entry. Bridges zap output to the OpenTelemetry Logs SDK via `otelzap`, enabling unified log collection through the OTLP pipeline. Supports environment-aware configuration (production, staging, development, local) and runtime log level adjustment. Set `Config.Output` to send every encoded entry to your own `io.Writer` — a rotated file for a daemon, or anywhere off stdout for a full-screen terminal client — keeping the same encoder, level, sampling and OTLP bridge. Leaving it nil keeps the default sink, zap's own stderr; the caller owns the writer's lifecycle (rotation, redaction, closing).
 
 ### Panic recovery with telemetry (`runtime`)
 
