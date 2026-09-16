@@ -42,8 +42,9 @@
 //   - the duration metric labels never include url.path/url.query;
 //   - the span name is bounded by default ("HTTP <METHOD>", e.g. "HTTP GET") and
 //     never folds a concrete URL path into the name; and
-//   - the URL recorded on a span NEVER carries the query string, the fragment or
-//     userinfo — url.full is always scheme://host/path.
+//   - the URL recorded on a span NEVER carries the query string, the fragment,
+//     userinfo or an opaque request target — url.full keeps scheme://host/path
+//     of a hierarchical URL and only scheme://host of an opaque one.
 //
 // Enforced by tests.
 //
@@ -53,8 +54,8 @@
 // signature, any ?token=/?access_token=) would otherwise be exported verbatim to
 // the collector, because url.full is a standard semconv attribute the
 // instrumentation records from the request URL. NewTransport therefore hands the
-// instrumentation a request whose URL has been stripped of query, fragment and
-// userinfo, and restores the full URL below it: the REQUEST ON THE WIRE IS
+// instrumentation a request whose URL has been stripped of query, fragment,
+// userinfo and opaque target, and restores the full URL below it: the REQUEST ON THE WIRE IS
 // UNCHANGED, and so are the propagation headers and the request-size accounting.
 // This is behaviour, not an option — a credential in a span is never acceptable.
 //

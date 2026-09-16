@@ -152,7 +152,8 @@ func (c config) otelhttpOptions(defaultSpanName func(operation string, r *http.R
 type originalURLKey struct{}
 
 // scrubbedURLTransport is the OUTER half of the credential guarantee: the
-// instrumentation below it only ever sees scheme://host/path.
+// instrumentation below it only ever sees scheme://host/path (scheme://host when
+// the target was opaque, since the path lived inside Opaque).
 //
 // otelhttp reads req.URL when it STARTS the span, inside the same RoundTrip that
 // performs the request, so url.full cannot be filtered after the fact — the
@@ -188,7 +189,7 @@ func (t scrubbedURLTransport) RoundTrip(r *http.Request) (*http.Response, error)
 
 // restoredURLTransport is the INNER half: it sits between the instrumentation
 // and the application's real transport and gives the request its full URL back,
-// so query string, fragment and userinfo still reach the wire.
+// so query string, fragment, userinfo and an opaque target still reach the wire.
 type restoredURLTransport struct {
 	base http.RoundTripper
 }
@@ -218,9 +219,10 @@ func (t restoredURLTransport) RoundTrip(r *http.Request) (*http.Response, error)
 //
 // # Credentials in the URL (always, no opt-out)
 //
-// The URL recorded on the span (url.full) is ALWAYS scheme://host/path: query
-// string, fragment and userinfo are removed before the instrumentation sees the
-// request. An API key in the query (?key=, ?token=, a pre-signed S3/GCS
+// The URL recorded on the span (url.full) never carries query string, fragment,
+// userinfo or an opaque target — all removed before the instrumentation sees the
+// request; a hierarchical URL keeps scheme://host/path, an opaque one only
+// scheme://host. An API key in the query (?key=, ?token=, a pre-signed S3/GCS
 // signature) would otherwise be exported verbatim to the collector. The request
 // on the wire is UNCHANGED — the full URL is restored below the instrumentation.
 //
