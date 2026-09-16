@@ -115,7 +115,7 @@ defer span.End()
 // ... perform the document-database call ...
 ```
 
-> **Credentials in outbound URLs (guaranteed, no opt-out):** the URL recorded on a span never carries the query string, the fragment or userinfo — `url.full` is always `scheme://host/path`. An API key in the query (Gemini's `?key=`, a pre-signed S3/GCS signature, any `?token=`) is therefore never exported to the collector. **The request on the wire is unchanged**: the full URL is restored below the instrumentation, so the call, its propagation headers and its byte accounting are unaffected. Inbound (`NewHandler`) needs nothing — the `SERVER` span records `url.path` and never the query, so an OAuth callback's `?code=` is already safe.
+> **Credentials in outbound URLs (guaranteed, no opt-out):** the URL recorded on a span never carries the query string, the fragment, userinfo or an opaque request target — `url.full` keeps `scheme://host/path` of a hierarchical URL and only `scheme://host` of an opaque one. An API key in the query (Gemini's `?key=`, a pre-signed S3/GCS signature, any `?token=`) is therefore never exported to the collector. **The request on the wire is unchanged**: the full URL is restored below the instrumentation, so the call, its propagation headers and its byte accounting are unaffected. Inbound (`NewHandler`) needs nothing — the `SERVER` span records `url.path` and never the query, so an OAuth callback's `?code=` is already safe.
 >
 > The **path** is kept, since it is what makes a span readable. If your outbound paths carry identifiers/PII, redact `url.full` in the OTel Collector (transform processor) — that is where path-shaped PII/cardinality redaction belongs.
 

@@ -42,8 +42,9 @@
 //   - the duration metric labels never include url.path/url.query;
 //   - the span name is bounded by default ("HTTP <METHOD>", e.g. "HTTP GET") and
 //     never folds a concrete URL path into the name; and
-//   - the URL recorded on a span NEVER carries the query string, the fragment or
-//     userinfo — url.full is always scheme://host/path.
+//   - the URL recorded on a span NEVER carries the query string, the fragment,
+//     userinfo or an opaque request target — url.full keeps scheme://host/path
+//     of a hierarchical URL and only scheme://host of an opaque one.
 //
 // Enforced by tests.
 //
