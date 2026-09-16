@@ -41,7 +41,10 @@ type Config struct {
 	OTelLibraryName string
 	// Output receives every encoded log entry when set. Nil keeps today's
 	// behaviour: zap's own stderr sink. The caller owns the writer's lifecycle
-	// (rotation, redaction, closing); the logger only writes and Syncs it.
+	// (rotation, redaction, flushing, closing); the logger only writes to it.
+	// Logger.Sync forwards to Output only when Output implements Sync() error;
+	// a buffered writer without one (a *bufio.Writer) must be flushed by the
+	// caller, or Sync reports success with entries still in the buffer.
 	Output io.Writer
 }
 

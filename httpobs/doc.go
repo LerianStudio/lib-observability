@@ -15,7 +15,8 @@
 //
 // PREFER this wrapper for outbound HTTP. For each outbound call type, use the
 // dedicated wrapper — SQL: sqlobs, Redis/Valkey: redisobs, HTTP client: httpobs,
-// messaging: messagingobs, inbound server: middleware/grpcmiddleware. Use
+// messaging: messagingobs; inbound server: middleware (Fiber), grpcmiddleware
+// (gRPC), httpobs.NewHandler (stdlib net/http). Use
 // tracing.StartClientSpan ONLY for outbound calls with NO wrapper (e.g. the
 // document database). Never wrap a call with httpobs AND also open a manual
 // StartClientSpan around it — that double-instruments the same request.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -60,6 +61,11 @@ var (
 	// instrument. A single non-finite sample poisons the aggregate for the
 	// lifetime of the process, so it is rejected at the call site.
 	ErrValueNotFinite = errors.New("metric value must be finite")
+	// ErrInvalidBuckets is returned when a histogram's explicit boundaries are
+	// NaN or not strictly increasing once sorted. The SDK's own check compares
+	// neighbours with >=, and NaN sorts first and compares false against
+	// everything, so a NaN boundary would otherwise reach the exporter.
+	ErrInvalidBuckets = errors.New("histogram bucket boundaries must be strictly increasing and never NaN")
 )
 
 // Metric represents a metric that can be collected by the server.
@@ -380,6 +386,10 @@ func (f *MetricsFactory) getOrCreateHistogram(m Metric) (metric.Int64Histogram, 
 		m.Buckets = sorted
 	}
 
+	if err := validateBuckets(m.Buckets); err != nil {
+		return nil, fmt.Errorf("histogram %q: %w", m.Name, err)
+	}
+
 	cacheKey := histogramCacheKey(m.Name, m.Buckets)
 
 	if histogram, exists := f.histograms.Load(cacheKey); exists {
@@ -571,6 +581,10 @@ func (f *MetricsFactory) getOrCreateFloat64Histogram(m Metric) (metric.Float64Hi
 		m.Buckets = sorted
 	}
 
+	if err := validateBuckets(m.Buckets); err != nil {
+		return nil, fmt.Errorf("float64 histogram %q: %w", m.Name, err)
+	}
+
 	cacheKey := histogramCacheKey(m.Name, m.Buckets)
 
 	if histogram, exists := f.float64Histograms.Load(cacheKey); exists {
@@ -647,4 +661,17 @@ func (f *MetricsFactory) addFloat64HistogramOptions(m Metric) []metric.Float64Hi
 	}
 
 	return opts
+}
+
+// validateBuckets accepts sorted explicit boundaries that are strictly
+// increasing and never NaN. Infinities are allowed: sorted, they satisfy the
+// SDK's own contract. Nil or a single finite boundary is valid.
+func validateBuckets(sorted []float64) error {
+	for i, boundary := range sorted {
+		if math.IsNaN(boundary) || (i > 0 && boundary <= sorted[i-1]) {
+			return ErrInvalidBuckets
+		}
+	}
+
+	return nil
 }
