@@ -62,8 +62,30 @@
 // The PATH is kept (it is what makes a span readable), so an identifier in the
 // path still reaches the trace: redact that in the OTel Collector (transform
 // processor), which is where path-shaped PII/cardinality redaction belongs.
-// Inbound (NewHandler) needs nothing: the SERVER span records url.path and never
-// the query string, so a ?code=/?state= callback is already safe.
+//
+// # Inbound url.path is the route template (always, no opt-out)
+//
+// The SERVER span never records the query string, so a ?code=/?state= callback
+// is safe on that count, and it never records the CONCRETE path either:
+// NewHandler rewrites url.path to the route TEMPLATE once the mux has resolved
+// the route. A request to /users/42 is exported as url.path="/users/{id}" and
+// http.route="/users/{id}"; traffic that matched no route as
+// url.path="/{unmatched}", with http.route absent as OpenTelemetry requires.
+// So an id or a CPF in an inbound path never leaves the process, and the
+// attribute stays low-cardinality under scanner traffic — the same guarantee
+// middleware.WithTelemetry gives the Fiber path.
+//
+// # Inbound caller identity (NewHandler, opt-in removal)
+//
+// By DEFAULT the SERVER span carries user_agent.original, client.address and
+// network.peer.address/port, sourced from the caller's User-Agent header, its
+// X-Forwarded-For header and the peer address. NewHandler's
+// WithoutCallerAttributes removes all four — for a PUBLIC listener, whose spans
+// would otherwise correlate an attacker-chosen string of arbitrary length with
+// this service's authenticated user and tenant ids. The handler below still
+// receives the real User-Agent, X-Forwarded-For and RemoteAddr, so access logs,
+// rate limiters and IP allowlists are unaffected, and server.address (this
+// service's own host) is kept either way.
 //
 // # No-op degradation (ADR-005)
 //
