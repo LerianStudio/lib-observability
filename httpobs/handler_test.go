@@ -357,7 +357,8 @@ func TestNewHandler_PanickingHandlerStillRecordsTheRouteTemplate(t *testing.T) {
 	spans := serverSpans(t, sr)
 	require.Len(t, spans, 1)
 
-	path, ok := spanAttrSet(spans[0]).Value("url.path")
+	attrs := spanAttrSet(spans[0])
+	path, ok := attrs.Value("url.path")
 	require.True(t, ok)
 	assert.Equal(t, "/users/{id}", path.AsString(), "the panic must not leak the concrete path")
 }
