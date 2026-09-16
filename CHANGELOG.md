@@ -1,5 +1,23 @@
 # Lib-observability Changelog
 
+## [4.2.0](https://github.com/LerianStudio/lib-observability/releases/tag/v4.2.0)
+
+Features:
+- Record the request URL without including query, fragment, or user information. (@fredcamaral)
+
+Fixes:
+- Ensure the opaque request target is scrubbed properly. (@fredcamaral)
+- Honor `InsecureExporter=false` when the environment endpoint lacks a scheme. (@fredcamaral)
+
+Improvements:
+- Align comments in the `httpobs` package regarding the opaque target. (@fredcamaral)
+- Clarify what `url.full` retains when the request target is opaque. (@fredcamaral)
+- Assert the entire opaque request target during testing. (@fredcamaral)
+
+[Compare changes](https://github.com/LerianStudio/lib-observability/compare/v4.1.0...v4.2.0)
+
+---
+
 ## [4.1.0](https://github.com/LerianStudio/lib-observability/releases/tag/v4.1.0)
 
 Features:
