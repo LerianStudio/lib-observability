@@ -44,6 +44,8 @@ const (
 	DBSystemRedis = "redis"
 	// DBSystemRabbitMQ is the OTEL semantic convention value for RabbitMQ.
 	DBSystemRabbitMQ = "rabbitmq"
+	// DBSystemSQLite is the OTEL semantic convention value for SQLite.
+	DBSystemSQLite = "sqlite"
 )
 
 // Telemetry metric names.

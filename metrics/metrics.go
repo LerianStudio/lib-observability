@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -34,12 +35,17 @@ type Logger interface {
 
 // MetricsFactory provides a thread-safe factory for creating and managing OpenTelemetry metrics
 // with lazy initialization using sync.Map for high-performance concurrent access.
+// Int64 and float64 instruments are cached in separate maps, so the same
+// metric name can never alias across kinds.
 type MetricsFactory struct {
-	meter      metric.Meter
-	counters   sync.Map // string -> metric.Int64Counter
-	gauges     sync.Map // string -> metric.Int64Gauge
-	histograms sync.Map // string -> metric.Int64Histogram
-	logger     Logger
+	meter             metric.Meter
+	counters          sync.Map // string -> metric.Int64Counter
+	gauges            sync.Map // string -> metric.Int64Gauge
+	histograms        sync.Map // string -> metric.Int64Histogram
+	float64Counters   sync.Map // string -> metric.Float64Counter
+	float64Gauges     sync.Map // string -> metric.Float64Gauge
+	float64Histograms sync.Map // string -> metric.Float64Histogram
+	logger            Logger
 }
 
 var (
@@ -51,6 +57,15 @@ var (
 	ErrNegativeCounterValue = errors.New("counter value must not be negative")
 	// ErrPercentageOutOfRange is returned when a percentage value is outside [0, 100].
 	ErrPercentageOutOfRange = errors.New("percentage value must be between 0 and 100")
+	// ErrValueNotFinite is returned when NaN or +/-Inf is passed to a float64
+	// instrument. A single non-finite sample poisons the aggregate for the
+	// lifetime of the process, so it is rejected at the call site.
+	ErrValueNotFinite = errors.New("metric value must be finite")
+	// ErrInvalidBuckets is returned when a histogram's explicit boundaries are
+	// NaN or not strictly increasing once sorted. The SDK's own check compares
+	// neighbours with >=, and NaN sorts first and compares false against
+	// everything, so a NaN boundary would otherwise reach the exporter.
+	ErrInvalidBuckets = errors.New("histogram bucket boundaries must be strictly increasing and never NaN")
 )
 
 // Metric represents a metric that can be collected by the server.
@@ -186,6 +201,68 @@ func (f *MetricsFactory) Histogram(m Metric) (*HistogramBuilder, error) {
 	}, nil
 }
 
+// Float64Counter creates or retrieves a float64 counter metric and returns a builder for fluent API usage.
+// Use it for fractional monotonic totals such as accumulated cost or seconds.
+func (f *MetricsFactory) Float64Counter(m Metric) (*Float64CounterBuilder, error) {
+	if f == nil {
+		return nil, ErrNilFactory
+	}
+
+	counter, err := f.getOrCreateFloat64Counter(m)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Float64CounterBuilder{
+		factory: f,
+		counter: counter,
+		name:    m.Name,
+	}, nil
+}
+
+// Float64Gauge creates or retrieves a float64 gauge metric and returns a builder for fluent API usage.
+func (f *MetricsFactory) Float64Gauge(m Metric) (*Float64GaugeBuilder, error) {
+	if f == nil {
+		return nil, ErrNilFactory
+	}
+
+	gauge, err := f.getOrCreateFloat64Gauge(m)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Float64GaugeBuilder{
+		factory: f,
+		gauge:   gauge,
+		name:    m.Name,
+	}, nil
+}
+
+// Float64Histogram creates or retrieves a float64 histogram metric and returns a builder for fluent API usage.
+// Default buckets come from selectDefaultBuckets and are expressed in seconds, so durations
+// should be recorded in seconds rather than milliseconds.
+func (f *MetricsFactory) Float64Histogram(m Metric) (*Float64HistogramBuilder, error) {
+	if f == nil {
+		return nil, ErrNilFactory
+	}
+
+	// Set default buckets if not provided
+	if m.Buckets == nil {
+		m.Buckets = selectDefaultBuckets(m.Name)
+	}
+
+	histogram, err := f.getOrCreateFloat64Histogram(m)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Float64HistogramBuilder{
+		factory:   f,
+		histogram: histogram,
+		name:      m.Name,
+	}, nil
+}
+
 // selectDefaultBuckets chooses default buckets based on metric name.
 // Uses exact match first, then checks for substrings in a deterministic order.
 func selectDefaultBuckets(name string) []float64 {
@@ -309,6 +386,10 @@ func (f *MetricsFactory) getOrCreateHistogram(m Metric) (metric.Int64Histogram, 
 		m.Buckets = sorted
 	}
 
+	if err := validateBuckets(m.Buckets); err != nil {
+		return nil, fmt.Errorf("histogram %q: %w", m.Name, err)
+	}
+
 	cacheKey := histogramCacheKey(m.Name, m.Buckets)
 
 	if histogram, exists := f.histograms.Load(cacheKey); exists {
@@ -403,4 +484,194 @@ func (f *MetricsFactory) addHistogramOptions(m Metric) []metric.Int64HistogramOp
 	}
 
 	return opts
+}
+
+// getOrCreateFloat64Counter lazily creates or retrieves an existing float64 counter
+func (f *MetricsFactory) getOrCreateFloat64Counter(m Metric) (metric.Float64Counter, error) {
+	if f == nil {
+		return nil, ErrNilFactory
+	}
+
+	if counter, exists := f.float64Counters.Load(m.Name); exists {
+		if c, ok := counter.(metric.Float64Counter); ok {
+			return c, nil
+		}
+
+		return nil, fmt.Errorf("float64 counter cache contains invalid type for %q", m.Name)
+	}
+
+	// Create new counter with proper options
+	counterOpts := f.addFloat64CounterOptions(m)
+
+	counter, err := f.meter.Float64Counter(m.Name, counterOpts...)
+	if err != nil {
+		if f.logger != nil {
+			f.logger.Log(context.Background(), log.LevelError, "failed to create float64 counter metric", log.String("metric_name", m.Name), log.Err(err))
+		}
+
+		return nil, fmt.Errorf("create float64 counter %q: %w", m.Name, err)
+	}
+
+	// Store in sync.Map for future use
+	if actual, loaded := f.float64Counters.LoadOrStore(m.Name, counter); loaded {
+		// Another goroutine created it first, use that one
+		if c, ok := actual.(metric.Float64Counter); ok {
+			return c, nil
+		}
+
+		return nil, fmt.Errorf("float64 counter cache contains invalid type for %q", m.Name)
+	}
+
+	return counter, nil
+}
+
+// getOrCreateFloat64Gauge lazily creates or retrieves an existing float64 gauge
+func (f *MetricsFactory) getOrCreateFloat64Gauge(m Metric) (metric.Float64Gauge, error) {
+	if f == nil {
+		return nil, ErrNilFactory
+	}
+
+	if gauge, exists := f.float64Gauges.Load(m.Name); exists {
+		if g, ok := gauge.(metric.Float64Gauge); ok {
+			return g, nil
+		}
+
+		return nil, fmt.Errorf("float64 gauge cache contains invalid type for %q", m.Name)
+	}
+
+	// Create new gauge with proper options
+	gaugeOpts := f.addFloat64GaugeOptions(m)
+
+	gauge, err := f.meter.Float64Gauge(m.Name, gaugeOpts...)
+	if err != nil {
+		if f.logger != nil {
+			f.logger.Log(context.Background(), log.LevelError, "failed to create float64 gauge metric", log.String("metric_name", m.Name), log.Err(err))
+		}
+
+		return nil, fmt.Errorf("create float64 gauge %q: %w", m.Name, err)
+	}
+
+	// Store in sync.Map for future use
+	if actual, loaded := f.float64Gauges.LoadOrStore(m.Name, gauge); loaded {
+		// Another goroutine created it first, use that one
+		if g, ok := actual.(metric.Float64Gauge); ok {
+			return g, nil
+		}
+
+		return nil, fmt.Errorf("float64 gauge cache contains invalid type for %q", m.Name)
+	}
+
+	return gauge, nil
+}
+
+// getOrCreateFloat64Histogram lazily creates or retrieves an existing float64 histogram.
+// Uses a composite key (name + buckets hash) to ensure different bucket configs
+// result in different histograms.
+func (f *MetricsFactory) getOrCreateFloat64Histogram(m Metric) (metric.Float64Histogram, error) {
+	if f == nil {
+		return nil, ErrNilFactory
+	}
+
+	// Sort buckets before both cache key computation and instrument creation
+	// to ensure the instrument configuration matches the cache key.
+	if len(m.Buckets) > 1 {
+		sorted := make([]float64, len(m.Buckets))
+		copy(sorted, m.Buckets)
+		sort.Float64s(sorted)
+		m.Buckets = sorted
+	}
+
+	if err := validateBuckets(m.Buckets); err != nil {
+		return nil, fmt.Errorf("float64 histogram %q: %w", m.Name, err)
+	}
+
+	cacheKey := histogramCacheKey(m.Name, m.Buckets)
+
+	if histogram, exists := f.float64Histograms.Load(cacheKey); exists {
+		if h, ok := histogram.(metric.Float64Histogram); ok {
+			return h, nil
+		}
+
+		return nil, fmt.Errorf("float64 histogram cache contains invalid type for %q", cacheKey)
+	}
+
+	// Create new histogram with proper options
+	histogramOpts := f.addFloat64HistogramOptions(m)
+
+	histogram, err := f.meter.Float64Histogram(m.Name, histogramOpts...)
+	if err != nil {
+		if f.logger != nil {
+			f.logger.Log(context.Background(), log.LevelError, "failed to create float64 histogram metric", log.String("metric_name", m.Name), log.Err(err))
+		}
+
+		return nil, fmt.Errorf("create float64 histogram %q: %w", m.Name, err)
+	}
+
+	// Store in sync.Map for future use
+	if actual, loaded := f.float64Histograms.LoadOrStore(cacheKey, histogram); loaded {
+		// Another goroutine created it first, use that one
+		if h, ok := actual.(metric.Float64Histogram); ok {
+			return h, nil
+		}
+
+		return nil, fmt.Errorf("float64 histogram cache contains invalid type for %q", cacheKey)
+	}
+
+	return histogram, nil
+}
+
+func (f *MetricsFactory) addFloat64CounterOptions(m Metric) []metric.Float64CounterOption {
+	var opts []metric.Float64CounterOption
+	if m.Description != "" {
+		opts = append(opts, metric.WithDescription(m.Description))
+	}
+
+	if m.Unit != "" {
+		opts = append(opts, metric.WithUnit(m.Unit))
+	}
+
+	return opts
+}
+
+func (f *MetricsFactory) addFloat64GaugeOptions(m Metric) []metric.Float64GaugeOption {
+	var opts []metric.Float64GaugeOption
+	if m.Description != "" {
+		opts = append(opts, metric.WithDescription(m.Description))
+	}
+
+	if m.Unit != "" {
+		opts = append(opts, metric.WithUnit(m.Unit))
+	}
+
+	return opts
+}
+
+func (f *MetricsFactory) addFloat64HistogramOptions(m Metric) []metric.Float64HistogramOption {
+	var opts []metric.Float64HistogramOption
+	if m.Description != "" {
+		opts = append(opts, metric.WithDescription(m.Description))
+	}
+
+	if m.Unit != "" {
+		opts = append(opts, metric.WithUnit(m.Unit))
+	}
+
+	if m.Buckets != nil {
+		opts = append(opts, metric.WithExplicitBucketBoundaries(m.Buckets...))
+	}
+
+	return opts
+}
+
+// validateBuckets accepts sorted explicit boundaries that are strictly
+// increasing and never NaN. Infinities are allowed: sorted, they satisfy the
+// SDK's own contract. Nil or a single finite boundary is valid.
+func validateBuckets(sorted []float64) error {
+	for i, boundary := range sorted {
+		if math.IsNaN(boundary) || (i > 0 && boundary <= sorted[i-1]) {
+			return ErrInvalidBuckets
+		}
+	}
+
+	return nil
 }

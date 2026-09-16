@@ -17,7 +17,7 @@ A lib emite **métricas OTLP** que vão: `app → OTel SDK (lib) → collector �
 
 **PEGADINHA CRÍTICA (nº1 de bugs):** nada é emitido se a telemetria não estiver ligada corretamente. A regra de ouro:
 - `NewTelemetry(cfg)` com `EnableTelemetry: true` + `CollectorExporterEndpoint` preenchido.
-- `NewTelemetry` chama `ApplyGlobals()` internamente → registra o MeterProvider como GLOBAL. **Os helpers `sqlobs`/`redisobs` usam o provider global por padrão** (`otel.GetMeterProvider()`). Se a telemetria não for criada via `NewTelemetry` (ou `ApplyGlobals` não rodar), esses helpers rodam **sem erro e sem emitir nada** (provider no-op). Se em dúvida, passe o provider explícito com `WithMeterProvider(tel.MeterProvider)`.
+- `tel.ApplyGlobals()` logo depois de `NewTelemetry` → registra os providers como GLOBAIS. **`NewTelemetry` NÃO faz isso no caminho de sucesso**; só o fallback sem endpoint instala os no-op sozinho. **Os helpers `sqlobs`/`redisobs`/`httpobs` usam o provider global por padrão** (`otel.GetMeterProvider()`): sem `ApplyGlobals`, rodam **sem erro e sem emitir nada** (provider no-op). Se em dúvida, passe o provider explícito com `WithMeterProvider(tel.MeterProvider)`.
 
 ---
 
@@ -59,6 +59,15 @@ if deploymentEnv == "" {
     deploymentEnv = os.Getenv("ENV_NAME")
 }
 
+// SampleRatio: OTEL_TRACES_SAMPLER_ARG não setada → 0 (mantém o default do SDK:
+// amostra tudo). Setada e inválida → erro visível, como as booleanas acima; o
+// range (0, 1] é validado pelo próprio NewTelemetry.
+sampleRatio := 0.0
+if raw, ok := os.LookupEnv("OTEL_TRACES_SAMPLER_ARG"); ok {
+    sampleRatio, err = strconv.ParseFloat(raw, 64)
+    if err != nil { log.Fatalf("OTEL_TRACES_SAMPLER_ARG inválido: %v", err) }
+}
+
 tel, err := tracing.NewTelemetry(tracing.TelemetryConfig{
     LibraryName:               os.Getenv("OTEL_LIBRARY_NAME"),
     ServiceName:               os.Getenv("OTEL_RESOURCE_SERVICE_NAME"),
@@ -67,6 +76,7 @@ tel, err := tracing.NewTelemetry(tracing.TelemetryConfig{
     CollectorExporterEndpoint: os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"), // do Helm — NUNCA literal
     EnableTelemetry:           enableTel,
     EnableRuntimeMetrics:      true, // liga go.* (goroutines/heap/gc). opt-in.
+    SampleRatio:               sampleRatio, // 0 = amostra tudo (default do SDK). opt-in.
     InsecureExporter:          insecure,
 })
 if err != nil {
@@ -74,21 +84,31 @@ if err != nil {
     // NÃO siga para o defer (deferir shutdown de um tel nil causa panic).
     log.Fatalf("telemetry init: %v", err)
 }
+// Registra tracer/meter e propagador como globais do processo; o LoggerProvider
+// entra junto quando existe (sem exporter de logs, não há o que registrar).
+// Sem isto, sqlobs/redisobs/httpobs (e qualquer otel.Tracer(...)) ficam no no-op.
+if err := tel.ApplyGlobals(); err != nil {
+    log.Fatalf("telemetry globals: %v", err)
+}
 ctx := context.Background() // ctx de shutdown
 defer tel.ShutdownTelemetryWithContext(ctx) // flush/close no shutdown (ou tel.ShutdownTelemetry() sem ctx)
 ```
 
 - Endpoint, service name, env etc. vêm SEMPRE de env (Helm). O `.env.example` do serviço documenta os valores por ambiente. O código só lê `os.Getenv(...)`.
-- `NewTelemetry` já registra os providers globais (ApplyGlobals). Não precisa chamar de novo.
+- `NewTelemetry` **não** registra os providers globais no caminho de sucesso: `tel.ApplyGlobals()` é obrigatório logo depois (o exemplo acima chama). Só o fallback sem endpoint (`ErrEmptyEndpoint`) aplica os providers no-op sozinho.
 - **Segurança do exporter:** em ambiente `production`/`prd`, `InsecureExporter: true` faz o `NewTelemetry` **retornar erro** (o serviço não sobe) a menos que a env `ALLOW_INSECURE_OTEL="<justificativa>"` esteja definida. Em produção o `OTEL_EXPORTER_OTLP_ENDPOINT` deve ser `https://...` e `InsecureExporter` false. Insecure só em `development`/`local` (cluster interno sem TLS). Como isso vem de env, é o Helm de cada ambiente que decide — o código não fixa nada.
 - `EnableTelemetry: false` (env `ENABLE_TELEMETRY=false`) → telemetria no-op segura (nada quebra, nada emite). Padrão em dev/teste.
 - `EnableRuntimeMetrics: true` → emite `go.*` automaticamente (sem mais código).
+- `SampleRatio` → amostragem de cabeça (head sampling). `0` = **unset**, mantém o default do SDK (`ParentBased(AlwaysSample)`: todo trace é gravado) — o comportamento de sempre. Um valor em `(0, 1]` instala `ParentBased(TraceIDRatioBased(ratio))`: `0.05` grava ~5% dos traces RAIZ, e um request que chega com pai já amostrado continua sendo gravado (trace nunca corta no meio). Qualquer outro valor (negativo, > 1, NaN) faz `NewTelemetry` retornar `ErrInvalidSampleRatio` **antes** de construir qualquer provider — o serviço não sobe com config errada. Vem de env (Helm), como o resto.
+- `tel.ForceFlush(ctx)` → empurra o que está bufferizado (traces, métricas, logs) **sem derrubar os providers**. Para job curto, CLI, ou um burst que você quer ver no collector agora, em vez de esperar o próximo batch. Não substitui o `Shutdown` — só ele fecha. Seguro em receiver nil e na telemetria no-op.
 
 ---
 
-## 2. HTTP server (Fiber v3 APENAS) — `middleware`
+## 2. HTTP server (Fiber v3) — `middleware`
 
-> ⚠️ O middleware HTTP exige **Fiber v3**. Se o app está em Fiber v2, PULE esta seção (o resto da lib funciona sem migrar Fiber). O midaz hoje não tem essa métrica; ganha ao migrar.
+> ⚠️ Este middleware exige **Fiber v3**. Se o app está em Fiber v2, PULE esta seção (o resto da lib funciona sem migrar Fiber). O midaz hoje não tem essa métrica; ganha ao migrar.
+>
+> Servidor **`net/http` da stdlib** (inclusive sobre unix socket) não usa este middleware: use `httpobs.NewHandler` (§6.5a). NUNCA os dois no mesmo servidor — duplica `http.server.request.duration`.
 
 Emite: `http.server.request.duration` (s) e `http.server.active_requests`.
 
@@ -306,6 +326,24 @@ client := httpobs.NewClient(baseTransport)
 - O caller DEVE ler e fechar o response body (o span fecha no close/EOF do body).
 - Opções: `WithMeterProvider`, `WithTracerProvider`, `WithPropagators`, `WithSpanNameFormatter`.
 
+### 6.5a HTTP server `net/http` (stdlib) — `httpobs.NewHandler`
+
+Contraparte de ENTRADA do `NewTransport`, para um `http.Server` da stdlib (inclusive servindo sobre unix socket). Span **SERVER** + `http.server.request.duration` (s). App em Fiber v3 usa o `middleware` (§2) — nunca os dois no mesmo servidor.
+
+```go
+mux := http.NewServeMux()
+mux.Handle("/v1/accounts/{id}", accountsHandler)
+
+srv := &http.Server{
+    Handler: httpobs.NewHandler(mux,
+        httpobs.WithTracerProvider(tel.TracerProvider),
+        httpobs.WithMeterProvider(tel.MeterProvider)),
+}
+```
+- Nome do span: método + **template da rota** (`r.Pattern`, que o `ServeMux` do Go 1.22+ preenche) — `GET /v1/accounts/{id}`; sem rota casada, só o método. O path concreto NUNCA entra no nome. Registrar com método (`mux.Handle("GET /v1/accounts/{id}", h)`) dá o MESMO nome que registrar sem: o prefixo de método do próprio pattern é descartado, nunca repetido. `WithSpanNameFormatter` sobrescreve e DEVE continuar low-cardinality.
+- Body de request/response e header `Authorization` nunca são gravados.
+- **Trace context de entrada é IGNORADO por padrão** (fail-closed, mesma postura do `TrustInboundTraceContext`): todo request começa um trace RAIZ novo, porque quem consegue setar `traceparent` escolheria o trace id deste serviço e forçaria a decisão de amostragem. Para continuar o trace de um chamador CONFIÁVEL, passe o propagador explicitamente: `httpobs.WithPropagators(otel.GetTextMapPropagator())`.
+
 ## 6.6 Saída sem wrapper (último recurso) — `tracing.StartClientSpan`
 
 Só para saídas que NÃO têm wrapper dedicado (ex.: MongoDB — sem otelmongo v2 estável; ou uma SDK/RPC custom). Marca o span como **CLIENT** sem você precisar lembrar do `trace.WithSpanKind`.
@@ -387,4 +425,4 @@ _ = c.WithAttributes(attribute.String("tenant.id", tenantID)).AddOne(ctx)
 
 ## 10. O que NÃO está disponível ainda
 - **MongoDB wrapper dedicado** (`mongoobs` estilo sqlobs/redisobs): adiado — otelmongo v2 sem release estável. **Enquanto isso**, instrumente saídas Mongo com `tracing.StartClientSpan` (§6.6) — span CLIENT correto, sem métrica automática.
-- **HTTP server**: exige Fiber v3 (§2). Apps ainda em Fiber v2 não têm a métrica HTTP server nativa até migrarem; todo o resto (DB/cache/fila/HTTP client/gRPC/runtime) funciona independente do Fiber.
+- **HTTP server em Fiber v2**: o middleware do §2 exige Fiber v3. Apps ainda em Fiber v2 não têm a métrica HTTP server nativa até migrarem; todo o resto (DB/cache/fila/HTTP client/gRPC/runtime) funciona independente do Fiber. Servidor `net/http` da stdlib JÁ é coberto por `httpobs.NewHandler` (§6.5a).

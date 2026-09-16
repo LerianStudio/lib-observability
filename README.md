@@ -6,15 +6,17 @@
 
 ### Telemetry bootstrap and tracing (`tracing`)
 
-Full OpenTelemetry SDK lifecycle management: OTLP/gRPC exporter setup for traces, metrics, and logs; `TracerProvider`, `MeterProvider`, and `LoggerProvider` construction via a single `NewTelemetry(cfg)` call; global provider opt-in with `ApplyGlobals()`; and graceful shutdown with `ShutdownTelemetry()`. Includes trace context propagation for HTTP, gRPC, and message queues (Kafka/Redpanda/RabbitMQ), span error/event recording helpers, struct-to-attribute conversion with automatic sensitive field redaction, and custom `SpanProcessor` implementations for context-carried attribute injection.
+Full OpenTelemetry SDK lifecycle management: OTLP/gRPC exporter setup for traces, metrics, and logs; `TracerProvider`, `MeterProvider`, and `LoggerProvider` construction via a single `NewTelemetry(cfg)` call; global provider opt-in with `ApplyGlobals()`; head sampling with `SampleRatio` (0 keeps the SDK default of recording every trace; a value in `(0, 1]` installs `ParentBased(TraceIDRatioBased(ratio))`, and anything else fails `NewTelemetry` with `ErrInvalidSampleRatio`); `ForceFlush(ctx)` to push buffered traces, metrics, and logs without shutting the providers down; and graceful shutdown with `ShutdownTelemetry()`. Includes trace context propagation for HTTP, gRPC, and message queues (Kafka/Redpanda/RabbitMQ), span error/event recording helpers, struct-to-attribute conversion with automatic sensitive field redaction, and custom `SpanProcessor` implementations for context-carried attribute injection.
 
 ### Metrics (`metrics`)
 
-Thread-safe `MetricsFactory` with lazy instrument caching and a fluent builder API for Counters, Gauges, and Histograms. Provides `.WithLabels()` / `.WithAttributes()` chaining followed by `.Add()`, `.Set()`, or `.Record()` — all with explicit error returns. Includes pre-configured domain metric recorders (accounts, transactions, routes, operations) and system infrastructure gauges (CPU, memory). Ships a `NewNopFactory()` for tests and disabled-metrics environments.
+Thread-safe `MetricsFactory` with lazy instrument caching and a fluent builder API for Counters, Gauges, and Histograms, each in an int64 (`Counter`, `Gauge`, `Histogram`) and a float64 (`Float64Counter`, `Float64Gauge`, `Float64Histogram`) form — use float64 for fractional values such as cost and for durations in seconds, which is the unit the default histogram buckets assume. Provides `.WithLabels()` / `.WithAttributes()` chaining followed by `.Add()`, `.Set()`, or `.Record()` — all with explicit error returns. Includes pre-configured domain metric recorders (accounts, transactions, routes, operations) and system infrastructure gauges (CPU, memory). Ships a `NewNopFactory()` for tests and disabled-metrics environments.
 
-### Outbound HTTP client instrumentation (`httpobs`)
+### HTTP client and server instrumentation (`httpobs`)
 
 A thin, nil-safe wrapper over `otelhttp` that turns an outbound HTTP transport into an instrumented one: every outbound request is classified as a call to an external dependency (span kind `CLIENT`) and emits `http.client.request.duration` (seconds). `NewTransport(base, opts...)` wraps the transport the app already built (preserving its TLS/timeout/proxy config); `NewClient(base, opts...)` is a convenience returning a ready `*http.Client`. Bounded span name by default (`HTTP <METHOD>`), no-op when telemetry is off. See "Outbound call instrumentation" below.
+
+`NewHandler(next, opts...)` is the inbound counterpart for a **stdlib `net/http` server** (a Fiber v3 app uses `middleware.WithTelemetry` instead — never both on the same server). It produces a `SERVER` span and emits `http.server.request.duration` (seconds). The default span name is the method plus the registered route pattern (`r.Pattern`, set by the Go 1.22+ `ServeMux`) — `GET /users/{id}`, or the method alone when nothing matched — never the concrete URL path. A method-qualified registration (`"GET /users/{id}"`) names the span exactly like a bare one: the pattern's own method prefix is dropped rather than repeated. Bodies and the `Authorization` header are never recorded. Inbound `traceparent` is **ignored by default** and every request starts a new root trace; pass `httpobs.WithPropagators(otel.GetTextMapPropagator())` to continue a trusted caller's trace — the same trust decision `TrustInboundTraceContext` expresses for the Fiber and gRPC paths.
 
 ### Manual client-span helper (`tracing.StartClientSpan`)
 
@@ -26,7 +28,7 @@ A minimal, implementation-agnostic `Logger` interface with five methods (`Log`, 
 
 ### Zap adapter with OTEL bridge (`zap`)
 
-A [`zap`](https://github.com/uber-go/zap) adapter implementing the `Logger` interface, with automatic `trace_id` and `span_id` injection into every log entry. Bridges zap output to the OpenTelemetry Logs SDK via `otelzap`, enabling unified log collection through the OTLP pipeline. Supports environment-aware configuration (production, staging, development, local) and runtime log level adjustment.
+A [`zap`](https://github.com/uber-go/zap) adapter implementing the `Logger` interface, with automatic `trace_id` and `span_id` injection into every log entry. Bridges zap output to the OpenTelemetry Logs SDK via `otelzap`, enabling unified log collection through the OTLP pipeline. Supports environment-aware configuration (production, staging, development, local) and runtime log level adjustment. Set `Config.Output` to send every encoded entry to your own `io.Writer` — a rotated file for a daemon, or anywhere off stdout for a full-screen terminal client — keeping the same encoder, level, sampling and OTLP bridge. Leaving it nil keeps the default sink, zap's own stderr; the caller owns the writer's lifecycle (rotation, redaction, closing).
 
 ### Panic recovery with telemetry (`runtime`)
 
@@ -38,7 +40,7 @@ A context-scoped `Asserter` that validates domain invariants at runtime without 
 
 ### Observability constants and context carriers
 
-Shared OTEL attribute prefixes, metric names, event names, header constants (`traceparent`, `Traceparent`, `Tracestate`), label sanitization (`SanitizeMetricLabel`), and sensitive field detection for cross-cutting redaction. Context carrier helpers (`ContextWithTracer`, `ContextWithMetricFactory`, `ContextWithLogger`, `ContextWithSpanAttributes`) for propagating observability primitives through `context.Context`.
+Shared OTEL attribute prefixes, metric names (including the `gen_ai.*` generative-AI attributes and client metrics), event names, database system identifiers, header constants (`traceparent`, `Traceparent`, `Tracestate`), label sanitization (`SanitizeMetricLabel`), and sensitive field detection for cross-cutting redaction. Context carrier helpers (`ContextWithTracer`, `ContextWithMetricFactory`, `ContextWithLogger`, `ContextWithSpanAttributes`) for propagating observability primitives through `context.Context`.
 
 ### Redaction engine
 
