@@ -17,6 +17,13 @@ const (
 	AttrPrefixPanic = "panic."
 )
 
+// UnmatchedRouteTemplate is the stable http.route / url.path value reported for
+// traffic that matched no registered route. One spelling for every inbound
+// helper (Fiber middleware and httpobs.NewHandler), so a dashboard grouping on
+// the route template sees scanner traffic collapse into a single series instead
+// of one series per probed path.
+const UnmatchedRouteTemplate = "/{unmatched}"
+
 // Telemetry attribute keys for request identity.
 const (
 	// AttrKeyContextID is the OpenTelemetry attribute / log field key used

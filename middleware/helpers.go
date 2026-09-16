@@ -5,11 +5,12 @@ import (
 	"reflect"
 	"strings"
 
+	"github.com/LerianStudio/lib-observability/v4/constants"
 	"github.com/gofiber/fiber/v3"
 	"google.golang.org/grpc/metadata"
 )
 
-const unmatchedRouteTemplate = "/{unmatched}"
+const unmatchedRouteTemplate = constants.UnmatchedRouteTemplate
 
 const maxRequestIDLength = 128
 
