@@ -1,7 +1,9 @@
 package httpobs
 
 import (
+	"context"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
@@ -144,6 +146,63 @@ func (c config) otelhttpOptions(defaultSpanName func(operation string, r *http.R
 	return opts
 }
 
+// originalURLKey addresses the untouched request URL that scrubbedURLTransport
+// stashes on the context and restoredURLTransport reads back. Private type, so
+// nothing outside this package can collide with it or read it.
+type originalURLKey struct{}
+
+// scrubbedURLTransport is the OUTER half of the credential guarantee: the
+// instrumentation below it only ever sees scheme://host/path.
+//
+// otelhttp reads req.URL when it STARTS the span, inside the same RoundTrip that
+// performs the request, so url.full cannot be filtered after the fact — the
+// request handed to the instrumentation must already be clean. The untouched URL
+// travels on the context and restoredURLTransport puts it back on the request
+// otelhttp builds, one layer lower, so the wire is unaffected.
+type scrubbedURLTransport struct {
+	instrumented http.RoundTripper
+}
+
+func (t scrubbedURLTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	if r.URL == nil ||
+		(r.URL.RawQuery == "" && !r.URL.ForceQuery && r.URL.Fragment == "" && r.URL.User == nil) {
+		// Nothing a credential could hide in: spend no clone on it.
+		return t.instrumented.RoundTrip(r)
+	}
+
+	// A RoundTripper must not modify the request it was given, and Clone deep
+	// copies the URL (net/http cloneURL), so the caller's URL is untouched.
+	clone := r.Clone(context.WithValue(r.Context(), originalURLKey{}, r.URL))
+	clone.URL.User = nil
+	clone.URL.RawQuery = ""
+	clone.URL.ForceQuery = false
+	clone.URL.Fragment = ""
+	clone.URL.RawFragment = ""
+
+	return t.instrumented.RoundTrip(clone)
+}
+
+// restoredURLTransport is the INNER half: it sits between the instrumentation
+// and the application's real transport and gives the request its full URL back,
+// so query string, fragment and userinfo still reach the wire.
+type restoredURLTransport struct {
+	base http.RoundTripper
+}
+
+func (t restoredURLTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	// otelhttp already cloned the request before handing it down ("r =
+	// r.Clone(ctx). According to RoundTripper spec, we shouldn't modify the
+	// origin request." — otelhttp transport.go), so this assignment touches
+	// neither the caller's request nor the one scrubbedURLTransport built. The
+	// traceparent otelhttp injected and the body wrapper it installed for byte
+	// counting ride along untouched; only the URL changes.
+	if original, ok := r.Context().Value(originalURLKey{}).(*url.URL); ok {
+		r.URL = original
+	}
+
+	return t.base.RoundTrip(r)
+}
+
 // NewTransport wraps base with OpenTelemetry HTTP client instrumentation: every
 // outbound request is classified as an external-dependency call (SpanKind=CLIENT,
 // only when a TracerProvider is configured — ADR-005), emits
@@ -152,6 +211,14 @@ func (c config) otelhttpOptions(defaultSpanName func(operation string, r *http.R
 //
 // PREFER this wrapper for outbound HTTP. Use tracing.StartClientSpan only for
 // outbound calls WITHOUT a wrapper. Do not double-instrument.
+//
+// # Credentials in the URL (always, no opt-out)
+//
+// The URL recorded on the span (url.full) is ALWAYS scheme://host/path: query
+// string, fragment and userinfo are removed before the instrumentation sees the
+// request. An API key in the query (?key=, ?token=, a pre-signed S3/GCS
+// signature) would otherwise be exported verbatim to the collector. The request
+// on the wire is UNCHANGED — the full URL is restored below the instrumentation.
 //
 // Nil-safe: base == nil uses http.DefaultTransport. With no providers configured
 // it attaches against the no-op providers, so telemetry being off never breaks
@@ -164,7 +231,12 @@ func NewTransport(base http.RoundTripper, opts ...Option) http.RoundTripper {
 
 	cfg := newConfig(opts...)
 
-	return otelhttp.NewTransport(base, cfg.otelhttpOptions(boundedSpanName)...)
+	instrumented := otelhttp.NewTransport(
+		restoredURLTransport{base: base},
+		cfg.otelhttpOptions(boundedSpanName)...,
+	)
+
+	return scrubbedURLTransport{instrumented: instrumented}
 }
 
 // NewClient returns an *http.Client whose Transport is the instrumented wrapper
@@ -205,7 +277,10 @@ func NewClient(base http.RoundTripper, opts ...Option) *http.Client {
 // # Payloads
 //
 // Request and response bodies and the Authorization header are NEVER recorded:
-// otelhttp does not capture them and this wrapper adds nothing that would.
+// otelhttp does not capture them and this wrapper adds nothing that would. The
+// QUERY STRING is not recorded either — the SERVER span carries url.path and
+// never a full URL, so an OAuth callback's ?code=/?state= stays out of the
+// trace. The handler below still receives the request whole, query and all.
 //
 // Degrades like NewTransport when telemetry is absent: with no TracerProvider
 // configured (neither option nor global) no span is produced, the metric

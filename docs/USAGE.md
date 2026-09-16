@@ -323,6 +323,7 @@ client := &http.Client{
 client := httpobs.NewClient(baseTransport)
 ```
 - Labels: `http.request.method`, `http.response.status_code`, `server.address`, `error.type`. Nome do span bounded ("HTTP GET") — nunca URL/path.
+- **Credencial na URL nunca vai para o span (garantia, sem opt-out):** a URL gravada no span (`url.full`) é SEMPRE `scheme://host/path` — query string, fragment e userinfo são removidos antes da instrumentação ver o request. Uma API key na query (`?key=` do Gemini, assinatura de URL pré-assinada de S3/GCS, qualquer `?token=`) não chega ao collector. **O request no fio NÃO muda**: a URL completa é restaurada abaixo da instrumentação, então a chamada, os headers de propagação e a contagem de bytes seguem intactos. O **path** é mantido (é o que torna o span legível) — se o path carrega id/PII, redija `url.full` no OTel Collector (transform processor).
 - O caller DEVE ler e fechar o response body (o span fecha no close/EOF do body).
 - Opções: `WithMeterProvider`, `WithTracerProvider`, `WithPropagators`, `WithSpanNameFormatter`.
 
@@ -341,7 +342,7 @@ srv := &http.Server{
 }
 ```
 - Nome do span: método + **template da rota** (`r.Pattern`, que o `ServeMux` do Go 1.22+ preenche) — `GET /v1/accounts/{id}`; sem rota casada, só o método. O path concreto NUNCA entra no nome. Registrar com método (`mux.Handle("GET /v1/accounts/{id}", h)`) dá o MESMO nome que registrar sem: o prefixo de método do próprio pattern é descartado, nunca repetido. `WithSpanNameFormatter` sobrescreve e DEVE continuar low-cardinality.
-- Body de request/response e header `Authorization` nunca são gravados.
+- Body de request/response e header `Authorization` nunca são gravados. A **query string** também não: o span SERVER grava `url.path` e nunca a URL inteira, então o `?code=`/`?state=` de um callback OAuth fica fora do trace. O handler abaixo continua recebendo o request inteiro, query incluída.
 - **Trace context de entrada é IGNORADO por padrão** (fail-closed, mesma postura do `TrustInboundTraceContext`): todo request começa um trace RAIZ novo, porque quem consegue setar `traceparent` escolheria o trace id deste serviço e forçaria a decisão de amostragem. Para continuar o trace de um chamador CONFIÁVEL, passe o propagador explicitamente: `httpobs.WithPropagators(otel.GetTextMapPropagator())`.
 
 ## 6.6 Saída sem wrapper (último recurso) — `tracing.StartClientSpan`
