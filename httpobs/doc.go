@@ -53,9 +53,10 @@
 //
 // base nil -> http.DefaultTransport. With no MeterProvider the metric degrades to
 // no-op. With no TracerProvider NO CLIENT span is produced (metric may still be
-// recorded): the telemetry-enabled path MUST pass WithTracerProvider. The helper
-// never panics and never breaks the client. NewHandler degrades the same way and
-// always serves the wrapped handler.
+// recorded): the telemetry-enabled path MUST pass WithTracerProvider. Absent
+// providers never make the helper panic or break the client. NewHandler degrades
+// the same way and still serves the wrapped handler; a nil or panicking handler
+// or base transport is the caller's, as with any middleware.
 //
 // # Inbound trace context (NewHandler, fail-closed)
 //

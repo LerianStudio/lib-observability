@@ -59,6 +59,15 @@ if deploymentEnv == "" {
     deploymentEnv = os.Getenv("ENV_NAME")
 }
 
+// SampleRatio: OTEL_TRACES_SAMPLER_ARG não setada → 0 (mantém o default do SDK:
+// amostra tudo). Setada e inválida → erro visível, como as booleanas acima; o
+// range (0, 1] é validado pelo próprio NewTelemetry.
+sampleRatio := 0.0
+if raw, ok := os.LookupEnv("OTEL_TRACES_SAMPLER_ARG"); ok {
+    sampleRatio, err = strconv.ParseFloat(raw, 64)
+    if err != nil { log.Fatalf("OTEL_TRACES_SAMPLER_ARG inválido: %v", err) }
+}
+
 tel, err := tracing.NewTelemetry(tracing.TelemetryConfig{
     LibraryName:               os.Getenv("OTEL_LIBRARY_NAME"),
     ServiceName:               os.Getenv("OTEL_RESOURCE_SERVICE_NAME"),

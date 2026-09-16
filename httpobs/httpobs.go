@@ -93,10 +93,14 @@ func boundedSpanName(_ string, r *http.Request) string {
 // A ServeMux pattern is "[METHOD ][HOST]/[PATH]", so a method-qualified pattern
 // already carries the method ("GET /v1/host") and the space separates it. The
 // method prefix is dropped before the name is built, otherwise every request on
-// a method-qualified route would be named "GET GET /v1/host". Both registration
-// styles therefore yield the same name:
+// a method-qualified route would be named "GET GET /v1/host". ServeMux allows
+// one or more spaces or tabs between the method and the rest of the pattern
+// (net/http's pattern parser cuts on " \t" and trims the run), so the same
+// separators are cut here. Every registration style therefore yields the same
+// name:
 //
 //	"GET /users/{id}"   -> "GET /users/{id}"
+//	"GET\t/users/{id}"  -> "GET /users/{id}"
 //	"/users/{id}"       -> "GET /users/{id}"
 //	"GET example.com/x" -> "GET example.com/x"
 //	""                  -> "GET"
@@ -106,8 +110,8 @@ func serverSpanName(_ string, r *http.Request) string {
 	}
 
 	route := r.Pattern
-	if i := strings.IndexByte(route, ' '); i >= 0 {
-		route = route[i+1:]
+	if i := strings.IndexAny(route, " \t"); i >= 0 {
+		route = strings.TrimLeft(route[i+1:], " \t")
 	}
 
 	return r.Method + " " + route
@@ -203,9 +207,11 @@ func NewClient(base http.RoundTripper, opts ...Option) *http.Client {
 // Request and response bodies and the Authorization header are NEVER recorded:
 // otelhttp does not capture them and this wrapper adds nothing that would.
 //
-// Nil-safe like NewTransport: with no TracerProvider configured (neither option
-// nor global) no span is produced, the metric degrades to no-op, and the request
-// is still served.
+// Degrades like NewTransport when telemetry is absent: with no TracerProvider
+// configured (neither option nor global) no span is produced, the metric
+// degrades to no-op, and the request is still served. That is the whole of the
+// guarantee — a nil or panicking wrapped handler is the caller's, as with any
+// middleware; otelhttp calls next.ServeHTTP directly and recovers nothing.
 func NewHandler(next http.Handler, opts ...Option) http.Handler {
 	// An EMPTY composite propagator extracts nothing, so inbound trace context
 	// is dropped unless the caller explicitly passes WithPropagators, which

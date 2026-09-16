@@ -120,6 +120,8 @@ func TestNewHandler_DefaultSpanNameNeverRepeatsTheMethod(t *testing.T) {
 		want    string
 	}{
 		{"method qualified", "GET /users/{id}", "/users/42", "", "GET /users/{id}"},
+		{"tab separated", "GET\t/users/{id}", "/users/42", "", "GET /users/{id}"},
+		{"run of separators", "GET \t /users/{id}", "/users/42", "", "GET /users/{id}"},
 		{"unqualified", "/users/{id}", "/users/42", "", "GET /users/{id}"},
 		{"method and host qualified", "GET example.com/x", "/x", "example.com", "GET example.com/x"},
 		{"host qualified only", "example.com/y", "/y", "example.com", "GET example.com/y"},
