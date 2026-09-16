@@ -38,7 +38,7 @@ A context-scoped `Asserter` that validates domain invariants at runtime without 
 
 ### Observability constants and context carriers
 
-Shared OTEL attribute prefixes, metric names, event names, header constants (`traceparent`, `Traceparent`, `Tracestate`), label sanitization (`SanitizeMetricLabel`), and sensitive field detection for cross-cutting redaction. Context carrier helpers (`ContextWithTracer`, `ContextWithMetricFactory`, `ContextWithLogger`, `ContextWithSpanAttributes`) for propagating observability primitives through `context.Context`.
+Shared OTEL attribute prefixes, metric names (including the `gen_ai.*` generative-AI attributes and client metrics), event names, database system identifiers, header constants (`traceparent`, `Traceparent`, `Tracestate`), label sanitization (`SanitizeMetricLabel`), and sensitive field detection for cross-cutting redaction. Context carrier helpers (`ContextWithTracer`, `ContextWithMetricFactory`, `ContextWithLogger`, `ContextWithSpanAttributes`) for propagating observability primitives through `context.Context`.
 
 ### Redaction engine
 
