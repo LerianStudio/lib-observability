@@ -12,9 +12,11 @@ Full OpenTelemetry SDK lifecycle management: OTLP/gRPC exporter setup for traces
 
 Thread-safe `MetricsFactory` with lazy instrument caching and a fluent builder API for Counters, Gauges, and Histograms. Provides `.WithLabels()` / `.WithAttributes()` chaining followed by `.Add()`, `.Set()`, or `.Record()` — all with explicit error returns. Includes pre-configured domain metric recorders (accounts, transactions, routes, operations) and system infrastructure gauges (CPU, memory). Ships a `NewNopFactory()` for tests and disabled-metrics environments.
 
-### Outbound HTTP client instrumentation (`httpobs`)
+### HTTP client and server instrumentation (`httpobs`)
 
 A thin, nil-safe wrapper over `otelhttp` that turns an outbound HTTP transport into an instrumented one: every outbound request is classified as a call to an external dependency (span kind `CLIENT`) and emits `http.client.request.duration` (seconds). `NewTransport(base, opts...)` wraps the transport the app already built (preserving its TLS/timeout/proxy config); `NewClient(base, opts...)` is a convenience returning a ready `*http.Client`. Bounded span name by default (`HTTP <METHOD>`), no-op when telemetry is off. See "Outbound call instrumentation" below.
+
+`NewHandler(next, opts...)` is the inbound counterpart for a **stdlib `net/http` server** (a Fiber v3 app uses `middleware.WithTelemetry` instead — never both on the same server). It produces a `SERVER` span and emits `http.server.request.duration` (seconds). The default span name is the method plus the registered route pattern (`r.Pattern`, set by the Go 1.22+ `ServeMux`) — `GET /users/{id}`, or the method alone when nothing matched — never the concrete URL path. A method-qualified registration (`"GET /users/{id}"`) names the span exactly like a bare one: the pattern's own method prefix is dropped rather than repeated. Bodies and the `Authorization` header are never recorded. Inbound `traceparent` is **ignored by default** and every request starts a new root trace; pass `httpobs.WithPropagators(otel.GetTextMapPropagator())` to continue a trusted caller's trace — the same trust decision `TrustInboundTraceContext` expresses for the Fiber and gRPC paths.
 
 ### Manual client-span helper (`tracing.StartClientSpan`)
 

@@ -2,6 +2,7 @@ package httpobs
 
 import (
 	"net/http"
+	"strings"
 
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel"
@@ -84,8 +85,37 @@ func boundedSpanName(_ string, r *http.Request) string {
 	return "HTTP " + r.Method
 }
 
-// otelhttpOptions translates the resolved config into otelhttp options.
-func (c config) otelhttpOptions() []otelhttp.Option {
+// serverSpanName is the default span name formatter for INBOUND requests. It is
+// bounded to the method plus the registered route PATTERN (r.Pattern, set by the
+// Go 1.22+ http.ServeMux) and NEVER the concrete URL path, which can carry
+// ids/PII. Falls back to the method alone when no pattern matched the request.
+//
+// A ServeMux pattern is "[METHOD ][HOST]/[PATH]", so a method-qualified pattern
+// already carries the method ("GET /v1/host") and the space separates it. The
+// method prefix is dropped before the name is built, otherwise every request on
+// a method-qualified route would be named "GET GET /v1/host". Both registration
+// styles therefore yield the same name:
+//
+//	"GET /users/{id}"   -> "GET /users/{id}"
+//	"/users/{id}"       -> "GET /users/{id}"
+//	"GET example.com/x" -> "GET example.com/x"
+//	""                  -> "GET"
+func serverSpanName(_ string, r *http.Request) string {
+	if r.Pattern == "" {
+		return r.Method
+	}
+
+	route := r.Pattern
+	if i := strings.IndexByte(route, ' '); i >= 0 {
+		route = route[i+1:]
+	}
+
+	return r.Method + " " + route
+}
+
+// otelhttpOptions translates the resolved config into otelhttp options, using
+// defaultSpanName when the caller supplied no formatter of its own.
+func (c config) otelhttpOptions(defaultSpanName func(operation string, r *http.Request) string) []otelhttp.Option {
 	opts := []otelhttp.Option{
 		otelhttp.WithMeterProvider(c.meterProvider),
 		otelhttp.WithPropagators(c.propagator),
@@ -102,7 +132,7 @@ func (c config) otelhttpOptions() []otelhttp.Option {
 	// which could change and fold the path into the name.
 	formatter := c.spanNameFormatter
 	if formatter == nil {
-		formatter = boundedSpanName
+		formatter = defaultSpanName
 	}
 
 	opts = append(opts, otelhttp.WithSpanNameFormatter(formatter))
@@ -130,7 +160,7 @@ func NewTransport(base http.RoundTripper, opts ...Option) http.RoundTripper {
 
 	cfg := newConfig(opts...)
 
-	return otelhttp.NewTransport(base, cfg.otelhttpOptions()...)
+	return otelhttp.NewTransport(base, cfg.otelhttpOptions(boundedSpanName)...)
 }
 
 // NewClient returns an *http.Client whose Transport is the instrumented wrapper
@@ -138,4 +168,51 @@ func NewTransport(base http.RoundTripper, opts ...Option) http.RoundTripper {
 // timeout / proxy). base == nil uses http.DefaultTransport.
 func NewClient(base http.RoundTripper, opts ...Option) *http.Client {
 	return &http.Client{Transport: NewTransport(base, opts...)}
+}
+
+// NewHandler wraps next with OpenTelemetry HTTP SERVER instrumentation: every
+// inbound request produces a SpanKind=SERVER span and emits
+// http.server.request.duration (seconds). It is the inbound counterpart of
+// NewTransport, for a stdlib net/http server (including one served over a unix
+// socket); a Fiber v3 app uses middleware.WithTelemetry instead. Do not register
+// both on the same server - that records the duration histogram twice.
+//
+// # Span name (bounded by default)
+//
+// The default name is the method plus the registered route PATTERN - "GET
+// /users/{id}" - taken from r.Pattern, which the Go 1.22+ http.ServeMux sets;
+// with no pattern it is the method alone. A method-qualified registration
+// ("GET /users/{id}") names the span exactly like a bare one ("/users/{id}"):
+// the pattern's own method prefix is dropped rather than repeated. The concrete
+// URL path never enters the name. WithSpanNameFormatter overrides it and, per
+// docs/metrics-contract.md, MUST stay low-cardinality.
+//
+// # Inbound trace context (fail-closed by default)
+//
+// By DEFAULT the inbound traceparent/tracestate headers are IGNORED and every
+// request starts a NEW ROOT trace: a caller able to set traceparent otherwise
+// chooses the trace id this service records under and can force its sampling
+// decision. Pass otel.GetTextMapPropagator() (or any explicit propagator) via
+// WithPropagators to continue a trusted caller's trace. That is the same trust
+// decision tracing.TelemetryConfig.TrustInboundTraceContext expresses for the
+// Fiber and gRPC paths, spelled here as the propagator you hand in instead of a
+// second knob.
+//
+// # Payloads
+//
+// Request and response bodies and the Authorization header are NEVER recorded:
+// otelhttp does not capture them and this wrapper adds nothing that would.
+//
+// Nil-safe like NewTransport: with no TracerProvider configured (neither option
+// nor global) no span is produced, the metric degrades to no-op, and the request
+// is still served.
+func NewHandler(next http.Handler, opts ...Option) http.Handler {
+	// An EMPTY composite propagator extracts nothing, so inbound trace context
+	// is dropped unless the caller explicitly passes WithPropagators, which
+	// comes later in the slice and therefore wins.
+	resolved := append([]Option{WithPropagators(propagation.NewCompositeTextMapPropagator())}, opts...)
+
+	cfg := newConfig(resolved...)
+
+	return otelhttp.NewHandler(next, "", cfg.otelhttpOptions(serverSpanName)...)
 }

@@ -89,9 +89,11 @@ defer tel.ShutdownTelemetryWithContext(ctx) // flush/close no shutdown (ou tel.S
 
 ---
 
-## 2. HTTP server (Fiber v3 APENAS) — `middleware`
+## 2. HTTP server (Fiber v3) — `middleware`
 
-> ⚠️ O middleware HTTP exige **Fiber v3**. Se o app está em Fiber v2, PULE esta seção (o resto da lib funciona sem migrar Fiber). O midaz hoje não tem essa métrica; ganha ao migrar.
+> ⚠️ Este middleware exige **Fiber v3**. Se o app está em Fiber v2, PULE esta seção (o resto da lib funciona sem migrar Fiber). O midaz hoje não tem essa métrica; ganha ao migrar.
+>
+> Servidor **`net/http` da stdlib** (inclusive sobre unix socket) não usa este middleware: use `httpobs.NewHandler` (§6.5a). NUNCA os dois no mesmo servidor — duplica `http.server.request.duration`.
 
 Emite: `http.server.request.duration` (s) e `http.server.active_requests`.
 
@@ -309,6 +311,24 @@ client := httpobs.NewClient(baseTransport)
 - O caller DEVE ler e fechar o response body (o span fecha no close/EOF do body).
 - Opções: `WithMeterProvider`, `WithTracerProvider`, `WithPropagators`, `WithSpanNameFormatter`.
 
+### 6.5a HTTP server `net/http` (stdlib) — `httpobs.NewHandler`
+
+Contraparte de ENTRADA do `NewTransport`, para um `http.Server` da stdlib (inclusive servindo sobre unix socket). Span **SERVER** + `http.server.request.duration` (s). App em Fiber v3 usa o `middleware` (§2) — nunca os dois no mesmo servidor.
+
+```go
+mux := http.NewServeMux()
+mux.Handle("/v1/accounts/{id}", accountsHandler)
+
+srv := &http.Server{
+    Handler: httpobs.NewHandler(mux,
+        httpobs.WithTracerProvider(tel.TracerProvider),
+        httpobs.WithMeterProvider(tel.MeterProvider)),
+}
+```
+- Nome do span: método + **template da rota** (`r.Pattern`, que o `ServeMux` do Go 1.22+ preenche) — `GET /v1/accounts/{id}`; sem rota casada, só o método. O path concreto NUNCA entra no nome. Registrar com método (`mux.Handle("GET /v1/accounts/{id}", h)`) dá o MESMO nome que registrar sem: o prefixo de método do próprio pattern é descartado, nunca repetido. `WithSpanNameFormatter` sobrescreve e DEVE continuar low-cardinality.
+- Body de request/response e header `Authorization` nunca são gravados.
+- **Trace context de entrada é IGNORADO por padrão** (fail-closed, mesma postura do `TrustInboundTraceContext`): todo request começa um trace RAIZ novo, porque quem consegue setar `traceparent` escolheria o trace id deste serviço e forçaria a decisão de amostragem. Para continuar o trace de um chamador CONFIÁVEL, passe o propagador explicitamente: `httpobs.WithPropagators(otel.GetTextMapPropagator())`.
+
 ## 6.6 Saída sem wrapper (último recurso) — `tracing.StartClientSpan`
 
 Só para saídas que NÃO têm wrapper dedicado (ex.: MongoDB — sem otelmongo v2 estável; ou uma SDK/RPC custom). Marca o span como **CLIENT** sem você precisar lembrar do `trace.WithSpanKind`.
@@ -390,4 +410,4 @@ _ = c.WithAttributes(attribute.String("tenant.id", tenantID)).AddOne(ctx)
 
 ## 10. O que NÃO está disponível ainda
 - **MongoDB wrapper dedicado** (`mongoobs` estilo sqlobs/redisobs): adiado — otelmongo v2 sem release estável. **Enquanto isso**, instrumente saídas Mongo com `tracing.StartClientSpan` (§6.6) — span CLIENT correto, sem métrica automática.
-- **HTTP server**: exige Fiber v3 (§2). Apps ainda em Fiber v2 não têm a métrica HTTP server nativa até migrarem; todo o resto (DB/cache/fila/HTTP client/gRPC/runtime) funciona independente do Fiber.
+- **HTTP server em Fiber v2**: o middleware do §2 exige Fiber v3. Apps ainda em Fiber v2 não têm a métrica HTTP server nativa até migrarem; todo o resto (DB/cache/fila/HTTP client/gRPC/runtime) funciona independente do Fiber. Servidor `net/http` da stdlib JÁ é coberto por `httpobs.NewHandler` (§6.5a).
