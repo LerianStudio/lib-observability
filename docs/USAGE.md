@@ -104,6 +104,24 @@ defer tel.ShutdownTelemetryWithContext(ctx) // flush/close no shutdown (ou tel.S
 
 ---
 
+### 1a. Logger (`zap`) — dois botões que o ambiente não decide por você
+
+O `zap.New(zap.Config{...})` deriva encoder e amostragem do `Environment`. Dois campos opcionais quebram esse acoplamento quando ele não serve:
+
+```go
+logger, err := zap.New(zap.Config{
+    Environment:     zap.EnvironmentDevelopment,
+    OTelLibraryName: os.Getenv("OTEL_LIBRARY_NAME"),
+    Encoding:        "json", // opt-in: encoder explícito ("json" | "console")
+    DisableSampling: true,   // opt-in: sem sampler, nenhuma linha some
+})
+```
+
+- **`Encoding`** → escolhe o encoder **direto**, sem passar pelo `Environment`. Serve ao processo cujo config próprio pede JSON enquanto o ambiente de deploy é `development`: antes ele precisava **mentir o ambiente** para conseguir JSON. Vazio mantém o comportamento de sempre. Precedência **igual à do `Level`**: o campo vence, `LOG_ENCODING` é o fallback, o `Environment` é o default. Valor desconhecido → **erro do `New`** (nunca fallback silencioso: typo de config aparece no start-up).
+- **`DisableSampling`** → remove o sampler. O perfil de produção amostra **100:100**: passada a centésima cópia de uma mensagem dentro de um segundo, só a cada 100ª é escrita e **o resto some sem registro**. Para serviço sob carga é o trade certo; para log de diagnóstico que um humano lê depois (agent harness, CLI, job cujo output é a entrega) linha perdida é pista perdida — ligue lá. `false` mantém a amostragem.
+
+---
+
 ## 2. HTTP server (Fiber v3) — `middleware`
 
 > ⚠️ Este middleware exige **Fiber v3**. Se o app está em Fiber v2, PULE esta seção (o resto da lib funciona sem migrar Fiber). O midaz hoje não tem essa métrica; ganha ao migrar.
