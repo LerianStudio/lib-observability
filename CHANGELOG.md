@@ -296,6 +296,13 @@ BREAKING BEHAVIOR (not yet released):
   logger set to `LevelInfo` always had. Expect access-log volume to increase
   for any caller relying on the old default.
 
+Fixes:
+
+- A clean telemetry shutdown no longer reports `gRPC exporter is shutdown`: each
+  provider already drains the exporter it owns, so `ShutdownTelemetry`/
+  `ShutdownTelemetryWithContext` no longer shut the same exporter down a second
+  time and a normal process exit returns no error. (@fredcamaral)
+
 Known limitations (documented, not addressed by this release):
 
 - **`grpcmiddleware.ResolveTenantIDFromGRPC` still reads a caller-controlled
