@@ -12,8 +12,6 @@ import (
 	"github.com/LerianStudio/lib-observability/v4/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.opentelemetry.io/otel/exporters/otlp/otlptrace"
-	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
@@ -46,21 +44,6 @@ func countSampled(t *testing.T, tp *sdktrace.TracerProvider, n int) int {
 	}
 
 	return sampled
-}
-
-// unconnectedTraceExporter builds a real OTLP/gRPC exporter that never reaches a
-// collector. gRPC dials lazily, so this needs no network; it exists only because
-// newTracerProvider takes a concrete *otlptrace.Exporter.
-func unconnectedTraceExporter(t *testing.T) *otlptrace.Exporter {
-	t.Helper()
-
-	exp, err := otlptracegrpc.New(context.Background(),
-		otlptracegrpc.WithEndpoint("127.0.0.1:1"),
-		otlptracegrpc.WithInsecure())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = exp.Shutdown(context.Background()) })
-
-	return exp
 }
 
 func TestSampler_ZeroRatioKeepsSDKDefault(t *testing.T) {
@@ -131,13 +114,13 @@ func TestSampler_SampledParentOverridesRatio(t *testing.T) {
 // newTracerProvider is the only place the sampler is applied; this pins the
 // wiring so a future edit cannot build the sampler and forget to pass it.
 func TestNewTracerProvider_AppliesSampleRatio(t *testing.T) {
-	exp := unconnectedTraceExporter(t)
-
-	all := (&TelemetryConfig{SampleRatio: 1, Redactor: NewDefaultRedactor()}).newTracerProvider(nil, exp)
+	all := (&TelemetryConfig{SampleRatio: 1, Redactor: NewDefaultRedactor()}).
+		newTracerProvider(nil, &countingSpanExporter{})
 	t.Cleanup(func() { _ = all.Shutdown(context.Background()) })
 	assert.Equal(t, 100, countSampled(t, all, 100), "SampleRatio 1 must reach the built provider")
 
-	none := (&TelemetryConfig{SampleRatio: 1e-9, Redactor: NewDefaultRedactor()}).newTracerProvider(nil, exp)
+	none := (&TelemetryConfig{SampleRatio: 1e-9, Redactor: NewDefaultRedactor()}).
+		newTracerProvider(nil, &countingSpanExporter{})
 	t.Cleanup(func() { _ = none.Shutdown(context.Background()) })
 	assert.Equal(t, 0, countSampled(t, none, 100), "a vanishing SampleRatio must reach the built provider")
 }

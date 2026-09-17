@@ -88,10 +88,7 @@ func telemetryOverCountingExporters(t *testing.T) (
 	mExp := &countingMetricExporter{}
 	lExp := &countingLogExporter{}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	tl, err := buildTelemetry(ctx, TelemetryConfig{
+	tl, err := buildTelemetry(shutdownContext(t), TelemetryConfig{
 		LibraryName: "shutdown-test",
 		ServiceName: "shutdown-test",
 		Logger:      log.NewNop(),
