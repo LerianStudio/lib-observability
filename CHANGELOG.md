@@ -1,5 +1,14 @@
 # Lib-observability Changelog
 
+## [4.4.0](https://github.com/LerianStudio/lib-observability/releases/tag/v4.4.0)
+
+Features:
+- Introduced the ability to select the encoder and disable the sampler through configuration settings. (@fredcamaral)
+
+[Compare changes](https://github.com/LerianStudio/lib-observability/compare/v4.3.0...v4.4.0)
+
+---
+
 ## [4.3.0](https://github.com/LerianStudio/lib-observability/releases/tag/v4.3.0)
 
 Features:
