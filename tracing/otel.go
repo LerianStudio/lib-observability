@@ -352,48 +352,76 @@ func handleEmptyEndpoint(cfg TelemetryConfig) (*Telemetry, error) {
 // initExporters creates OTLP exporters, providers, and a metrics factory,
 // rolling back partial allocations on failure.
 func initExporters(ctx context.Context, cfg TelemetryConfig, options telemetryOptions) (*Telemetry, error) {
+	tExp, mExp, lExp, err := cfg.newExporters(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	return buildTelemetry(ctx, cfg, options, tExp, mExp, lExp)
+}
+
+// newExporters creates the three OTLP gRPC exporters, shutting down the ones
+// already built when a later one fails. Nothing owns them yet at this point,
+// so they are the only thing there is to roll back.
+func (tl *TelemetryConfig) newExporters(ctx context.Context) (
+	sdktrace.SpanExporter, sdkmetric.Exporter, sdklog.Exporter, error,
+) {
+	var built []shutdownable
+
+	tExp, err := tl.newTracerExporter(ctx)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("can't initialize tracer exporter: %w", err)
+	}
+
+	built = append(built, tExp)
+
+	mExp, err := tl.newMetricExporter(ctx)
+	if err != nil {
+		shutdownAll(ctx, built)
+
+		return nil, nil, nil, fmt.Errorf("can't initialize metric exporter: %w", err)
+	}
+
+	built = append(built, mExp)
+
+	lExp, err := tl.newLoggerExporter(ctx)
+	if err != nil {
+		shutdownAll(ctx, built)
+
+		return nil, nil, nil, fmt.Errorf("can't initialize logger exporter: %w", err)
+	}
+
+	return tExp, mExp, lExp, nil
+}
+
+// buildTelemetry wires the providers over the supplied exporters and assembles
+// the Telemetry instance, rolling back the providers if a later step fails.
+//
+// Each provider OWNS the exporter it is handed: sdktrace's batcher, sdkmetric's
+// PeriodicReader and sdklog's BatchProcessor each call Shutdown on the exporter
+// as part of the provider's own Shutdown. So from here on the exporters are
+// deliberately absent from both the rollback list and the shutdown handlers -
+// draining one a second time is what makes otlpmetricgrpc answer "gRPC exporter
+// is shutdown" and turns a clean process exit into a reported drain failure.
+func buildTelemetry(
+	ctx context.Context,
+	cfg TelemetryConfig,
+	options telemetryOptions,
+	tExp sdktrace.SpanExporter,
+	mExp sdkmetric.Exporter,
+	lExp sdklog.Exporter,
+) (*Telemetry, error) {
 	r := cfg.newResource()
 
-	// Track all allocated resources for rollback if a later step fails.
-	var cleanups []shutdownable
-
-	tExp, err := cfg.newTracerExporter(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("can't initialize tracer exporter: %w", err)
-	}
-
-	cleanups = append(cleanups, tExp)
-
-	mExp, err := cfg.newMetricExporter(ctx)
-	if err != nil {
-		shutdownAll(ctx, cleanups)
-
-		return nil, fmt.Errorf("can't initialize metric exporter: %w", err)
-	}
-
-	cleanups = append(cleanups, mExp)
-
-	lExp, err := cfg.newLoggerExporter(ctx)
-	if err != nil {
-		shutdownAll(ctx, cleanups)
-
-		return nil, fmt.Errorf("can't initialize logger exporter: %w", err)
-	}
-
-	cleanups = append(cleanups, lExp)
-
 	mp := cfg.newMeterProvider(r, mExp, options.metricCardinalityLimit)
-	cleanups = append(cleanups, mp)
-
 	tp := cfg.newTracerProvider(r, tExp)
-	cleanups = append(cleanups, tp)
-
 	lp := cfg.newLoggerProvider(r, lExp)
-	cleanups = append(cleanups, lp)
+
+	providers := []shutdownable{mp, tp, lp}
 
 	metricsFactory, err := metrics.NewMetricsFactory(mp.Meter(cfg.LibraryName), cfg.Logger)
 	if err != nil {
-		shutdownAll(ctx, cleanups)
+		shutdownAll(ctx, providers)
 
 		return nil, err
 	}
@@ -404,7 +432,7 @@ func initExporters(ctx context.Context, cfg TelemetryConfig, options telemetryOp
 	// observability.
 	startRuntimeMetrics(cfg, mp)
 
-	shutdown, shutdownCtx := buildShutdownHandlers(cfg.Logger, mp, tp, lp, tExp, mExp, lExp)
+	shutdown, shutdownCtx := buildShutdownHandlers(cfg.Logger, providers...)
 
 	return &Telemetry{
 		TelemetryConfig: cfg,
@@ -673,7 +701,7 @@ func (tl *TelemetryConfig) newTracerExporter(ctx context.Context) (*otlptrace.Ex
 	return otlptracegrpc.New(ctx, opts...)
 }
 
-func (tl *TelemetryConfig) newLoggerProvider(rsc *sdkresource.Resource, exp *otlploggrpc.Exporter) *sdklog.LoggerProvider {
+func (tl *TelemetryConfig) newLoggerProvider(rsc *sdkresource.Resource, exp sdklog.Exporter) *sdklog.LoggerProvider {
 	bp := sdklog.NewBatchProcessor(exp)
 	return sdklog.NewLoggerProvider(sdklog.WithResource(rsc), sdklog.WithProcessor(bp))
 }
@@ -709,7 +737,7 @@ func (tl *TelemetryConfig) sampler() sdktrace.Sampler {
 	return sdktrace.ParentBased(sdktrace.TraceIDRatioBased(tl.SampleRatio))
 }
 
-func (tl *TelemetryConfig) newTracerProvider(rsc *sdkresource.Resource, exp *otlptrace.Exporter) *sdktrace.TracerProvider {
+func (tl *TelemetryConfig) newTracerProvider(rsc *sdkresource.Resource, exp sdktrace.SpanExporter) *sdktrace.TracerProvider {
 	opts := []sdktrace.TracerProviderOption{
 		sdktrace.WithResource(rsc),
 		sdktrace.WithSpanProcessor(RedactingAttrBagSpanProcessor{Redactor: tl.Redactor}),
