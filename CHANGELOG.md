@@ -1,5 +1,17 @@
 # Lib-observability Changelog
 
+## [4.4.1](https://github.com/LerianStudio/lib-observability/releases/tag/v4.4.1)
+
+Fixes:
+- Ensure each owned exporter is shut down only once to prevent redundant operations. (@fredcamaral)
+
+Improvements:
+- Stub the sampling exporter and scope the build context to enhance testing capabilities. (@fredcamaral)
+
+[Compare changes](https://github.com/LerianStudio/lib-observability/compare/v4.4.0...v4.4.1)
+
+---
+
 ## [4.4.0](https://github.com/LerianStudio/lib-observability/releases/tag/v4.4.0)
 
 Features:
