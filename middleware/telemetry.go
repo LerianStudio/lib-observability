@@ -363,9 +363,11 @@ func (tm *TelemetryMiddleware) WithTelemetry(tl *tracing.Telemetry, excludedRout
 // It records none of the middleware's own metrics, even when the Telemetry has
 // both a MeterProvider and a MetricsFactory: no http.server.request.duration,
 // no http.server.active_requests, no per-tenant instruments, and no background
-// host-metrics collector. ContextWithMetricFactory is still installed, so
-// application code that records its own metrics through the factory is
-// unaffected - only this middleware stays silent.
+// host-metrics collector. On the tracer path ContextWithMetricFactory is still
+// installed, so application code that records its own metrics through the
+// factory is unaffected - only this middleware stays silent. A Telemetry with
+// no TracerProvider returns from the no-tracer branch before that wiring,
+// exactly as WithTelemetry does.
 //
 // Use it when the application already owns its HTTP RED metrics and needs them
 // emitted once, under its own instrument names, route template, and labels.

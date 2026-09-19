@@ -173,8 +173,9 @@ correlação e mesmo wiring de contexto do `WithTelemetry`, porém sem emitir
 métrica alguma (nem `http.server.request.duration`, nem
 `http.server.active_requests`, nem os instrumentos por tenant, nem o coletor
 de métricas de host), mesmo com `MeterProvider` e `MetricsFactory`
-configurados. O metrics factory continua no contexto da requisição, então as
-métricas da própria aplicação seguem intactas. Registre só uma das três
+configurados. No caminho com tracer, o metrics factory continua no contexto da
+requisição, então as métricas da própria aplicação seguem intactas; sem
+`TracerProvider` configurado, esse wiring é pulado, igual ao `WithTelemetry`. Registre só uma das três
 variantes: duas delas duplicam o span e a métrica.
 
 ```go

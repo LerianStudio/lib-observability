@@ -141,21 +141,6 @@ never fall back to a header, baggage, metadata, or generic span attribute.
 > two of them records `http.server.request.duration` twice, corrupting RPS and
 > error-rate queries, and starts the server span twice.
 
-`WithTracingOnly` is for a service that already emits its own HTTP RED metrics
-and needs them emitted once, under its own instrument names, route template,
-and labels. It produces the same server span, request-id header, and context
-wiring as `WithTelemetry`, and records nothing itself — no
-`http.server.request.duration`, no `http.server.active_requests`, no per-tenant
-instrument, and no background host-metrics collector — even when the
-`Telemetry` carries a `MeterProvider` and a `MetricsFactory`. The metrics
-factory stays on the request context, so the application's own metrics are
-unaffected.
-
-```go
-mid := middleware.NewTelemetryMiddleware(telemetry)
-app.Use(mid.WithTracingOnly(telemetry))
-```
-
 ```go
 mid := middleware.NewTelemetryMiddleware(telemetry)
 app.Use(mid.WithAuthenticatedTenantHTTPMetrics(telemetry))
@@ -236,6 +221,22 @@ standard HTTP metric and are omitted from all tenant metrics. A later
 `ContextWithAuthenticatedTenant` or `ContextWithAuthenticatedTenantID` call
 replaces the earlier value; `uuid.Nil` clears it. The ID-only helper remains
 supported and emits the metrics without `tenant.slug`.
+
+`WithTracingOnly` is for a service that already emits its own HTTP RED metrics
+and needs them emitted once, under its own instrument names, route template,
+and labels. It produces the same server span, request-id header, and context
+wiring as `WithTelemetry`, and records nothing itself — no
+`http.server.request.duration`, no `http.server.active_requests`, no per-tenant
+instrument, and no background host-metrics collector — even when the
+`Telemetry` carries a `MeterProvider` and a `MetricsFactory`. On the tracer
+path the metrics factory stays on the request context, so the application's
+own metrics are unaffected; with no `TracerProvider` configured this handler
+returns before that wiring, exactly as `WithTelemetry` does.
+
+```go
+mid := middleware.NewTelemetryMiddleware(telemetry)
+app.Use(mid.WithTracingOnly(telemetry))
+```
 
 ## Tenant ID propagation
 
