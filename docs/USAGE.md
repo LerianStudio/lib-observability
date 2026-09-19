@@ -176,7 +176,9 @@ de métricas de host), mesmo com `MeterProvider` e `MetricsFactory`
 configurados. No caminho com tracer, o metrics factory continua no contexto da
 requisição, então as métricas da própria aplicação seguem intactas; sem
 `TracerProvider` configurado, esse wiring é pulado, igual ao `WithTelemetry`. Registre só uma das três
-variantes: duas delas duplicam o span e a métrica.
+variantes: qualquer par duplica o span; o par `WithTelemetry` +
+`WithAuthenticatedTenantHTTPMetrics` duplica também `http.server.request.duration`;
+`WithTracingOnly` ao lado de qualquer uma duplica só o span, porque não emite métrica.
 
 ```go
 tm := middleware.NewTelemetryMiddleware(tel)
@@ -452,7 +454,7 @@ _ = c.WithAttributes(attribute.String("tenant.id", tenantID)).AddOne(ctx)
 7. [ ] Saídas sem wrapper (Mongo, RPC custom): trocar `tracer.Start(...)` por `tracing.StartClientSpan(...)`. NÃO duplicar com outro wrapper.
 8. [ ] HTTP server (Fiber v3): `tm := middleware.NewTelemetryMiddleware(tel)` + `app.Use(tm.WithTelemetry(tel))` (ou `tm.WithTracingOnly(tel)` se o serviço já emite as próprias métricas RED de HTTP).
 9. [ ] Negócio: garantir `Record*`/Counter nos pontos-chave (tenant.id explícito).
-10. [ ] Validar no Grafana/Mimir: `db.client.operation.duration`, `rpc.*.duration`, `messaging.*.duration`, `http.client.request.duration`, `http.server.request.duration`, `go.*` aparecem para o `service.name` do serviço.
+10. [ ] Validar no Grafana/Mimir: `db.client.operation.duration`, `rpc.*.duration`, `messaging.*.duration`, `http.client.request.duration`, `go.*` aparecem para o `service.name` do serviço; com `WithTelemetry`, também `http.server.request.duration`; com `WithTracingOnly`, as métricas RED da própria aplicação aparecem e `http.server.request.duration` NÃO aparece para esse `service.name`.
 
 ## 9. Regras invioláveis (cardinalidade / PII)
 - Unidade sempre segundos. Nunca ms na app.

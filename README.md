@@ -138,8 +138,10 @@ never fall back to a header, baggage, metadata, or generic span attribute.
 > mutually exclusive: `WithTelemetry` (spans plus the standard HTTP server
 > metrics), `WithAuthenticatedTenantHTTPMetrics` (the same, plus the per-tenant
 > instruments), and `WithTracingOnly` (spans and no metric at all). Registering
-> two of them records `http.server.request.duration` twice, corrupting RPS and
-> error-rate queries, and starts the server span twice.
+> any two of them starts the server span twice. Registering both metric-emitting
+> variants also records `http.server.request.duration` twice, corrupting RPS and
+> error-rate queries; `WithTracingOnly` beside either of them doubles only the
+> span, since it emits no metric.
 
 ```go
 mid := middleware.NewTelemetryMiddleware(telemetry)
