@@ -1,5 +1,113 @@
 # Lib-observability Changelog
 
+## [4.4.1](https://github.com/LerianStudio/lib-observability/releases/tag/v4.4.1)
+
+Fixes:
+- Ensure each owned exporter is shut down only once to prevent redundant operations. (@fredcamaral)
+
+Improvements:
+- Stub the sampling exporter and scope the build context to enhance testing capabilities. (@fredcamaral)
+
+[Compare changes](https://github.com/LerianStudio/lib-observability/compare/v4.4.0...v4.4.1)
+
+---
+
+## [4.4.0](https://github.com/LerianStudio/lib-observability/releases/tag/v4.4.0)
+
+Features:
+- Introduced the ability to select the encoder and disable the sampler through configuration settings. (@fredcamaral)
+
+[Compare changes](https://github.com/LerianStudio/lib-observability/compare/v4.3.0...v4.4.0)
+
+---
+
+## [4.3.0](https://github.com/LerianStudio/lib-observability/releases/tag/v4.3.0)
+
+Features:
+- Server spans now carry the route template instead of the caller's path. (@fredcamaral)
+
+Fixes:
+- The route template is rewritten during a panic and without the host. (@fredcamaral)
+
+Improvements:
+- Made the attribute set addressable before reading it in tests. (@fredcamaral)
+- Shared the unmatched-route template in constants. (@fredcamaral)
+
+[Compare changes](https://github.com/LerianStudio/lib-observability/compare/v4.2.0...v4.3.0)
+
+---
+
+## [4.2.0](https://github.com/LerianStudio/lib-observability/releases/tag/v4.2.0)
+
+Features:
+- Record the request URL without including query, fragment, or user information. (@fredcamaral)
+
+Fixes:
+- Ensure the opaque request target is scrubbed properly. (@fredcamaral)
+- Honor `InsecureExporter=false` when the environment endpoint lacks a scheme. (@fredcamaral)
+
+Improvements:
+- Align comments in the `httpobs` package regarding the opaque target. (@fredcamaral)
+- Clarify what `url.full` retains when the request target is opaque. (@fredcamaral)
+- Assert the entire opaque request target during testing. (@fredcamaral)
+
+[Compare changes](https://github.com/LerianStudio/lib-observability/compare/v4.1.0...v4.2.0)
+
+---
+
+## [4.1.0](https://github.com/LerianStudio/lib-observability/releases/tag/v4.1.0)
+
+Features:
+- Introduced `NewHandler` for `net/http` servers to enhance HTTP observability. (@fredcamaral)
+- Added telemetry names for `gen_ai` and introduced a `sqlite` database system. (@fredcamaral)
+- Implemented builders for float64 counter, gauge, and histogram metrics. (@fredcamaral)
+- Added `ForceFlush` to the Telemetry API for improved tracing control. (@fredcamaral)
+- Introduced `SampleRatio` configuration to the telemetry settings for tracing. (@fredcamaral)
+- Enabled `Config.Output` in the Zap logger to direct log entries to a specified writer. (@fredcamaral)
+
+Fixes:
+- Addressed an issue in metrics where NaN and non-increasing histogram boundaries are now refused. (@fredcamaral)
+- Resolved a problem in `httpobs` by removing the separator from the span name in every `ServeMux` method. (@fredcamaral)
+
+Improvements:
+- Updated documentation to clarify that the logger provider is registered only when present. (@fredcamaral)
+- Enhanced documentation to specify that `ApplyGlobals` is the caller's responsibility and mapped every inbound server helper. (@fredcamaral)
+
+[Compare changes](https://github.com/LerianStudio/lib-observability/compare/v4.0.4...v4.1.0)
+
+---
+
+## [4.0.4](https://github.com/LerianStudio/lib-observability/releases/tag/v4.0.4)
+
+Fixes:
+
+- Moved the OpenTelemetry log family together to ensure that consumers can build successfully. (@fredcamaral)
+
+[Compare changes](https://github.com/LerianStudio/lib-observability/compare/v4.0.3...v4.0.4)
+
+---
+
+## [4.0.3](https://github.com/LerianStudio/lib-observability/releases/tag/v4.0.3)
+
+Fixes:
+- Ensure the `tenant.id` is included in the HTTP access log to improve traceability and debugging. (@rodrigodh)
+
+[Compare changes](https://github.com/LerianStudio/lib-observability/compare/v4.0.2...v4.0.3)
+
+---
+
+## [4.0.2](https://github.com/LerianStudio/lib-observability/releases/tag/v4.0.2)
+
+Fixes:
+- Render `tenant.id` labels in the canonical dashless form. (@rodrigodh)
+
+Improvements:
+- Backmerge main into develop to ensure consistency and up-to-date changes. (@rodrigodh)
+
+[Compare changes](https://github.com/LerianStudio/lib-observability/compare/v4.0.1...v4.0.2)
+
+---
+
 ## [4.0.1](https://github.com/LerianStudio/lib-observability/releases/tag/v4.0.1)
 
 Fixes:
