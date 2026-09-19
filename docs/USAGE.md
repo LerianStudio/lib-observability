@@ -167,6 +167,24 @@ reutilizado. Um slug ausente é omitido sem impedir a emissão da métrica. Cada
 slug anterior pode permanecer no estado cumulativo do SDK durante a vida do
 processo; inclua esse histórico ao dimensionar `WithMetricCardinalityLimit`.
 
+Um serviço que já emite as próprias métricas RED de HTTP usa a terceira
+variante, `WithTracingOnly`: mesmo span de servidor, mesmo header de
+correlação e mesmo wiring de contexto do `WithTelemetry`, porém sem emitir
+métrica alguma (nem `http.server.request.duration`, nem
+`http.server.active_requests`, nem os instrumentos por tenant, nem o coletor
+de métricas de host), mesmo com `MeterProvider` e `MetricsFactory`
+configurados. No caminho com tracer, o metrics factory continua no contexto da
+requisição, então as métricas da própria aplicação seguem intactas; sem
+`TracerProvider` configurado, esse wiring é pulado, igual ao `WithTelemetry`. Registre só uma das três
+variantes: qualquer par duplica o span; o par `WithTelemetry` +
+`WithAuthenticatedTenantHTTPMetrics` duplica também `http.server.request.duration`;
+`WithTracingOnly` ao lado de qualquer uma duplica só o span, porque não emite métrica.
+
+```go
+tm := middleware.NewTelemetryMiddleware(tel)
+app.Use(tm.WithTracingOnly(tel))
+```
+
 Para anexar atributo de parâmetro a um span HTTP (ex.: entity id) SEM PII:
 ```go
 middleware.SetSpanAttributeForParam(c, "account_id", id, "account") // c é fiber.Ctx (v3)
@@ -434,9 +452,9 @@ _ = c.WithAttributes(attribute.String("tenant.id", tenantID)).AddOne(ctx)
 5. [ ] RabbitMQ: envolver produce/consume com `messagingobs`. Remover spans de fila manuais.
 6. [ ] HTTP client (saídas): usar `httpobs.NewTransport/NewClient` no `*http.Client` de chamadas externas. Remover spans de saída HTTP manuais.
 7. [ ] Saídas sem wrapper (Mongo, RPC custom): trocar `tracer.Start(...)` por `tracing.StartClientSpan(...)`. NÃO duplicar com outro wrapper.
-8. [ ] HTTP server (Fiber v3): `tm := middleware.NewTelemetryMiddleware(tel)` + `app.Use(tm.WithTelemetry(tel))`.
+8. [ ] HTTP server (Fiber v3): `tm := middleware.NewTelemetryMiddleware(tel)` + `app.Use(tm.WithTelemetry(tel))` (ou `tm.WithTracingOnly(tel)` se o serviço já emite as próprias métricas RED de HTTP).
 9. [ ] Negócio: garantir `Record*`/Counter nos pontos-chave (tenant.id explícito).
-10. [ ] Validar no Grafana/Mimir: `db.client.operation.duration`, `rpc.*.duration`, `messaging.*.duration`, `http.client.request.duration`, `http.server.request.duration`, `go.*` aparecem para o `service.name` do serviço.
+10. [ ] Validar no Grafana/Mimir: `db.client.operation.duration`, `rpc.*.duration`, `messaging.*.duration`, `http.client.request.duration`, `go.*` aparecem para o `service.name` do serviço; com `WithTelemetry`, também `http.server.request.duration`; com `WithTracingOnly`, as métricas RED da própria aplicação aparecem e `http.server.request.duration` NÃO aparece para esse `service.name`.
 
 ## 9. Regras invioláveis (cardinalidade / PII)
 - Unidade sempre segundos. Nunca ms na app.
