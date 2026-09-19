@@ -134,10 +134,12 @@ Applications that need tenant-level HTTP telemetry can opt into four separate
 UUID and optional display name resolved from a validated credential; the metrics
 never fall back to a header, baggage, metadata, or generic span attribute.
 
-> **Do not register both middlewares.** `WithAuthenticatedTenantHTTPMetrics`
-> already includes the standard `WithTelemetry` behavior. Registering both on
-> the same app records `http.server.request.duration` twice and corrupts RPS and
-> error-rate queries.
+> **Register exactly one HTTP telemetry middleware.** The three variants are
+> mutually exclusive: `WithTelemetry` (spans plus the standard HTTP server
+> metrics), `WithAuthenticatedTenantHTTPMetrics` (the same, plus the per-tenant
+> instruments), and `WithTracingOnly` (spans and no metric at all). Registering
+> two of them records `http.server.request.duration` twice, corrupting RPS and
+> error-rate queries, and starts the server span twice.
 
 ```go
 mid := middleware.NewTelemetryMiddleware(telemetry)
@@ -219,6 +221,22 @@ standard HTTP metric and are omitted from all tenant metrics. A later
 `ContextWithAuthenticatedTenant` or `ContextWithAuthenticatedTenantID` call
 replaces the earlier value; `uuid.Nil` clears it. The ID-only helper remains
 supported and emits the metrics without `tenant.slug`.
+
+`WithTracingOnly` is for a service that already emits its own HTTP RED metrics
+and needs them emitted once, under its own instrument names, route template,
+and labels. It produces the same server span, request-id header, and context
+wiring as `WithTelemetry`, and records nothing itself — no
+`http.server.request.duration`, no `http.server.active_requests`, no per-tenant
+instrument, and no background host-metrics collector — even when the
+`Telemetry` carries a `MeterProvider` and a `MetricsFactory`. On the tracer
+path the metrics factory stays on the request context, so the application's
+own metrics are unaffected; with no `TracerProvider` configured this handler
+returns before that wiring, exactly as `WithTelemetry` does.
+
+```go
+mid := middleware.NewTelemetryMiddleware(telemetry)
+app.Use(mid.WithTracingOnly(telemetry))
+```
 
 ## Tenant ID propagation
 

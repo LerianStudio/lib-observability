@@ -877,7 +877,7 @@ func TestAuthenticatedTenantHTTPMetrics_DocumentedScenarioDoesNotOverflow(t *tes
 	)
 
 	tel, reader := newMetricsHarness(t)
-	instruments := newHTTPServerInstruments(tel, true)
+	instruments := newHTTPServerInstruments(tel, httpTelemetryAuthenticatedTenant)
 	require.NotNil(t, instruments.tenantRequests)
 	require.NotNil(t, instruments.tenant5xx)
 	require.NotNil(t, instruments.tenant4xx)
