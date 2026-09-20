@@ -50,6 +50,11 @@ func TestIsSensitiveField(t *testing.T) {
 		{name: "long token word boundary", field: "customer_email_hash", want: true},
 		{name: "extra exact", field: "tenantSecret", extra: []string{"tenantSecret"}, want: true},
 		{name: "extra word boundary", field: "billing_custom_field", extra: []string{"custom"}, want: true},
+		// These two go through the token splitter, not word-boundary matching:
+		// "pin" and "pan" are exact-token patterns, so a separator the splitter
+		// stops recognising silently un-redacts them.
+		{name: "dotted short token", field: "user.pin", want: true},
+		{name: "dashed short token", field: "card-pan", want: true},
 		{name: "safe field", field: "publicIdentifier", want: false},
 	}
 
