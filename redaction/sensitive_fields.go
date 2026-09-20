@@ -40,6 +40,8 @@ var defaultSensitiveFields = []string{
 	"client_secret",
 	"passwd",
 	"passphrase",
+	"pass",
+	"pwd",
 	"card_number",
 	"cardnumber",
 	"cvv",
@@ -134,6 +136,8 @@ func DefaultSensitiveFieldsMap() map[string]bool {
 var shortSensitiveTokens = map[string]bool{
 	"key":  true,
 	"auth": true,
+	"pass": true,
+	"pwd":  true,
 	"pin":  true,
 	"otp":  true,
 	"cvv":  true,

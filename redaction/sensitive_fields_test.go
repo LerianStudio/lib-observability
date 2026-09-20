@@ -74,3 +74,48 @@ func TestMatchesWordBoundary(t *testing.T) {
 	assert.True(t, isAlphanumeric('Z'))
 	assert.True(t, isAlphanumeric('9'))
 }
+
+func TestIsSensitiveFieldPassAndPwdTokens(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name  string
+		field string
+		want  bool
+	}{
+		// Credential spellings that products emit as container env vars and log keys.
+		{name: "screaming snake pass", field: "DB_PASS", want: true},
+		{name: "screaming snake pwd", field: "MYSQL_PWD", want: true},
+		{name: "bare pass", field: "pass", want: true},
+		{name: "bare pwd", field: "pwd", want: true},
+		{name: "upper bare pwd", field: "PWD", want: true},
+		{name: "snake pass", field: "db_pass", want: true},
+		{name: "snake pwd", field: "redis_pwd", want: true},
+		{name: "camel pass", field: "dbPass", want: true},
+		{name: "camel pwd", field: "dbPwd", want: true},
+		{name: "dotted pass", field: "service.pass", want: true},
+
+		// Ordinary words that merely contain "pass" must not be redacted.
+		// "pass" and "pwd" are exact-token matches, not substrings.
+		{name: "passenger is not a credential", field: "passenger_count", want: false},
+		{name: "compass is not a credential", field: "compass_heading", want: false},
+		{name: "bypass is not a credential", field: "bypass_cache", want: false},
+		{name: "passes is not a credential", field: "passes", want: false},
+		{name: "passive is not a credential", field: "passive_mode", want: false},
+		{name: "surpassed is not a credential", field: "surpassed", want: false},
+
+		// Known, accepted over-match: "pwd" as a token also reads a working
+		// directory as a credential. Masking a path beats leaking a password.
+		{name: "accepted over-match on working directory", field: "pwd_dir", want: true},
+
+		// "passport_number" is deliberately absent: it is PII that arguably
+		// belongs in the list, so pinning it to false would cement a leak.
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, IsSensitiveField(tt.field))
+		})
+	}
+}
