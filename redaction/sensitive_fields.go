@@ -2,7 +2,6 @@ package redaction
 
 import (
 	"maps"
-	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -40,6 +39,8 @@ var defaultSensitiveFields = []string{
 	"client_secret",
 	"passwd",
 	"passphrase",
+	"pass",
+	"pwd",
 	"card_number",
 	"cardnumber",
 	"cvv",
@@ -149,8 +150,27 @@ var shortSensitiveTokens = map[string]bool{
 	"city": true,
 }
 
-// tokenSplitRegex splits field names by non-alphanumeric characters.
-var tokenSplitRegex = regexp.MustCompile(`[^a-zA-Z0-9]+`)
+// sensitiveFieldTokens is every token that appears in defaultSensitiveFields:
+// "api_key" contributes "api" and "key". A folded plural whose singular is not
+// one of these cannot match any default field, so it is discarded before it
+// costs a second pass over the list.
+var sensitiveFieldTokens = sync.OnceValue(func() map[string]bool {
+	tokens := make(map[string]bool, len(defaultSensitiveFields)*2)
+	for _, field := range defaultSensitiveFields {
+		for _, token := range splitTokens(field) {
+			tokens[token] = true
+		}
+	}
+
+	return tokens
+})
+
+// splitTokens splits a field name into its alphanumeric tokens.
+func splitTokens(name string) []string {
+	return strings.FieldsFunc(name, func(r rune) bool {
+		return !isAlphanumeric(r)
+	})
+}
 
 // normalizeFieldName converts camelCase and PascalCase field names into
 // underscore-delimited lowercase tokens. For example, "sessionToken" becomes
@@ -183,12 +203,91 @@ func normalizeFieldName(fieldName string) string {
 	return strings.ToLower(b.String())
 }
 
+// singularizeTokens folds a single trailing "s" off every token whose singular
+// could still match something, appends those singulars to tokens, and returns
+// the rejoined singular spelling of the whole name. It returns "" when no fold
+// applies -- the common case, which then costs no second matching pass.
+//
+// Only one trailing "s" is folded, so "es" and "ies" plurals ("addresses",
+// "cities") are out of scope, and the original tokens are kept alongside the
+// folded ones so "address", "status", "class", "bus" and "pass" keep their own
+// verdict. A fold is kept only when its singular is a token of some default
+// field, which is lossless: a plural can only match a pattern whose own tokens
+// include that singular. Callers passing extra field names fold everything,
+// since those names are not in the default vocabulary.
+func singularizeTokens(tokens []string, foldAll bool) ([]string, string) {
+	known := sensitiveFieldTokens()
+
+	var folded []string
+
+	for i, token := range tokens {
+		if len(token) < 2 || token[len(token)-1] != 's' {
+			continue
+		}
+
+		singular := token[:len(token)-1]
+		if !foldAll && !known[singular] {
+			continue
+		}
+
+		if folded == nil {
+			folded = slices.Clone(tokens)
+		}
+
+		folded[i] = singular
+	}
+
+	if folded == nil {
+		return tokens, ""
+	}
+
+	return append(tokens, folded...), strings.Join(folded, "_")
+}
+
+// matchesDefaultFields reports whether any default sensitive field matches one
+// of the candidate spellings. Short tokens (like "key", "auth") must match a
+// whole token exactly; longer names match on word boundaries.
+func matchesDefaultFields(candidates, tokens []string) bool {
+	for _, sensitive := range defaultSensitiveFields {
+		if shortSensitiveTokens[sensitive] {
+			if slices.Contains(tokens, sensitive) {
+				return true
+			}
+
+			continue
+		}
+
+		for _, candidate := range candidates {
+			if matchesWordBoundary(candidate, sensitive) {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// matchesExtraFields reports whether any caller-supplied field name appears,
+// on a word boundary, in one of the candidate spellings.
+func matchesExtraFields(candidates, extra []string) bool {
+	for _, e := range extra {
+		eLower := strings.ToLower(e)
+		for _, candidate := range candidates {
+			if matchesWordBoundary(candidate, eLower) {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
 // IsSensitiveField checks if a field name is considered sensitive based on
 // the default sensitive fields list plus any extra fields provided. The check
-// is case-insensitive and handles camelCase field names by normalizing them to
-// underscore-delimited tokens. Short tokens (like "key", "auth") use exact
-// token matching to avoid false positives, while longer patterns use
-// word-boundary matching.
+// is case-insensitive and handles camelCase field names and plural field names
+// by normalizing them to underscore-delimited singular tokens. Short tokens
+// (like "key", "auth") use exact token matching to avoid false positives,
+// while longer patterns use word-boundary matching.
 //
 // Extra fields are additional field names to treat as sensitive beyond the
 // built-in default list. Pass them as individual string arguments.
@@ -196,52 +295,44 @@ func IsSensitiveField(fieldName string, extra ...string) bool {
 	m := ensureSensitiveFieldsMap()
 	lowerField := strings.ToLower(fieldName)
 
-	// Check exact match with lowercase against defaults
+	// Hot path: a field literally named "password" or "api_key" is answered
+	// here, before anything is normalized, split or allocated.
 	if m[lowerField] {
 		return true
 	}
 
-	// Check exact match against extra fields
 	for _, e := range extra {
 		if strings.EqualFold(fieldName, e) {
 			return true
 		}
 	}
 
-	// Also check with camelCase normalization (e.g., "sessionToken" -> "session_token")
-	normalized := normalizeFieldName(fieldName)
-	if normalized != lowerField && m[normalized] {
-		return true
-	}
-
-	// Merge tokens from both representations for token matching
-	tokens := tokenSplitRegex.Split(normalized, -1)
-
-	for _, sensitive := range defaultSensitiveFields {
-		if shortSensitiveTokens[sensitive] {
-			if slices.Contains(tokens, sensitive) {
-				return true
-			}
-		} else {
-			if matchesWordBoundary(normalized, sensitive) {
-				return true
-			}
-
-			if normalized != lowerField && matchesWordBoundary(lowerField, sensitive) {
-				return true
-			}
-		}
-	}
-
-	// Check extra fields with word-boundary matching on the normalized name
-	for _, e := range extra {
-		eLower := strings.ToLower(e)
-		if matchesWordBoundary(normalized, eLower) {
+	// A name with no uppercase already is its own normalization.
+	normalized := lowerField
+	if lowerField != fieldName {
+		normalized = normalizeFieldName(fieldName)
+		if m[normalized] {
 			return true
 		}
 	}
 
-	return false
+	tokens, singular := singularizeTokens(splitTokens(normalized), len(extra) > 0)
+	if singular != "" && m[singular] {
+		return true
+	}
+
+	var buf [3]string
+
+	candidates := append(buf[:0], normalized)
+	if lowerField != normalized {
+		candidates = append(candidates, lowerField)
+	}
+
+	if singular != "" {
+		candidates = append(candidates, singular)
+	}
+
+	return matchesDefaultFields(candidates, tokens) || matchesExtraFields(candidates, extra)
 }
 
 // matchesWordBoundary checks if the pattern appears in the field with word boundaries.
@@ -260,8 +351,8 @@ func matchesWordBoundary(field, pattern string) bool {
 		start := idx
 		end := idx + len(pattern)
 
-		startOk := start == 0 || !isAlphanumeric(field[start-1])
-		endOk := end == len(field) || !isAlphanumeric(field[end])
+		startOk := start == 0 || !isAlphanumeric(rune(field[start-1]))
+		endOk := end == len(field) || !isAlphanumeric(rune(field[end]))
 
 		if startOk && endOk {
 			return true
@@ -282,6 +373,6 @@ func matchesWordBoundary(field, pattern string) bool {
 	return false
 }
 
-func isAlphanumeric(b byte) bool {
-	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
+func isAlphanumeric(r rune) bool {
+	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')
 }
