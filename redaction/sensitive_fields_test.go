@@ -104,9 +104,11 @@ func TestIsSensitiveFieldPassAndPwdTokens(t *testing.T) {
 		{name: "passive is not a credential", field: "passive_mode", want: false},
 		{name: "surpassed is not a credential", field: "surpassed", want: false},
 
-		// Known, accepted over-match: "pwd" as a token also reads a working
+		// Known, accepted over-matches: "pwd" as a token also reads a working
 		// directory as a credential. Masking a path beats leaking a password.
-		{name: "accepted over-match on working directory", field: "pwd_dir", want: true},
+		{name: "accepted over-match pwd_dir", field: "pwd_dir", want: true},
+		{name: "accepted over-match pwd_path", field: "pwd_path", want: true},
+		{name: "accepted over-match current_pwd", field: "current_pwd", want: true},
 
 		// "passport_number" is deliberately absent: it is PII that arguably
 		// belongs in the list, so pinning it to false would cement a leak.
@@ -161,4 +163,17 @@ func TestIsSensitiveFieldPluralFolding(t *testing.T) {
 			assert.Equal(t, tt.want, IsSensitiveField(tt.field))
 		})
 	}
+}
+
+// TestIsSensitiveFieldExtraMatchesPlural pins the one consumer-observable
+// behaviour change: a caller's extra field name now also matches the plural
+// form of that name. It fails safe -- a deny list naming "tenant" now covers
+// the collection field "tenants" as well.
+func TestIsSensitiveFieldExtraMatchesPlural(t *testing.T) {
+	t.Parallel()
+
+	assert.True(t, IsSensitiveField("tenants", "tenant"))
+	assert.True(t, IsSensitiveField("ledgers", "ledger"))
+	assert.True(t, IsSensitiveField("tenant_secrets", "tenant_secret"))
+	assert.False(t, IsSensitiveField("tenants", "organization"))
 }
