@@ -187,61 +187,115 @@ func normalizeFieldName(fieldName string) string {
 	return strings.ToLower(b.String())
 }
 
-// IsSensitiveField checks if a field name is considered sensitive based on
-// the default sensitive fields list plus any extra fields provided. The check
-// is case-insensitive and handles camelCase field names by normalizing them to
-// underscore-delimited tokens. Short tokens (like "key", "auth") use exact
-// token matching to avoid false positives, while longer patterns use
-// word-boundary matching.
-//
-// Extra fields are additional field names to treat as sensitive beyond the
-// built-in default list. Pass them as individual string arguments.
-func IsSensitiveField(fieldName string, extra ...string) bool {
-	m := ensureSensitiveFieldsMap()
-	lowerField := strings.ToLower(fieldName)
+// singularizeTokens folds a single trailing "s" off every token of an
+// underscore-delimited field name, so "api_keys" also reads as "api_key" and
+// "tokens" as "token". Callers judge the original spelling as well, so words
+// that merely end in "s" -- "address", "status", "class", "bus", "pass" --
+// keep their own verdict. Only one trailing "s" is folded: "es" and "ies"
+// plurals such as "addresses" and "cities" are out of scope.
+func singularizeTokens(normalized string) string {
+	tokens := tokenSplitRegex.Split(normalized, -1)
+	folded := false
 
-	// Check exact match with lowercase against defaults
-	if m[lowerField] {
-		return true
-	}
-
-	// Check exact match against extra fields
-	for _, e := range extra {
-		if strings.EqualFold(fieldName, e) {
-			return true
+	for i, token := range tokens {
+		if len(token) > 1 && strings.HasSuffix(token, "s") {
+			tokens[i] = token[:len(token)-1]
+			folded = true
 		}
 	}
 
-	// Also check with camelCase normalization (e.g., "sessionToken" -> "session_token")
-	normalized := normalizeFieldName(fieldName)
-	if normalized != lowerField && m[normalized] {
-		return true
+	if !folded {
+		return normalized
 	}
 
-	// Merge tokens from both representations for token matching
-	tokens := tokenSplitRegex.Split(normalized, -1)
+	return strings.Join(tokens, "_")
+}
+
+// candidateSpellings returns the distinct spellings of a field name that
+// sensitive-field matching must consider: the name as written, its camelCase
+// normalization ("sessionToken" -> "session_token"), and its de-pluralized
+// form ("tokens" -> "token"). Each spelling can only add a match; none of them
+// replaces the original.
+func candidateSpellings(fieldName string) []string {
+	lowerField := strings.ToLower(fieldName)
+	candidates := []string{lowerField}
+
+	normalized := normalizeFieldName(fieldName)
+	if normalized != lowerField {
+		candidates = append(candidates, normalized)
+	}
+
+	singular := singularizeTokens(normalized)
+	if singular != normalized && singular != lowerField {
+		candidates = append(candidates, singular)
+	}
+
+	return candidates
+}
+
+// matchesDefaultFields reports whether any default sensitive field matches one
+// of the candidate spellings. Short tokens (like "key", "pwd") must match a
+// whole token exactly; longer names match on word boundaries.
+func matchesDefaultFields(candidates []string) bool {
+	tokens := make([]string, 0, len(candidates)*2)
+	for _, candidate := range candidates {
+		tokens = append(tokens, tokenSplitRegex.Split(candidate, -1)...)
+	}
 
 	for _, sensitive := range defaultSensitiveFields {
 		if shortSensitiveTokens[sensitive] {
 			if slices.Contains(tokens, sensitive) {
 				return true
 			}
-		} else {
-			if matchesWordBoundary(normalized, sensitive) {
-				return true
-			}
 
-			if normalized != lowerField && matchesWordBoundary(lowerField, sensitive) {
+			continue
+		}
+
+		for _, candidate := range candidates {
+			if matchesWordBoundary(candidate, sensitive) {
 				return true
 			}
 		}
 	}
 
-	// Check extra fields with word-boundary matching on the normalized name
+	return false
+}
+
+// IsSensitiveField checks if a field name is considered sensitive based on
+// the default sensitive fields list plus any extra fields provided. The check
+// is case-insensitive and handles camelCase field names and plural field names
+// by normalizing them to underscore-delimited singular tokens. Short tokens
+// (like "key", "auth", "pwd") use exact token matching to avoid false
+// positives, while longer patterns use word-boundary matching.
+//
+// Extra fields are additional field names to treat as sensitive beyond the
+// built-in default list. Pass them as individual string arguments.
+func IsSensitiveField(fieldName string, extra ...string) bool {
+	m := ensureSensitiveFieldsMap()
+	candidates := candidateSpellings(fieldName)
+
+	for _, candidate := range candidates {
+		if m[candidate] {
+			return true
+		}
+	}
+
+	for _, e := range extra {
+		if strings.EqualFold(fieldName, e) {
+			return true
+		}
+	}
+
+	if matchesDefaultFields(candidates) {
+		return true
+	}
+
 	for _, e := range extra {
 		eLower := strings.ToLower(e)
-		if matchesWordBoundary(normalized, eLower) {
-			return true
+		for _, candidate := range candidates {
+			if matchesWordBoundary(candidate, eLower) {
+				return true
+			}
 		}
 	}
 

@@ -119,3 +119,46 @@ func TestIsSensitiveFieldPassAndPwdTokens(t *testing.T) {
 		})
 	}
 }
+
+func TestIsSensitiveFieldPluralFolding(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name  string
+		field string
+		want  bool
+	}{
+		// A plural credential field is still a credential field.
+		{name: "tokens", field: "tokens", want: true},
+		{name: "secrets", field: "secrets", want: true},
+		{name: "passwords", field: "passwords", want: true},
+		{name: "api keys", field: "api_keys", want: true},
+		{name: "db passwords", field: "db_passwords", want: true},
+		{name: "camel session tokens", field: "sessionTokens", want: true},
+		{name: "short token keys", field: "keys", want: true},
+		{name: "short token pins", field: "pins", want: true},
+		{name: "short token zips", field: "zips", want: true},
+
+		// The original token keeps its own verdict: folding only ever adds a
+		// second spelling to judge, it never replaces the first.
+		{name: "address stays sensitive", field: "address", want: true},
+		{name: "ssn stays sensitive", field: "ssn", want: true},
+		{name: "pass stays sensitive", field: "pass", want: true},
+
+		// Words ending in "s" that are not plurals of a credential.
+		{name: "status", field: "status", want: false},
+		{name: "class", field: "class", want: false},
+		{name: "bus", field: "bus", want: false},
+		{name: "passes", field: "passes", want: false},
+
+		// "ies" -> "y" plurals are out of scope: only one trailing "s" is folded.
+		{name: "cities stays out", field: "cities", want: false},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, IsSensitiveField(tt.field))
+		})
+	}
+}
