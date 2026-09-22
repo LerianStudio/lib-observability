@@ -21,6 +21,7 @@ import (
 	constant "github.com/LerianStudio/lib-observability/v4/constants"
 	"github.com/LerianStudio/lib-observability/v4/log"
 	"github.com/LerianStudio/lib-observability/v4/metrics"
+	"github.com/google/uuid"
 	otelruntime "go.opentelemetry.io/contrib/instrumentation/runtime"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -68,10 +69,26 @@ var (
 
 // TelemetryConfig configures tracing, metrics, logging, and propagation behavior.
 type TelemetryConfig struct {
-	LibraryName               string
-	ServiceName               string
-	ServiceVersion            string
-	DeploymentEnv             string
+	LibraryName    string
+	ServiceName    string
+	ServiceVersion string
+	DeploymentEnv  string
+	// ServiceInstanceID is the OpenTelemetry service.instance.id resource
+	// attribute: the identity that tells one replica of a service apart from
+	// the others, so traces, metrics and logs can be read per instance. It is
+	// optional. Precedence: this field, when non-empty, wins; otherwise a
+	// service.instance.id supplied through OTEL_RESOURCE_ATTRIBUTES is used;
+	// otherwise a random UUID v4 is generated once per NewTelemetry call, as
+	// the OpenTelemetry semantic conventions recommend. A generated id is
+	// therefore stable for the life of one Telemetry instance and different
+	// on every process start.
+	//
+	// The other attributes OTEL_RESOURCE_ATTRIBUTES carries (for example
+	// k8s.pod.name and k8s.namespace.name injected through the Kubernetes
+	// downward API) are added to the resource too, but ServiceName,
+	// ServiceVersion and DeploymentEnv always win over OTEL_SERVICE_NAME and
+	// over the same keys in OTEL_RESOURCE_ATTRIBUTES.
+	ServiceInstanceID         string
 	CollectorExporterEndpoint string
 	EnableTelemetry           bool
 	InsecureExporter          bool
@@ -411,7 +428,13 @@ func buildTelemetry(
 	mExp sdkmetric.Exporter,
 	lExp sdklog.Exporter,
 ) (*Telemetry, error) {
-	r := cfg.newResource()
+	r, err := cfg.newResource(ctx)
+	if err != nil {
+		// No provider owns the exporters yet, so they are what rolls back.
+		shutdownAll(ctx, []shutdownable{tExp, mExp, lExp})
+
+		return nil, fmt.Errorf("can't initialize resource: %w", err)
+	}
 
 	mp := cfg.newMeterProvider(r, mExp, options.metricCardinalityLimit)
 	tp := cfg.newTracerProvider(r, tExp)
@@ -646,15 +669,50 @@ func (tl *Telemetry) ForceFlush(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-func (tl *TelemetryConfig) newResource() *sdkresource.Resource {
-	return sdkresource.NewWithAttributes(
-		semconv.SchemaURL,
+// newResource builds the resource shared by every provider. The SDK applies
+// the options below in order and, on a key conflict, the later one wins
+// (resource.Merge: "the value from b will overwrite the value from a"). So the
+// generated instance id goes first, the environment detector
+// (OTEL_RESOURCE_ATTRIBUTES, OTEL_SERVICE_NAME) second, and the explicit
+// config last: explicit config > environment > generated id.
+//
+// A malformed OTEL_RESOURCE_ATTRIBUTES makes the SDK return
+// ErrPartialResource together with the pairs it could parse. That is not
+// worth refusing telemetry over: the partial resource is kept and one warning
+// is logged. Any other error is returned.
+func (tl *TelemetryConfig) newResource(ctx context.Context) (*sdkresource.Resource, error) {
+	explicit := []attribute.KeyValue{
 		semconv.ServiceName(tl.ServiceName),
 		semconv.ServiceVersion(tl.ServiceVersion),
 		semconv.DeploymentEnvironmentName(tl.DeploymentEnv),
 		semconv.TelemetrySDKName(constant.TelemetrySDKName),
 		semconv.TelemetrySDKLanguageGo,
-	)
+	}
+
+	opts := []sdkresource.Option{sdkresource.WithSchemaURL(semconv.SchemaURL)}
+
+	if id := strings.TrimSpace(tl.ServiceInstanceID); id != "" {
+		explicit = append(explicit, semconv.ServiceInstanceID(id))
+	} else {
+		opts = append(opts, sdkresource.WithAttributes(semconv.ServiceInstanceID(uuid.NewString())))
+	}
+
+	opts = append(opts, sdkresource.WithFromEnv(), sdkresource.WithAttributes(explicit...))
+
+	r, err := sdkresource.New(ctx, opts...)
+	if err != nil {
+		if !errors.Is(err, sdkresource.ErrPartialResource) {
+			return nil, err
+		}
+
+		if !log.IsNil(tl.Logger) {
+			tl.Logger.Log(ctx, log.LevelWarn,
+				"Malformed OTEL_RESOURCE_ATTRIBUTES; keeping the attributes that parsed",
+				log.String("env_var", "OTEL_RESOURCE_ATTRIBUTES"), log.Err(err))
+		}
+	}
+
+	return r, nil
 }
 
 // exporterTLSCredentials builds the transport credentials used by every OTLP
