@@ -69,10 +69,28 @@ var (
 
 // TelemetryConfig configures tracing, metrics, logging, and propagation behavior.
 type TelemetryConfig struct {
+	// LibraryName is the instrumentation scope of the signals the service
+	// emits through this library: the business metrics declared on
+	// Telemetry.MetricsFactory and the spans opened with the tracer the HTTP
+	// and gRPC middleware put on the request context. It is used exactly as
+	// configured: no trimming and no fallback to ServiceName, so empty means
+	// an empty scope. It is never this library's module path, whose version
+	// changes on every library release.
+	//
+	// Signals this library emits itself (middleware, interceptor and
+	// messaging spans, the transport duration instruments) ignore it and
+	// carry the library's own module scope.
 	LibraryName    string
 	ServiceName    string
 	ServiceVersion string
-	DeploymentEnv  string
+	// ServiceRevision is the full git SHA the binary was built from, set at
+	// link time (-ldflags "-X main.revision=..."). When set, it is published on the
+	// OTel resource as vcs.ref.head.revision; empty or whitespace-only means
+	// the attribute is omitted. Surrounding whitespace is trimmed before the
+	// value is published, so a padded SHA still matches an exact-match
+	// dashboard query. No other format validation happens here.
+	ServiceRevision string
+	DeploymentEnv   string
 	// ServiceInstanceID is the OpenTelemetry service.instance.id resource
 	// attribute: the identity that tells one replica of a service apart from
 	// the others, so traces, metrics and logs can be read per instance. It is
@@ -703,6 +721,10 @@ func (tl *TelemetryConfig) newResource(ctx context.Context) (*sdkresource.Resour
 
 	if strings.TrimSpace(tl.DeploymentEnv) != "" {
 		explicit = append(explicit, semconv.DeploymentEnvironmentName(tl.DeploymentEnv))
+	}
+
+	if revision := strings.TrimSpace(tl.ServiceRevision); revision != "" {
+		explicit = append(explicit, semconv.VCSRefHeadRevision(revision))
 	}
 
 	opts := []sdkresource.Option{sdkresource.WithSchemaURL(semconv.SchemaURL)}

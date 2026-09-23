@@ -268,12 +268,18 @@ func matchesDefaultFields(candidates, tokens []string) bool {
 }
 
 // matchesExtraFields reports whether any caller-supplied field name appears,
-// on a word boundary, in one of the candidate spellings.
+// on a word boundary, in one of the candidate spellings. Each extra name is
+// tried both lowercased and in the underscore-joined form the singular
+// candidate uses, so "ledgerId" and "user.name" also match "ledgerIds" and
+// "user.names".
 func matchesExtraFields(candidates, extra []string) bool {
 	for _, e := range extra {
 		eLower := strings.ToLower(e)
+		eCanonical := strings.Join(splitTokens(normalizeFieldName(e)), "_")
+
 		for _, candidate := range candidates {
-			if matchesWordBoundary(candidate, eLower) {
+			if matchesWordBoundary(candidate, eLower) ||
+				(eCanonical != eLower && matchesWordBoundary(candidate, eCanonical)) {
 				return true
 			}
 		}

@@ -181,4 +181,14 @@ func TestIsSensitiveFieldExtraMatchesPlural(t *testing.T) {
 	assert.True(t, IsSensitiveField("ledgers", "ledger"))
 	assert.True(t, IsSensitiveField("tenant_secrets", "tenant_secret"))
 	assert.False(t, IsSensitiveField("tenants", "organization"))
+
+	// Extra names spelled in camelCase, dotted or dashed form match their plural.
+	assert.True(t, IsSensitiveField("ledgerIds", "ledgerId"))
+	assert.True(t, IsSensitiveField("user.names", "user.name"))
+	assert.True(t, IsSensitiveField("order-refs", "order-ref"))
+
+	// The canonical extra name still needs a word boundary on both sides.
+	assert.False(t, IsSensitiveField("ledgerIdentity", "ledgerId"))
+	assert.False(t, IsSensitiveField("user.nameservers", "user.name"))
+	assert.False(t, IsSensitiveField("ledgerIds", "ledgerName"))
 }

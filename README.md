@@ -16,7 +16,7 @@ Thread-safe `MetricsFactory` with lazy instrument caching and a fluent builder A
 
 A thin, nil-safe wrapper over `otelhttp` that turns an outbound HTTP transport into an instrumented one: every outbound request is classified as a call to an external dependency (span kind `CLIENT`) and emits `http.client.request.duration` (seconds). `NewTransport(base, opts...)` wraps the transport the app already built (preserving its TLS/timeout/proxy config); `NewClient(base, opts...)` is a convenience returning a ready `*http.Client`. Bounded span name by default (`HTTP <METHOD>`), no-op when telemetry is off. See "Outbound call instrumentation" below.
 
-`NewHandler(next, opts...)` is the inbound counterpart for a **stdlib `net/http` server** (a Fiber v3 app uses `middleware.WithTelemetry` instead — never both on the same server). It produces a `SERVER` span and emits `http.server.request.duration` (seconds). The default span name is the method plus the registered route pattern (`r.Pattern`, set by the Go 1.22+ `ServeMux`) — `GET /users/{id}`, or the method alone when nothing matched — never the concrete URL path. A method-qualified registration (`"GET /users/{id}"`) names the span exactly like a bare one: the pattern's own method prefix is dropped rather than repeated. Bodies and the `Authorization` header are never recorded, and `url.path` is the route template rather than the concrete path (see "HTTP server telemetry safety" below). Inbound `traceparent` is **ignored by default** and every request starts a new root trace; pass `httpobs.WithPropagators(otel.GetTextMapPropagator())` to continue a trusted caller's trace — the same trust decision `TrustInboundTraceContext` expresses for the Fiber and gRPC paths.
+`NewHandler(next, opts...)` is the inbound counterpart for a **stdlib `net/http` server** (a Fiber v3 app uses `middleware.WithTelemetry` instead — never both on the same server). It produces a `SERVER` span and emits `http.server.request.duration` (seconds). The default span name is the method plus the registered route pattern (`r.Pattern`, set by the Go 1.22+ `ServeMux`) — `GET /users/{id}`, or the method alone when nothing matched — never the concrete URL path. A method-qualified registration (`"GET /users/{id}"`) names the span exactly like a bare one: the pattern's own method prefix is dropped rather than repeated. Bodies and the `Authorization` header are never recorded, and `url.path` is the route template rather than the concrete path (see "HTTP server telemetry safety" below). Inbound `traceparent` is **ignored by default** and every request starts a new root trace; pass `httpobs.WithPropagators(otel.GetTextMapPropagator())` to continue a trusted caller's trace — the same trust decision `TrustInboundTraceContext` expresses for the Fiber and gRPC paths. A request that was already partly handled before it reached `NewHandler` (answered by an outer fast path, then replayed) can be served under `httpobs.ContextWithStartTime(ctx, start)`, so its span starts at `start` and its duration sample is measured from it.
 
 ### Manual client-span helper (`tracing.StartClientSpan`)
 
@@ -53,6 +53,56 @@ A configurable `Redactor` with rule-based field processing supporting mask, hash
 - **Errors over panics** — metric/builder operations return errors; assertions return errors instead of panicking
 - **Redaction-first** — sensitive fields are masked in spans, logs, and attributes by default
 - **Interface-driven** — `Logger`, `MetricsFactory`, `ErrorReporter`, and `DLQMetrics` are all interface-bound for testability
+
+## Instrumentation scope and build identity
+
+Two scopes, two owners.
+
+**Signals this library emits** — the HTTP and gRPC middleware spans, messaging spans, the transport duration instruments (HTTP, gRPC, messaging) — are stamped with the library's own identity, resolved from the running binary:
+
+| Field | Value |
+|---|---|
+| `instrumentation_scope.name` | `github.com/LerianStudio/lib-observability/v4` |
+| `instrumentation_scope.version` | the module version linked into the binary; `(devel)` for a source build or a local `replace` |
+
+Nothing configures this. The scope names the code that produced the signal, so a dashboard can tell "the library's HTTP middleware" from "a span the service opened by hand".
+
+Operators: `otel_scope_version` on these series changes with every lib-observability release, so each upgrade replaces the transport metric series. Aggregate transport metrics without scope labels — `sum by (http_request_method, http_response_status_code) (rate(http_server_request_duration_seconds_count[5m]))`, never `by (otel_scope_version)` — grep recording rules and alerts for `otel_scope_version` before upgrading, and note that the collector may drop the label altogether. The upgrade that introduced this scope is described in [MIGRATION-v4.md](MIGRATION-v4.md#upgrading-within-v4-library-instrumentation-scope).
+
+**Signals your service emits** are attributed to your service, never to this library. That covers `Telemetry.Tracer(name)` and `Telemetry.Meter(name)`, where the name you pass is your scope, and it also covers the carriers the middleware puts on the request context — the tracer and the metrics factory you pull out of `observability.NewTrackingFromContext(ctx)`, and `Telemetry.MetricsFactory`. Those are scoped to `TelemetryConfig.LibraryName` exactly as configured, with no fallback: an empty `LibraryName` means an empty scope, as it always has. This library never rewrites that scope, so a business span or counter keeps its series identity across library upgrades.
+
+### Build identity on the resource
+
+`ServiceVersion` and `ServiceRevision` describe the binary and travel on the OTel resource of traces, metrics, and logs:
+
+| Config field | Resource attribute | Source in the service |
+|---|---|---|
+| `ServiceVersion` | `service.version` | `main.version`, set at link time |
+| `ServiceRevision` | `vcs.ref.head.revision` | `main.revision`, set at link time — the full git SHA |
+
+`ServiceRevision` is optional: blank omits the attribute and leaves the resource exactly as before. No format validation happens here. The values come from the binary, never from the environment: the service declares two variables in `main`, the build fills them with `-ldflags "-X main.version=1.4.2 -X main.revision=$(git rev-parse HEAD)"`, and the service passes both in:
+
+```go
+package main
+
+import "github.com/LerianStudio/lib-observability/v4/tracing"
+
+// Set at link time by -ldflags "-X main.version=... -X main.revision=...".
+var version, revision string
+
+func main() {
+    telemetry, err := tracing.NewTelemetry(tracing.TelemetryConfig{
+        ServiceName:     "midaz-ledger",
+        ServiceVersion:  version,
+        ServiceRevision: revision,
+        DeploymentEnv:   "production",
+        EnableTelemetry: true,
+    })
+    // ...
+}
+```
+
+lib-commons is publishing a `commons/buildinfo` package in this same rollout that wraps these values (`buildinfo.Get()`); use it once it is available.
 
 ## Outbound call instrumentation — span kind precedence
 

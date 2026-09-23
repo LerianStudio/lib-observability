@@ -328,3 +328,32 @@ While migrating `lib-commons`, take the opportunity the release exists for:
 replace its `liblog.Logger` parameters with a locally-declared one-method
 interface and drop the `lib-observability` import entirely. That is the change
 that makes this the last major of this library the fleet has to care about.
+
+---
+
+## Upgrading within v4: library instrumentation scope
+
+The release that adds `ServiceRevision` also changes the instrumentation scope
+of the signals this library produces itself. What moves on upgrade:
+
+| Signals | Scope name before | Scope name after | `otel_scope_version` after |
+|---|---|---|---|
+| Library-owned: HTTP and gRPC middleware/interceptor spans, messaging spans, and the transport instruments (`http.server.request.duration`, `http.server.active_requests`, the authenticated-tenant HTTP counters and latency, `rpc.server.duration`, `rpc.client.duration`, `messaging.client.operation.duration`, `messaging.process.duration`) | `TelemetryConfig.LibraryName` | `github.com/LerianStudio/lib-observability/v4` | the lib-observability version linked into the binary, `(devel)` for a source build or a directory `replace` |
+| Service-owned: business metrics declared on `Telemetry.MetricsFactory` (also the factory on the request context), spans opened with the tracer the middleware puts on the request context. Also the system CPU/memory gauges (`telemetrycore/metrics_collector.go`), `panic_recovered_total` (`runtime/metrics.go`) and `assertion_failed_total` (`assert/assert.go`): library-defined, but recorded on the service-scoped `MetricsFactory`, so their scope is unchanged | `TelemetryConfig.LibraryName` | `TelemetryConfig.LibraryName` — unchanged | unchanged (none) |
+
+Consequences for operators:
+
+- Every library-owned metric series is **replaced once on upgrade**, because
+  its `otel_scope_name` label changes. It is replaced **again on every
+  lib-observability release**, because `otel_scope_version` changes with the
+  linked version.
+- Business metrics and spans keep their scope unchanged and are **not
+  affected**: they still carry `LibraryName` exactly as configured, empty
+  included.
+- Before upgrading, grep recording rules, alerts and dashboards for
+  `otel_scope_name` and `otel_scope_version` on the transport metrics.
+  Aggregate those metrics without scope labels, e.g.
+  `sum by (http_request_method, http_response_status_code) (rate(http_server_request_duration_seconds_count[5m]))`,
+  never `by (otel_scope_version)`. The collector or the Prometheus scrape may
+  also drop the scope labels (a collector processor or a relabel rule), in
+  which case nothing downstream sees the scope change.

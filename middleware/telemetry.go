@@ -19,6 +19,7 @@ import (
 
 	observability "github.com/LerianStudio/lib-observability/v4"
 	constant "github.com/LerianStudio/lib-observability/v4/constants"
+	"github.com/LerianStudio/lib-observability/v4/internal/buildmeta"
 	"github.com/LerianStudio/lib-observability/v4/tracing"
 	"github.com/gofiber/fiber/v3"
 	"github.com/google/uuid"
@@ -313,7 +314,7 @@ func newHTTPServerInstruments(
 		return httpServerInstruments{}
 	}
 
-	meter := tl.MeterProvider.Meter(tl.LibraryName)
+	meter := buildmeta.Meter(tl.MeterProvider)
 	instruments := httpServerInstruments{
 		duration:       newHTTPServerDurationHistogram(meter),
 		activeRequests: newActiveRequestsCounter(meter),
@@ -480,7 +481,7 @@ func (tm *TelemetryMiddleware) withTelemetry(
 		hostname := string([]byte(c.Hostname()))
 		userAgent := string([]byte(c.Get(headerUserAgent)))
 
-		tracer := effectiveTelemetry.TracerProvider.Tracer(effectiveTelemetry.LibraryName)
+		tracer := buildmeta.Tracer(effectiveTelemetry.TracerProvider)
 		// Create the span with a method-only name (e.g. "GET"). The route
 		// template is not reliably known until after routing (c.Next), and the
 		// concrete path carries PII / unbounded cardinality (IDs, Pix keys). A
@@ -519,7 +520,7 @@ func (tm *TelemetryMiddleware) withTelemetry(
 
 		defer endState.End()
 
-		ctx = observability.ContextWithTracer(ctx, tracer)
+		ctx = observability.ContextWithTracer(ctx, effectiveTelemetry.ServiceTracer())
 		ctx = observability.ContextWithMetricFactory(ctx, effectiveTelemetry.MetricsFactory)
 		ctx = contextWithSpanEndState(ctx, endState)
 		c.SetContext(ctx)
