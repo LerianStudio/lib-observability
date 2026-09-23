@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/LerianStudio/lib-observability/v4/constants"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
@@ -508,4 +509,18 @@ func NewHandler(next http.Handler, opts ...Option) http.Handler {
 	}
 
 	return instrumented
+}
+
+// ContextWithStartTime returns a copy of ctx that tells NewHandler when the
+// request really began. A request served through NewHandler under that context
+// gets a SERVER span that starts at start and an http.server.request.duration
+// sample measured from start, instead of from the moment NewHandler saw it.
+//
+// Use it when a request was already partly handled before it reached the
+// instrumented handler — for example, answered by an outer fast path and then
+// replayed through NewHandler — so the span and the metric cover the whole
+// request. A zero start is ignored (the handler's own clock is used). Calling
+// it again on the result overrides the earlier start.
+func ContextWithStartTime(ctx context.Context, start time.Time) context.Context {
+	return otelhttp.ContextWithStartTime(ctx, start)
 }
