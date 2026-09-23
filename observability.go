@@ -170,6 +170,15 @@ func resolveLogger(logger log.Universal) log.Logger {
 	return log.Adapt(logger)
 }
 
+// fallbackScopeName labels signals emitted through the degraded path below: the
+// context carried no tracer or metrics factory, so the caller is service code
+// running outside an instrumented request. Those signals are the service's, not
+// this library's, so they must not carry the library's module scope - and
+// nothing here knows the service's name, hence this neutral marker. An
+// instrumented request never reaches it: the HTTP and gRPC middleware put a
+// service-scoped tracer and the service's metrics factory on the context.
+const fallbackScopeName = "observability.default"
+
 // resolveTracer ensures a valid tracer is always available using OpenTelemetry best practices.
 // The default tracer maintains observability even when context is incomplete.
 func resolveTracer(tracer trace.Tracer) trace.Tracer {
@@ -177,7 +186,7 @@ func resolveTracer(tracer trace.Tracer) trace.Tracer {
 		return tracer
 	}
 
-	return otel.Tracer("observability.default") // Descriptive tracer name for debugging
+	return otel.Tracer(fallbackScopeName)
 }
 
 // resolveHeaderID implements the correlation ID pattern with UUID fallback.
@@ -202,7 +211,7 @@ var (
 
 func getDefaultMetricsFactory() *metrics.MetricsFactory {
 	defaultFactoryOnce.Do(func() {
-		meter := otel.GetMeterProvider().Meter("observability.default")
+		meter := otel.GetMeterProvider().Meter(fallbackScopeName)
 
 		f, err := metrics.NewMetricsFactory(meter, log.NewNop())
 		if err != nil {
@@ -232,7 +241,7 @@ func resolveMetricFactory(factory *metrics.MetricsFactory) *metrics.MetricsFacto
 func newDefaultTrackingComponents() TrackingComponents {
 	return TrackingComponents{
 		Logger:        log.NewNop(),
-		Tracer:        otel.Tracer("observability.default"),
+		Tracer:        otel.Tracer(fallbackScopeName),
 		HeaderID:      uuid.New().String(),
 		MetricFactory: resolveMetricFactory(nil),
 	}

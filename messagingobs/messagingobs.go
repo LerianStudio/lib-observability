@@ -6,6 +6,7 @@ import (
 	"time"
 
 	constant "github.com/LerianStudio/lib-observability/v4/constants"
+	"github.com/LerianStudio/lib-observability/v4/internal/buildmeta"
 	"github.com/LerianStudio/lib-observability/v4/tracing"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
@@ -66,7 +67,7 @@ func tracerFor(tl *tracing.Telemetry) trace.Tracer {
 		return nil
 	}
 
-	return tl.TracerProvider.Tracer(tl.LibraryName)
+	return buildmeta.Tracer(tl.TracerProvider)
 }
 
 // classifyErrorType returns a bounded error.type label for a failed messaging
@@ -144,7 +145,7 @@ func NewPublisher(tl *tracing.Telemetry) *Publisher {
 
 	if telemetryEnabled(tl) {
 		p.hist = newDurationHistogram(
-			tl.MeterProvider.Meter(tl.LibraryName),
+			buildmeta.Meter(tl.MeterProvider),
 			messagingClientOperationDurationMetric,
 			"Duration of messaging producer operations.",
 		)
@@ -204,7 +205,7 @@ func NewConsumer(tl *tracing.Telemetry) *Consumer {
 
 	if telemetryEnabled(tl) {
 		c.hist = newDurationHistogram(
-			tl.MeterProvider.Meter(tl.LibraryName),
+			buildmeta.Meter(tl.MeterProvider),
 			messagingProcessDurationMetric,
 			"Duration of messaging consumer processing.",
 		)
