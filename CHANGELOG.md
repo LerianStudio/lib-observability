@@ -1,5 +1,31 @@
 # Lib-observability Changelog
 
+## [4.5.0](https://github.com/LerianStudio/lib-observability/releases/tag/v4.5.0)
+
+Features:
+- Allow callers to set the HTTP observability server request start time. (@fredcamaral)
+- Add a tracing-only HTTP telemetry handler. (@fredcamaral)
+- Introduce a `ServiceRevision` resource attribute for tracing. (@fredcamaral)
+- Sign library signals with module scope for tracing. (@fredcamaral)
+
+Fixes:
+- Correct handling of plural forms in camelCase and dotted extra names for redaction. (@fredcamaral)
+- Ensure exact field-name hits are answered without allocating in redaction. (@fredcamaral)
+- Treat "pass" and "pwd" as credential tokens in redaction. (@fredcamaral)
+- Fold plural field names before matching in redaction. (@fredcamaral)
+
+Improvements:
+- Describe library and service instrumentation scopes in tracing documentation. (@fredcamaral)
+- Pin the dotted and dashed token split in redaction tests. (@fredcamaral)
+- Detail which telemetry variant pairs double the metric in documentation. (@fredcamaral)
+- Scope the metrics-factory promise to the tracer path in middleware documentation. (@fredcamaral)
+- List the tracing-only HTTP telemetry variant in documentation. (@fredcamaral)
+- Prove the tracing-only contract beyond the 200 in middleware tests. (@fredcamaral)
+
+[Compare changes](https://github.com/LerianStudio/lib-observability/compare/v4.4.1...v4.5.0)
+
+---
+
 ## [4.4.1](https://github.com/LerianStudio/lib-observability/releases/tag/v4.4.1)
 
 Fixes:
