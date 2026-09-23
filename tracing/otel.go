@@ -79,9 +79,16 @@ type TelemetryConfig struct {
 	// Signals this library emits itself (middleware, interceptor and
 	// messaging spans, the transport duration instruments) ignore it and
 	// carry the library's own module scope.
-	LibraryName               string
-	ServiceName               string
-	ServiceVersion            string
+	LibraryName    string
+	ServiceName    string
+	ServiceVersion string
+	// ServiceRevision is the full git SHA the binary was built from, set at
+	// link time (-ldflags "-X main.revision=..."). When set, it is published on the
+	// OTel resource as vcs.ref.head.revision; empty or whitespace-only means
+	// the attribute is omitted. Surrounding whitespace is trimmed before the
+	// value is published, so a padded SHA still matches an exact-match
+	// dashboard query. No other format validation happens here.
+	ServiceRevision           string
 	DeploymentEnv             string
 	CollectorExporterEndpoint string
 	EnableTelemetry           bool
@@ -658,14 +665,19 @@ func (tl *Telemetry) ForceFlush(ctx context.Context) error {
 }
 
 func (tl *TelemetryConfig) newResource() *sdkresource.Resource {
-	return sdkresource.NewWithAttributes(
-		semconv.SchemaURL,
+	attrs := []attribute.KeyValue{
 		semconv.ServiceName(tl.ServiceName),
 		semconv.ServiceVersion(tl.ServiceVersion),
 		semconv.DeploymentEnvironmentName(tl.DeploymentEnv),
 		semconv.TelemetrySDKName(constant.TelemetrySDKName),
 		semconv.TelemetrySDKLanguageGo,
-	)
+	}
+
+	if revision := strings.TrimSpace(tl.ServiceRevision); revision != "" {
+		attrs = append(attrs, semconv.VCSRefHeadRevision(revision))
+	}
+
+	return sdkresource.NewWithAttributes(semconv.SchemaURL, attrs...)
 }
 
 // exporterTLSCredentials builds the transport credentials used by every OTLP
