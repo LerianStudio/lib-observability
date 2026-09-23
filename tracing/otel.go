@@ -68,6 +68,17 @@ var (
 
 // TelemetryConfig configures tracing, metrics, logging, and propagation behavior.
 type TelemetryConfig struct {
+	// LibraryName is the instrumentation scope of the signals the service
+	// emits through this library: the business metrics declared on
+	// Telemetry.MetricsFactory and the spans opened with the tracer the HTTP
+	// and gRPC middleware put on the request context. It is used exactly as
+	// configured: no trimming and no fallback to ServiceName, so empty means
+	// an empty scope. It is never this library's module path, whose version
+	// changes on every library release.
+	//
+	// Signals this library emits itself (middleware, interceptor and
+	// messaging spans, the transport duration instruments) ignore it and
+	// carry the library's own module scope.
 	LibraryName               string
 	ServiceName               string
 	ServiceVersion            string

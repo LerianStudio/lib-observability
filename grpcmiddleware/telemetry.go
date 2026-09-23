@@ -20,6 +20,7 @@ import (
 
 	observability "github.com/LerianStudio/lib-observability/v4"
 	constant "github.com/LerianStudio/lib-observability/v4/constants"
+	"github.com/LerianStudio/lib-observability/v4/internal/buildmeta"
 	"github.com/LerianStudio/lib-observability/v4/log"
 	"github.com/LerianStudio/lib-observability/v4/telemetrycore"
 	"github.com/LerianStudio/lib-observability/v4/tracing"
@@ -222,7 +223,7 @@ func (tm *TelemetryMiddleware) WithTelemetryInterceptor(tl *tracing.Telemetry) g
 		bootstrapTelemetry.MeterProvider != nil &&
 		bootstrapTelemetry.MetricsFactory != nil {
 		serverDurationHistogram = newRPCDurationHistogram(
-			bootstrapTelemetry.MeterProvider.Meter(bootstrapTelemetry.LibraryName),
+			buildmeta.Meter(bootstrapTelemetry.MeterProvider),
 			rpcServerDurationMetric,
 			"Duration of gRPC server calls.",
 		)
@@ -271,7 +272,7 @@ func (tm *TelemetryMiddleware) WithTelemetryInterceptor(tl *tracing.Telemetry) g
 			return resp, err
 		}
 
-		tracer := effectiveTelemetry.TracerProvider.Tracer(effectiveTelemetry.LibraryName)
+		tracer := buildmeta.Tracer(effectiveTelemetry.TracerProvider)
 
 		tenantID := ResolveTenantIDFromGRPC(ctx)
 		if tenantID != "" {
@@ -309,7 +310,7 @@ func (tm *TelemetryMiddleware) WithTelemetryInterceptor(tl *tracing.Telemetry) g
 
 		defer endState.End()
 
-		ctx = observability.ContextWithTracer(ctx, tracer)
+		ctx = observability.ContextWithTracer(ctx, effectiveTelemetry.ServiceTracer())
 		ctx = observability.ContextWithMetricFactory(ctx, effectiveTelemetry.MetricsFactory)
 		ctx = contextWithSpanEndState(ctx, endState)
 
@@ -449,7 +450,7 @@ func (tm *TelemetryMiddleware) UnaryClientInterceptor(tl *tracing.Telemetry) grp
 		bootstrapTelemetry.MeterProvider != nil &&
 		bootstrapTelemetry.MetricsFactory != nil {
 		clientDurationHistogram = newRPCDurationHistogram(
-			bootstrapTelemetry.MeterProvider.Meter(bootstrapTelemetry.LibraryName),
+			buildmeta.Meter(bootstrapTelemetry.MeterProvider),
 			rpcClientDurationMetric,
 			"Duration of gRPC client calls.",
 		)
