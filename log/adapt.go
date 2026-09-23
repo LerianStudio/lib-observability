@@ -47,8 +47,10 @@ type Universal interface {
 // Shim semantics, for the wrapped case only: With and WithGroup bind fields
 // and a dot-joined group path that are replayed ahead of the caller's own on
 // every Log, since a Log-only logger has nowhere to store them. Enabled
-// reports true for any defined level - a Log-only logger exposes no level
-// check, and answering false would silently drop entries. Sync is a no-op.
+// delegates to the wrapped logger's own Enabled(level int) bool when it has
+// one; otherwise it reports true for any defined level, since answering false
+// would silently drop entries. An undefined level always reports false. Sync
+// is a no-op.
 //
 //nolint:ireturn // returning the interface is the whole point of the adapter.
 func Adapt(u Universal) Logger {
@@ -131,17 +133,25 @@ func (s *universalShim) WithGroup(name string) Logger {
 	return &universalShim{next: s.next, fields: fields, groups: groups}
 }
 
-// Enabled reports true for any defined level.
+// Enabled reports the wrapped logger's own answer when it has one, and true
+// for any defined level otherwise.
 //
-// A Universal logger exposes no level check, so this is the only answer that
-// cannot silently drop an entry the underlying logger would have emitted. An
-// undefined level still reports false, matching GoLogger.
+// Universal does not require a level check, but many Log-only loggers carry
+// one (Enabled(level int) bool) without implementing the rest of Logger.
+// Asking it lets callers skip building entries the logger would discard.
+// Without one, true is the only answer that cannot silently drop an entry the
+// underlying logger would have emitted. An undefined level always reports
+// false, matching GoLogger.
 func (s *universalShim) Enabled(level int) bool {
-	if s == nil {
+	if s == nil || !LevelValid(level) {
 		return false
 	}
 
-	return LevelValid(level)
+	if checker, ok := s.next.(interface{ Enabled(level int) bool }); ok {
+		return checker.Enabled(level)
+	}
+
+	return true
 }
 
 // Sync is a no-op: a Universal logger exposes nothing to flush.
