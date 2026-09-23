@@ -85,9 +85,12 @@ type TelemetryConfig struct {
 	//
 	// The other attributes OTEL_RESOURCE_ATTRIBUTES carries (for example
 	// k8s.pod.name and k8s.namespace.name injected through the Kubernetes
-	// downward API) are added to the resource too, but ServiceName,
-	// ServiceVersion and DeploymentEnv always win over OTEL_SERVICE_NAME and
-	// over the same keys in OTEL_RESOURCE_ATTRIBUTES.
+	// downward API) are added to the resource too. ServiceName,
+	// ServiceVersion and DeploymentEnv follow the same rule as this field: a
+	// non-empty value wins over OTEL_SERVICE_NAME and over the same key in
+	// OTEL_RESOURCE_ATTRIBUTES; an empty one is unset and takes the
+	// environment's value; when neither supplies one the attribute is omitted
+	// rather than published as an empty string.
 	ServiceInstanceID         string
 	CollectorExporterEndpoint string
 	EnableTelemetry           bool
@@ -682,11 +685,24 @@ func (tl *Telemetry) ForceFlush(ctx context.Context) error {
 // is logged. Any other error is returned.
 func (tl *TelemetryConfig) newResource(ctx context.Context) (*sdkresource.Resource, error) {
 	explicit := []attribute.KeyValue{
-		semconv.ServiceName(tl.ServiceName),
-		semconv.ServiceVersion(tl.ServiceVersion),
-		semconv.DeploymentEnvironmentName(tl.DeploymentEnv),
 		semconv.TelemetrySDKName(constant.TelemetrySDKName),
 		semconv.TelemetrySDKLanguageGo,
+	}
+
+	// A non-empty config field wins over the environment. An empty one is
+	// unset: it falls through to OTEL_SERVICE_NAME / OTEL_RESOURCE_ATTRIBUTES,
+	// and when neither supplies a value the attribute is omitted rather than
+	// published as an empty string that would overwrite the environment's.
+	if strings.TrimSpace(tl.ServiceName) != "" {
+		explicit = append(explicit, semconv.ServiceName(tl.ServiceName))
+	}
+
+	if strings.TrimSpace(tl.ServiceVersion) != "" {
+		explicit = append(explicit, semconv.ServiceVersion(tl.ServiceVersion))
+	}
+
+	if strings.TrimSpace(tl.DeploymentEnv) != "" {
+		explicit = append(explicit, semconv.DeploymentEnvironmentName(tl.DeploymentEnv))
 	}
 
 	opts := []sdkresource.Option{sdkresource.WithSchemaURL(semconv.SchemaURL)}

@@ -1774,6 +1774,32 @@ func TestNewResource_ExplicitConfigWinsOverEnvServiceAttributes(t *testing.T) {
 	assert.Equal(t, "pod-7", pod)
 }
 
+func TestNewResource_EmptyConfigFieldsTakeTheEnvValue(t *testing.T) {
+	t.Setenv("OTEL_SERVICE_NAME", "env-svc")
+	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "service.version=9.9,deployment.environment.name=env-env")
+
+	r := newTestResource(t, TelemetryConfig{ServiceName: " ", ServiceVersion: "", DeploymentEnv: ""})
+
+	name, _ := resourceValue(t, r, semconv.ServiceNameKey)
+	assert.Equal(t, "env-svc", name)
+	version, _ := resourceValue(t, r, semconv.ServiceVersionKey)
+	assert.Equal(t, "9.9", version)
+	env, _ := resourceValue(t, r, semconv.DeploymentEnvironmentNameKey)
+	assert.Equal(t, "env-env", env)
+}
+
+func TestNewResource_EmptyConfigAndNoEnvOmitsTheServiceAttributes(t *testing.T) {
+	t.Setenv("OTEL_SERVICE_NAME", "")
+	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "")
+
+	r := newTestResource(t, TelemetryConfig{})
+
+	for _, key := range []attribute.Key{semconv.ServiceNameKey, semconv.ServiceVersionKey, semconv.DeploymentEnvironmentNameKey} {
+		_, ok := resourceValue(t, r, key)
+		assert.False(t, ok, "%s must be omitted, not published as an empty string", key)
+	}
+}
+
 func TestNewResource_MalformedEnvKeepsPartialResourceAndWarns(t *testing.T) {
 	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "k8s.pod.name=pod-7,not-a-pair")
 	t.Setenv("OTEL_SERVICE_NAME", "")
