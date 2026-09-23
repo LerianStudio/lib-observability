@@ -68,9 +68,27 @@ var (
 
 // TelemetryConfig configures tracing, metrics, logging, and propagation behavior.
 type TelemetryConfig struct {
-	LibraryName               string
-	ServiceName               string
-	ServiceVersion            string
+	// LibraryName is the instrumentation scope of the signals the service
+	// emits through this library: the business metrics declared on
+	// Telemetry.MetricsFactory and the spans opened with the tracer the HTTP
+	// and gRPC middleware put on the request context. It is used exactly as
+	// configured: no trimming and no fallback to ServiceName, so empty means
+	// an empty scope. It is never this library's module path, whose version
+	// changes on every library release.
+	//
+	// Signals this library emits itself (middleware, interceptor and
+	// messaging spans, the transport duration instruments) ignore it and
+	// carry the library's own module scope.
+	LibraryName    string
+	ServiceName    string
+	ServiceVersion string
+	// ServiceRevision is the full git SHA the binary was built from, set at
+	// link time (-ldflags "-X main.revision=..."). When set, it is published on the
+	// OTel resource as vcs.ref.head.revision; empty or whitespace-only means
+	// the attribute is omitted. Surrounding whitespace is trimmed before the
+	// value is published, so a padded SHA still matches an exact-match
+	// dashboard query. No other format validation happens here.
+	ServiceRevision           string
 	DeploymentEnv             string
 	CollectorExporterEndpoint string
 	EnableTelemetry           bool
@@ -647,14 +665,19 @@ func (tl *Telemetry) ForceFlush(ctx context.Context) error {
 }
 
 func (tl *TelemetryConfig) newResource() *sdkresource.Resource {
-	return sdkresource.NewWithAttributes(
-		semconv.SchemaURL,
+	attrs := []attribute.KeyValue{
 		semconv.ServiceName(tl.ServiceName),
 		semconv.ServiceVersion(tl.ServiceVersion),
 		semconv.DeploymentEnvironmentName(tl.DeploymentEnv),
 		semconv.TelemetrySDKName(constant.TelemetrySDKName),
 		semconv.TelemetrySDKLanguageGo,
-	)
+	}
+
+	if revision := strings.TrimSpace(tl.ServiceRevision); revision != "" {
+		attrs = append(attrs, semconv.VCSRefHeadRevision(revision))
+	}
+
+	return sdkresource.NewWithAttributes(semconv.SchemaURL, attrs...)
 }
 
 // exporterTLSCredentials builds the transport credentials used by every OTLP

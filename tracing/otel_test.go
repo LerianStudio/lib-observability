@@ -1678,16 +1678,90 @@ func TestFlattenAttributes_DefaultBranch(t *testing.T) {
 // 21. newResource coverage
 // ===========================================================================
 
+func resourceAttrs(t *testing.T, r *sdkresource.Resource) map[string]string {
+	t.Helper()
+
+	require.NotNil(t, r)
+
+	attrs := make(map[string]string)
+	for _, kv := range r.Attributes() {
+		// Emit, not AsString: AsString yields "" for a non-string value, which
+		// would let a bool or int attribute pass a presence check unnoticed.
+		attrs[string(kv.Key)] = kv.Value.Emit()
+	}
+
+	return attrs
+}
+
 func TestNewResource(t *testing.T) {
 	t.Parallel()
 
-	cfg := &TelemetryConfig{
-		ServiceName:    "svc",
-		ServiceVersion: "1.0",
-		DeploymentEnv:  "test",
+	const revision = "9d59409acf479dfa0df1aa568182e43e43df8bbe"
+
+	// base is every attribute newResource always emits. Asserting the whole map
+	// rather than individual keys is what makes a dropped SDK attribute or a
+	// stray extra one fail, instead of only a missing revision.
+	base := func() map[string]string {
+		return map[string]string{
+			"service.name":                "svc",
+			"service.version":             "1.0",
+			"deployment.environment.name": "test",
+			"telemetry.sdk.name":          constant.TelemetrySDKName,
+			"telemetry.sdk.language":      "go",
+		}
 	}
-	r := cfg.newResource()
-	assert.NotNil(t, r)
+
+	withRevision := func(value string) map[string]string {
+		attrs := base()
+		attrs["vcs.ref.head.revision"] = value
+
+		return attrs
+	}
+
+	tests := []struct {
+		name     string
+		revision string
+		want     map[string]string
+	}{
+		{
+			name: "without revision",
+			want: base(),
+		},
+		{
+			name:     "with revision",
+			revision: revision,
+			want:     withRevision(revision),
+		},
+		{
+			name:     "blank revision omits the attribute",
+			revision: "   ",
+			want:     base(),
+		},
+		{
+			// newResource trims before publishing, so a padded value lands as
+			// the bare SHA. Without this case, publishing the raw field would
+			// pass every other case here and silently break exact-match
+			// dashboard queries on the revision.
+			name:     "padded revision is normalized",
+			revision: "  " + revision + "\n",
+			want:     withRevision(revision),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			cfg := &TelemetryConfig{
+				ServiceName:     "svc",
+				ServiceVersion:  "1.0",
+				ServiceRevision: tt.revision,
+				DeploymentEnv:   "test",
+			}
+
+			assert.Equal(t, tt.want, resourceAttrs(t, cfg.newResource()))
+		})
+	}
 }
 
 type cardinalityTestExporter struct {

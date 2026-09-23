@@ -19,6 +19,7 @@ import (
 
 	observability "github.com/LerianStudio/lib-observability/v4"
 	constant "github.com/LerianStudio/lib-observability/v4/constants"
+	"github.com/LerianStudio/lib-observability/v4/internal/buildmeta"
 	"github.com/LerianStudio/lib-observability/v4/tracing"
 	"github.com/gofiber/fiber/v3"
 	"github.com/google/uuid"
@@ -283,23 +284,43 @@ type httpServerInstruments struct {
 	tenantLatency  metric.Float64Histogram
 }
 
+// httpTelemetryMode selects which HTTP server metrics the shared telemetry
+// handler emits. It is one enum rather than two booleans because the three
+// public constructors are mutually exclusive by construction: a pair of
+// booleans would admit a fourth, meaningless state ("tracing only, but also
+// per-tenant metrics").
+type httpTelemetryMode uint8
+
+const (
+	// httpTelemetryStandard records the OpenTelemetry semantic-convention HTTP
+	// server metrics. It is the zero value on purpose: a call site that forgot
+	// to pass a mode keeps the long-standing behavior instead of silently
+	// going dark.
+	httpTelemetryStandard httpTelemetryMode = iota
+	// httpTelemetryAuthenticatedTenant adds the opt-in per-tenant instruments
+	// on top of the standard ones.
+	httpTelemetryAuthenticatedTenant
+	// httpTelemetryTracingOnly records no metric at all from this middleware.
+	httpTelemetryTracingOnly
+)
+
 func newHTTPServerInstruments(
 	tl *tracing.Telemetry,
-	enableAuthenticatedTenantMetrics bool,
+	mode httpTelemetryMode,
 ) httpServerInstruments {
 	// MetricsFactory presence is the canonical "metrics enabled" signal across
 	// the library even though these instruments are built from MeterProvider.
-	if tl == nil || tl.MeterProvider == nil || tl.MetricsFactory == nil {
+	if mode == httpTelemetryTracingOnly || tl == nil || tl.MeterProvider == nil || tl.MetricsFactory == nil {
 		return httpServerInstruments{}
 	}
 
-	meter := tl.MeterProvider.Meter(tl.LibraryName)
+	meter := buildmeta.Meter(tl.MeterProvider)
 	instruments := httpServerInstruments{
 		duration:       newHTTPServerDurationHistogram(meter),
 		activeRequests: newActiveRequestsCounter(meter),
 	}
 
-	if !enableAuthenticatedTenantMetrics {
+	if mode != httpTelemetryAuthenticatedTenant {
 		return instruments
 	}
 
@@ -320,10 +341,43 @@ func newHTTPServerInstruments(
 // telemetry, nil MeterProvider, nil MetricsFactory, excluded routes, and
 // instrument creation errors all silently skip the metric without affecting
 // the request path or existing span behavior.
-// For the opt-in per-tenant variant see WithAuthenticatedTenantHTTPMetrics.
-// The two are mutually exclusive - registering both double-records every metric.
+//
+// This is one of three mutually exclusive HTTP telemetry handlers. Register
+// exactly one per app: WithAuthenticatedTenantHTTPMetrics for the opt-in
+// per-tenant instruments on top of these, or WithTracingOnly for spans with no
+// metric at all. Registering two of them double-records every metric and
+// double-starts the server span.
 func (tm *TelemetryMiddleware) WithTelemetry(tl *tracing.Telemetry, excludedRoutes ...string) fiber.Handler {
-	return tm.withTelemetry(tl, false, excludedRoutes...)
+	return tm.withTelemetry(tl, httpTelemetryStandard, excludedRoutes...)
+}
+
+// WithTracingOnly adds the HTTP tracing half of WithTelemetry and records no
+// metric whatsoever.
+//
+// It produces exactly what WithTelemetry produces on the trace side: the
+// correlation-id request header echoed on the response, the identity-filtered
+// server span (named by the route template once routing resolves, carrying the
+// HTTP semantic-convention attributes and status), the excluded-route skip
+// list, and the tracer / metric-factory / span-end-state context wiring that
+// downstream handlers and EndTracingSpans depend on.
+//
+// It records none of the middleware's own metrics, even when the Telemetry has
+// both a MeterProvider and a MetricsFactory: no http.server.request.duration,
+// no http.server.active_requests, no per-tenant instruments, and no background
+// host-metrics collector. On the tracer path ContextWithMetricFactory is still
+// installed, so application code that records its own metrics through the
+// factory is unaffected - only this middleware stays silent. A Telemetry with
+// no TracerProvider returns from the no-tracer branch before that wiring,
+// exactly as WithTelemetry does.
+//
+// Use it when the application already owns its HTTP RED metrics and needs them
+// emitted once, under its own instrument names, route template, and labels.
+//
+// Do NOT also register WithTelemetry or WithAuthenticatedTenantHTTPMetrics on
+// the same app: each starts its own server span, so every request would be
+// traced twice.
+func (tm *TelemetryMiddleware) WithTracingOnly(tl *tracing.Telemetry, excludedRoutes ...string) fiber.Handler {
+	return tm.withTelemetry(tl, httpTelemetryTracingOnly, excludedRoutes...)
 }
 
 // WithAuthenticatedTenantHTTPMetrics adds the standard HTTP telemetry and the
@@ -334,19 +388,22 @@ func (tm *TelemetryMiddleware) WithTelemetry(tl *tracing.Telemetry, excludedRout
 // baggage, metadata, and generic span attributes are never accepted as an
 // identity source.
 //
-// This method already includes the standard HTTP telemetry. Do NOT also register
-// WithTelemetry on the same app: both would record http.server.request.duration,
-// doubling every observation of the global RED metric.
+// This method already includes the standard HTTP telemetry. Do NOT also
+// register WithTelemetry on the same app: both would record
+// http.server.request.duration, doubling every observation of the global RED
+// metric. WithTracingOnly, the third variant, records no metric at all, but it
+// starts its own server span, so registering it alongside this one traces every
+// request twice.
 func (tm *TelemetryMiddleware) WithAuthenticatedTenantHTTPMetrics(
 	tl *tracing.Telemetry,
 	excludedRoutes ...string,
 ) fiber.Handler {
-	return tm.withTelemetry(tl, true, excludedRoutes...)
+	return tm.withTelemetry(tl, httpTelemetryAuthenticatedTenant, excludedRoutes...)
 }
 
 func (tm *TelemetryMiddleware) withTelemetry(
 	tl *tracing.Telemetry,
-	enableAuthenticatedTenantMetrics bool,
+	mode httpTelemetryMode,
 	excludedRoutes ...string,
 ) fiber.Handler {
 	// Build the duration histogram once at handler-construction time. The
@@ -359,7 +416,7 @@ func (tm *TelemetryMiddleware) withTelemetry(
 		bootstrapTelemetry = tm.Telemetry
 	}
 
-	instruments := newHTTPServerInstruments(bootstrapTelemetry, enableAuthenticatedTenantMetrics)
+	instruments := newHTTPServerInstruments(bootstrapTelemetry, mode)
 
 	// Same hoisting rationale as the histogram above: read once at
 	// construction time rather than on every request.
@@ -424,7 +481,7 @@ func (tm *TelemetryMiddleware) withTelemetry(
 		hostname := string([]byte(c.Hostname()))
 		userAgent := string([]byte(c.Get(headerUserAgent)))
 
-		tracer := effectiveTelemetry.TracerProvider.Tracer(effectiveTelemetry.LibraryName)
+		tracer := buildmeta.Tracer(effectiveTelemetry.TracerProvider)
 		// Create the span with a method-only name (e.g. "GET"). The route
 		// template is not reliably known until after routing (c.Next), and the
 		// concrete path carries PII / unbounded cardinality (IDs, Pix keys). A
@@ -463,14 +520,18 @@ func (tm *TelemetryMiddleware) withTelemetry(
 
 		defer endState.End()
 
-		ctx = observability.ContextWithTracer(ctx, tracer)
+		ctx = observability.ContextWithTracer(ctx, effectiveTelemetry.ServiceTracer())
 		ctx = observability.ContextWithMetricFactory(ctx, effectiveTelemetry.MetricsFactory)
 		ctx = contextWithSpanEndState(ctx, endState)
 		c.SetContext(ctx)
 
-		err := tm.collectMetrics(ctx)
-		if err != nil {
-			tracing.HandleSpanError(span, "Failed to collect metrics", err)
+		// The collector emits process-wide CPU and memory gauges through the
+		// metrics factory. A consumer that chose tracing-only owns its own
+		// metrics, so this middleware starts nothing.
+		if mode != httpTelemetryTracingOnly {
+			if err := tm.collectMetrics(ctx); err != nil {
+				tracing.HandleSpanError(span, "Failed to collect metrics", err)
+			}
 		}
 
 		returnedErr := c.Next()
