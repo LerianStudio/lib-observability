@@ -23,7 +23,7 @@ A lib emite **métricas OTLP** que vão: `app → OTel SDK (lib) → collector �
 
 ## 1. Bootstrap (obrigatório, uma vez, no início do serviço)
 
-> **NUNCA hard-code endpoint/URL no código.** Toda configuração vem de **variáveis de ambiente** (injetadas pelo Helm). Use os nomes canônicos já adotados nos serviços Lerian (ver `.env.example`): `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_RESOURCE_SERVICE_NAME`, `OTEL_RESOURCE_SERVICE_VERSION`, `OTEL_RESOURCE_DEPLOYMENT_ENVIRONMENT`, `OTEL_LIBRARY_NAME`, `ENABLE_TELEMETRY`, `ENV_NAME`.
+> **NUNCA hard-code endpoint/URL no código.** Toda configuração vem de **variáveis de ambiente** (injetadas pelo Helm). Use os nomes canônicos já adotados nos serviços Lerian (ver `.env.example`): `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_RESOURCE_SERVICE_NAME`, `OTEL_RESOURCE_DEPLOYMENT_ENVIRONMENT`, `OTEL_LIBRARY_NAME`, `ENABLE_TELEMETRY`, `ENV_NAME`. A identidade do binário (`ServiceVersion`/`ServiceRevision`) é a exceção: vem do build via `-ldflags`, não de env (ver a seção de versionamento abaixo).
 
 ```go
 import (
@@ -68,10 +68,17 @@ if raw, ok := os.LookupEnv("OTEL_TRACES_SAMPLER_ARG"); ok {
     if err != nil { log.Fatalf("OTEL_TRACES_SAMPLER_ARG inválido: %v", err) }
 }
 
+// A identidade do binário vem do build, NUNCA de env: versão de env mente
+// quando a imagem é repromovida. `version` e `revision` são `var` de nível de
+// pacote em main, preenchidas pelo link:
+//   var version, revision string
+//   go build -ldflags "-X main.version=1.4.2 -X main.revision=$(git rev-parse HEAD)"
+
 tel, err := tracing.NewTelemetry(tracing.TelemetryConfig{
-    LibraryName:               os.Getenv("OTEL_LIBRARY_NAME"),
+    LibraryName:               os.Getenv("OTEL_LIBRARY_NAME"),         // scope das SUAS métricas/spans de negócio
     ServiceName:               os.Getenv("OTEL_RESOURCE_SERVICE_NAME"),
-    ServiceVersion:            os.Getenv("OTEL_RESOURCE_SERVICE_VERSION"),
+    ServiceVersion:            version,  // -> service.version
+    ServiceRevision:           revision, // -> vcs.ref.head.revision (vazio omite o atributo)
     DeploymentEnv:             deploymentEnv,
     CollectorExporterEndpoint: os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"), // do Helm — NUNCA literal
     EnableTelemetry:           enableTel,
@@ -94,6 +101,8 @@ ctx := context.Background() // ctx de shutdown
 defer tel.ShutdownTelemetryWithContext(ctx) // flush/close no shutdown (ou tel.ShutdownTelemetry() sem ctx)
 ```
 
+- **Dois scopes, dois donos.** Os sinais que a própria lib emite — spans do middleware HTTP/gRPC, spans de messaging, os instrumentos de duração de transporte — carregam o módulo e a versão da lib, sem configuração. Os seus continuam seus: `Telemetry.Tracer(name)`/`Meter(name)` usam o nome que você passa, e o tracer e a `MetricsFactory` que saem de `NewTrackingFromContext(ctx)` (e `Telemetry.MetricsFactory`) usam `LibraryName` exatamente como configurado, sem fallback (vazio continua vazio). Quem já seta `LibraryName` mantém: é ele que segura a identidade das séries das métricas de negócio. Não confundir com `zap.Config.OTelLibraryName` (seção 1a): esse é outro campo, do bridge de log.
+- **`ServiceVersion`/`ServiceRevision` vêm do build, não de env.** `OTEL_RESOURCE_SERVICE_VERSION` não serve: a env fica presa ao valor do deploy e mente quando a mesma imagem é repromovida. `main.version`/`main.revision` guardam o que a CI injetou no binário via `-ldflags`. `ServiceRevision` vazio simplesmente omite `vcs.ref.head.revision`. O lib-commons está publicando nesta mesma rodada um pacote `commons/buildinfo` que embrulha esses valores (`buildinfo.Get()`); use-o quando estiver disponível.
 - Endpoint, service name, env etc. vêm SEMPRE de env (Helm). O `.env.example` do serviço documenta os valores por ambiente. O código só lê `os.Getenv(...)`.
 - `NewTelemetry` **não** registra os providers globais no caminho de sucesso: `tel.ApplyGlobals()` é obrigatório logo depois (o exemplo acima chama). Só o fallback sem endpoint (`ErrEmptyEndpoint`) aplica os providers no-op sozinho.
 - **Segurança do exporter:** em ambiente `production`/`prd`, `InsecureExporter: true` faz o `NewTelemetry` **retornar erro** (o serviço não sobe) a menos que a env `ALLOW_INSECURE_OTEL="<justificativa>"` esteja definida. Em produção o `OTEL_EXPORTER_OTLP_ENDPOINT` deve ser `https://...` e `InsecureExporter` false. Insecure só em `development`/`local` (cluster interno sem TLS). Como isso vem de env, é o Helm de cada ambiente que decide — o código não fixa nada. Com `InsecureExporter: false` os exporters passam credenciais TLS explicitamente (piso TLS 1.2), então um `OTEL_EXPORTER_OTLP_ENDPOINT` sem esquema não derruba mais a conexão para texto puro — a própria env é normalizada no processo com o esquema correspondente (`https://` quando seguro, `http://` quando insecure).
