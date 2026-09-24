@@ -60,8 +60,10 @@ type Universal interface {
 // or Enabled - the only shim methods that run its code - never unwinds the
 // caller: the log line is dropped (Enabled answers true, as it would with no
 // level check) and the panic is reported the way runtime reports a recovered
-// panic, as one ERROR line on this package's stdlib logger naming the method
-// and the panic value's type, never the value, message or fields. A value that
+// panic: one ERROR line on this package's stdlib logger naming the method and
+// the panic value's type, never the value, message or fields, and one
+// increment of panic_recovered_total (component "log", named by the method)
+// once runtime.InitPanicMetrics is wired. A value that
 // already implements Logger is returned as-is and so is not guarded.
 //
 //nolint:ireturn // returning the interface is the whole point of the adapter.
@@ -81,7 +83,7 @@ func Adapt(u Universal) Logger {
 // and whether there was one. The report names the method and the panic
 // value's type only: the value, the message and the fields may all carry data
 // the consumer redacts. It goes to panicFallback, never to the logger that
-// panicked. Reporting is best effort: a panic inside it is dropped, since the
+// panicked, and counts on runtime's recovered-panic counter. Reporting is best effort: a panic inside it is dropped, since the
 // caller was promised it would not unwind.
 func reportLoggerPanic(ctx context.Context, method string, recovered any) (panicked bool) {
 	if recovered == nil {
@@ -105,6 +107,7 @@ func reportLoggerPanic(ctx context.Context, method string, recovered any) (panic
 	}
 
 	panicFallback.Log(ctx, LevelError, loggerPanicMsg, fields...)
+	panicobs.Count(ctx, panicComponent, method)
 
 	return panicked
 }
@@ -224,6 +227,10 @@ func cloneStrings(in []string) []string {
 // loggerPanicMsg is the message of the ERROR line reporting a panic recovered
 // inside an adapted logger.
 const loggerPanicMsg = "logger panic recovered"
+
+// panicComponent labels a panic recovered inside an adapted logger on the
+// recovered-panic counter and span event; the method is the name.
+const panicComponent = "log"
 
 // panicFallback receives the report of a panic recovered inside an adapted
 // logger. It is never the adapted logger: that one just panicked.
