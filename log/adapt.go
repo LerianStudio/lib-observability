@@ -88,7 +88,8 @@ func Adapt(u Universal) Logger {
 // the consumer redacts. It goes to panicFallback, never to the logger that
 // panicked, counts on runtime's recovered-panic counter, and lands on the
 // recording span in ctx, if any. Reporting is best effort: a panic inside it
-// is dropped, since the caller was promised it would not unwind.
+// is dropped, since the caller was promised it would not unwind. The fallback
+// line goes last: stdlib log may be redirected into the logger that panicked.
 func reportLoggerPanic(ctx context.Context, method string, recovered any) (panicked bool) {
 	if recovered == nil {
 		return false
@@ -112,9 +113,9 @@ func reportLoggerPanic(ctx context.Context, method string, recovered any) (panic
 		fields = append(fields, String("stack_trace", string(stack)))
 	}
 
-	panicFallback.Log(ctx, LevelError, loggerPanicMsg, fields...)
 	panicobs.Count(ctx, panicComponent, method)
 	panicobs.RecordToSpan(ctx, panicType, stack, panicComponent, method)
+	panicFallback.Log(ctx, LevelError, loggerPanicMsg, fields...)
 
 	return panicked
 }

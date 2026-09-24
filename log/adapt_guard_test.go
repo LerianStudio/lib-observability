@@ -172,6 +172,30 @@ func TestAdapt_PanicInsideLoggerRecordsSpanEvent(t *testing.T) {
 	assert.NotContains(t, fmt.Sprint(spans[0].Events()), secret)
 }
 
+// TestAdapt_PanickingFallbackStillRecordsSpanEvent: the fallback line runs on
+// the stdlib logger, which a host may redirect into the very logger that just
+// panicked; the span event must not depend on that line surviving.
+func TestAdapt_PanickingFallbackStillRecordsSpanEvent(t *testing.T) {
+	previous := panicFallback
+	panicFallback = &panickingUniversal{inLog: true}
+
+	t.Cleanup(func() { panicFallback = previous })
+
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+
+	t.Cleanup(func() { _ = provider.Shutdown(context.Background()) })
+
+	ctx, span := provider.Tracer("test").Start(context.Background(), "op")
+	require.NotPanics(t, func() { Adapt(&panickingUniversal{inLog: true}).Log(ctx, LevelInfo, "m") })
+	span.End()
+
+	require.Len(t, recorder.Ended(), 1)
+	assert.True(t, slices.ContainsFunc(recorder.Ended()[0].Events(), func(e sdktrace.Event) bool {
+		return e.Name == constant.EventPanicRecovered
+	}))
+}
+
 // discardUniversal is a Log-only logger that keeps nothing.
 type discardUniversal struct{}
 
