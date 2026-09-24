@@ -5,6 +5,7 @@ import (
 	"sync"
 
 	constant "github.com/LerianStudio/lib-observability/v4/constants"
+	"github.com/LerianStudio/lib-observability/v4/internal/panicobs"
 	"github.com/LerianStudio/lib-observability/v4/log"
 	"github.com/LerianStudio/lib-observability/v4/metrics"
 )
@@ -85,6 +86,10 @@ func InitPanicMetrics(factory Recorder, logger ...Logger) {
 		factory: factory,
 		logger:  l,
 	}
+
+	// Panics recovered inside a logger returned by log.Adapt count here too;
+	// log cannot import this package, so it reaches the counter through panicobs.
+	panicobs.SetCounter(recordPanicMetric)
 }
 
 // GetPanicMetrics returns the singleton PanicMetrics instance.
