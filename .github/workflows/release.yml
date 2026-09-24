@@ -3,6 +3,19 @@ name: Release
 on:
   push:
     branches: [main, release-candidate, develop]
+    paths-ignore:
+      - '.github/**'
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE'
+      - '.gitignore'
+      - '.golangci.yml'
+      - '.golangci.yaml'
+      - '.releaserc.yml'
+      - '.releaserc.yaml'
+      - '.goreleaser.yml'
+      - '.goreleaser.yaml'
+      - '.ignorecoverunit'
 
 permissions:
   id-token: write
