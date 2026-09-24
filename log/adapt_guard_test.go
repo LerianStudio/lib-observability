@@ -8,9 +8,14 @@ import (
 	"slices"
 	"testing"
 
+	constant "github.com/LerianStudio/lib-observability/v4/constants"
 	"github.com/LerianStudio/lib-observability/v4/internal/panicobs"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 // secret is what a consumer might log or panic with; no report may carry it.
@@ -131,6 +136,40 @@ func TestAdapt_DefaultFallbackIsThisPackagesStdlibLogger(t *testing.T) {
 	fallback, ok := panicFallback.(*GoLogger)
 	require.True(t, ok)
 	assert.True(t, fallback.Enabled(LevelError))
+}
+
+// TestAdapt_PanicInsideLoggerRecordsSpanEvent: a Log call carries a ctx, so the
+// panic lands on its span exactly as runtime records one - a panic.recovered
+// event, an error and an Error status - valued by the panic's type only.
+func TestAdapt_PanicInsideLoggerRecordsSpanEvent(t *testing.T) {
+	captureFallback(t)
+
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+
+	t.Cleanup(func() { _ = provider.Shutdown(context.Background()) })
+
+	ctx, span := provider.Tracer("test").Start(context.Background(), "op")
+	Adapt(&panickingUniversal{inLog: true}).Log(ctx, LevelInfo, "charge "+secret, String("card", secret))
+	span.End()
+
+	spans := recorder.Ended()
+	require.Len(t, spans, 1)
+	assert.Equal(t, codes.Error, spans[0].Status().Code)
+
+	var event *sdktrace.Event
+
+	for i := range spans[0].Events() {
+		if spans[0].Events()[i].Name == constant.EventPanicRecovered {
+			event = &spans[0].Events()[i]
+		}
+	}
+
+	require.NotNil(t, event, "the panic.recovered event must be on the caller's span")
+	assert.Contains(t, event.Attributes, attribute.String("panic.value", "string"))
+	assert.Contains(t, event.Attributes, attribute.String("panic.goroutine_name", "Log"))
+	assert.Contains(t, event.Attributes, attribute.String("panic.component", "log"))
+	assert.NotContains(t, fmt.Sprint(spans[0].Events()), secret)
 }
 
 // discardUniversal is a Log-only logger that keeps nothing.

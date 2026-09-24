@@ -63,7 +63,8 @@ type Universal interface {
 // panic: one ERROR line on this package's stdlib logger naming the method and
 // the panic value's type, never the value, message or fields, and one
 // increment of panic_recovered_total (component "log", named by the method)
-// once runtime.InitPanicMetrics is wired. A value that
+// once runtime.InitPanicMetrics is wired, and, for Log, a panic.recovered
+// event on the recording span in ctx, valued by the panic's type. A value that
 // already implements Logger is returned as-is and so is not guarded.
 //
 //nolint:ireturn // returning the interface is the whole point of the adapter.
@@ -83,8 +84,9 @@ func Adapt(u Universal) Logger {
 // and whether there was one. The report names the method and the panic
 // value's type only: the value, the message and the fields may all carry data
 // the consumer redacts. It goes to panicFallback, never to the logger that
-// panicked, and counts on runtime's recovered-panic counter. Reporting is best effort: a panic inside it is dropped, since the
-// caller was promised it would not unwind.
+// panicked, counts on runtime's recovered-panic counter, and lands on the
+// recording span in ctx, if any. Reporting is best effort: a panic inside it
+// is dropped, since the caller was promised it would not unwind.
 func reportLoggerPanic(ctx context.Context, method string, recovered any) (panicked bool) {
 	if recovered == nil {
 		return false
@@ -98,16 +100,19 @@ func reportLoggerPanic(ctx context.Context, method string, recovered any) (panic
 		ctx = context.Background()
 	}
 
-	fields := []any{String("method", method), String("panic_type", fmt.Sprintf("%T", recovered))}
+	panicType := fmt.Sprintf("%T", recovered)
+	stack := debug.Stack()
+	fields := []any{String("method", method), String("panic_type", panicType)}
 
 	// Same posture as runtime's recovered-panic line: the stack only outside
-	// production mode.
+	// production mode. The span always gets it, as runtime's does.
 	if !panicobs.ProductionMode() {
-		fields = append(fields, String("stack_trace", string(debug.Stack())))
+		fields = append(fields, String("stack_trace", string(stack)))
 	}
 
 	panicFallback.Log(ctx, LevelError, loggerPanicMsg, fields...)
 	panicobs.Count(ctx, panicComponent, method)
+	panicobs.RecordToSpan(ctx, panicType, stack, panicComponent, method)
 
 	return panicked
 }
