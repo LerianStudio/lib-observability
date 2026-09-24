@@ -1,5 +1,28 @@
 # Lib-observability Changelog
 
+## [4.6.0](https://github.com/LerianStudio/lib-observability/releases/tag/v4.6.0)
+
+Features:
+- Export `Guard`, a panic-recovering wrapper for any Logger. (@fredcamaral)
+- Record adapted-logger panics on the caller's span. (@fredcamaral)
+- Count panics recovered inside an adapted logger. (@fredcamaral)
+- Recover panics raised inside an adapted logger. (@fredcamaral)
+- Add `service.instance.id` and honor environment resource attributes. (@fredcamaral)
+
+Fixes:
+- Report logger panic to span before the fallback line. (@fredcamaral)
+- Allow an adapted logger's own Enabled method to decide the level. (@fredcamaral)
+- Let environment resource attributes fill empty service fields. (@fredcamaral)
+- Gate the OTel bridge core by the configured level. (@fredcamaral)
+
+Improvements:
+- Move panic span and counter reporting to a leaf in the runtime. (@fredcamaral)
+- Trim the level gate in the zap component to its invariant. (@fredcamaral)
+
+[Compare changes](https://github.com/LerianStudio/lib-observability/compare/v4.5.0...v4.6.0)
+
+---
+
 ## [4.5.0](https://github.com/LerianStudio/lib-observability/releases/tag/v4.5.0)
 
 Features:
