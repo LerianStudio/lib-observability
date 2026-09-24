@@ -2,7 +2,11 @@ package log
 
 import (
 	"context"
+	"fmt"
+	"runtime/debug"
 	"strings"
+
+	"github.com/LerianStudio/lib-observability/v4/internal/panicobs"
 )
 
 // Universal is the smallest thing this package is willing to call a logger:
@@ -52,6 +56,14 @@ type Universal interface {
 // would silently drop entries. An undefined level always reports false. Sync
 // is a no-op.
 //
+// The shim is also a panic boundary. A panic inside the wrapped logger's Log
+// or Enabled - the only shim methods that run its code - never unwinds the
+// caller: the log line is dropped (Enabled answers true, as it would with no
+// level check) and the panic is reported the way runtime reports a recovered
+// panic, as one ERROR line on this package's stdlib logger naming the method
+// and the panic value's type, never the value, message or fields. A value that
+// already implements Logger is returned as-is and so is not guarded.
+//
 //nolint:ireturn // returning the interface is the whole point of the adapter.
 func Adapt(u Universal) Logger {
 	if IsNil(u) {
@@ -63,6 +75,38 @@ func Adapt(u Universal) Logger {
 	}
 
 	return &universalShim{next: u}
+}
+
+// reportLoggerPanic reports a value recovered from an adapted logger's method
+// and whether there was one. The report names the method and the panic
+// value's type only: the value, the message and the fields may all carry data
+// the consumer redacts. It goes to panicFallback, never to the logger that
+// panicked. Reporting is best effort: a panic inside it is dropped, since the
+// caller was promised it would not unwind.
+func reportLoggerPanic(ctx context.Context, method string, recovered any) (panicked bool) {
+	if recovered == nil {
+		return false
+	}
+
+	panicked = true
+
+	defer func() { _ = recover() }()
+
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	fields := []any{String("method", method), String("panic_type", fmt.Sprintf("%T", recovered))}
+
+	// Same posture as runtime's recovered-panic line: the stack only outside
+	// production mode.
+	if !panicobs.ProductionMode() {
+		fields = append(fields, String("stack_trace", string(debug.Stack())))
+	}
+
+	panicFallback.Log(ctx, LevelError, loggerPanicMsg, fields...)
+
+	return panicked
 }
 
 // universalShim supplies the Logger methods a Universal logger lacks,
@@ -88,6 +132,8 @@ func (s *universalShim) Log(ctx context.Context, level int, msg string, fields .
 
 	merged = append(merged, anyFields(s.fields)...)
 	merged = append(merged, fields...)
+
+	defer func() { reportLoggerPanic(ctx, "Log", recover()) }()
 
 	s.next.Log(ctx, level, msg, merged...)
 }
@@ -142,12 +188,18 @@ func (s *universalShim) WithGroup(name string) Logger {
 // Without one, true is the only answer that cannot silently drop an entry the
 // underlying logger would have emitted. An undefined level always reports
 // false, matching GoLogger.
-func (s *universalShim) Enabled(level int) bool {
+func (s *universalShim) Enabled(level int) (enabled bool) {
 	if s == nil || !LevelValid(level) {
 		return false
 	}
 
 	if checker, ok := s.next.(interface{ Enabled(level int) bool }); ok {
+		defer func() {
+			if reportLoggerPanic(context.Background(), "Enabled", recover()) {
+				enabled = true
+			}
+		}()
+
 		return checker.Enabled(level)
 	}
 
@@ -168,3 +220,11 @@ func cloneStrings(in []string) []string {
 
 	return out
 }
+
+// loggerPanicMsg is the message of the ERROR line reporting a panic recovered
+// inside an adapted logger.
+const loggerPanicMsg = "logger panic recovered"
+
+// panicFallback receives the report of a panic recovered inside an adapted
+// logger. It is never the adapted logger: that one just panicked.
+var panicFallback Universal = &GoLogger{Level: LevelError}
