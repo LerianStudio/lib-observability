@@ -2,6 +2,7 @@ package log
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"runtime/debug"
 	"strings"
@@ -65,7 +66,8 @@ type Universal interface {
 // increment of panic_recovered_total (component "log", named by the method)
 // once runtime.InitPanicMetrics is wired, and, for Log, a panic.recovered
 // event on the recording span in ctx, valued by the panic's type. A value that
-// already implements Logger is returned as-is and so is not guarded.
+// already implements Logger is returned as-is and so is not guarded; wrap it
+// with Guard to get the same net.
 //
 //nolint:ireturn // returning the interface is the whole point of the adapter.
 func Adapt(u Universal) Logger {
@@ -240,3 +242,90 @@ const panicComponent = "log"
 // panicFallback receives the report of a panic recovered inside an adapted
 // logger. It is never the adapted logger: that one just panicked.
 var panicFallback Universal = &GoLogger{Level: LevelError}
+
+// errLoggerPanicked is what a guarded logger's Sync returns when it panicked.
+var errLoggerPanicked = errors.New("logger panicked")
+
+// Guard adapts any logger, as Adapt does, and wraps the result so that a panic
+// inside it never unwinds the caller.
+//
+// Adapt guards the Log-only loggers it shims but returns a full Logger as-is,
+// so callers keep their own instance back. Guard is the opt-in net for the
+// rest: call it where a logger you did not write runs on a path that must not
+// panic, such as a library boundary that promises to return errors.
+//
+// A panic inside Log, With, WithGroup, Enabled or Sync is recovered and
+// reported exactly as the Adapt shim reports one (see Adapt): the log line is
+// dropped, With and WithGroup return the receiver, Enabled answers
+// LevelValid(level), and Sync returns an error. Children from With and
+// WithGroup are guarded too.
+//
+// Guard(nil) and a typed nil return NewNop, as Adapt does. This package's own loggers
+// (GoLogger, NopLogger, the Adapt shim) and an already guarded logger are
+// returned unchanged. Anything else costs one allocation when wrapped and
+// about 12 ns per Log call for the deferred recover, with no allocation.
+//
+//nolint:ireturn // returning the interface is the whole point of the wrapper.
+func Guard(u Universal) Logger {
+	l := Adapt(u)
+
+	switch l.(type) {
+	case *NopLogger, *GoLogger, *universalShim, *panicGuard:
+		return l
+	default:
+		return &panicGuard{next: l}
+	}
+}
+
+// panicGuard delegates every method to next, recovering its panics.
+type panicGuard struct {
+	next Logger
+}
+
+func (g *panicGuard) Log(ctx context.Context, level int, msg string, fields ...any) {
+	defer func() { reportLoggerPanic(ctx, "Log", recover()) }()
+
+	g.next.Log(ctx, level, msg, fields...)
+}
+
+//nolint:ireturn
+func (g *panicGuard) With(fields ...any) (child Logger) {
+	defer func() {
+		if reportLoggerPanic(context.Background(), "With", recover()) {
+			child = g
+		}
+	}()
+
+	return Guard(g.next.With(fields...))
+}
+
+//nolint:ireturn
+func (g *panicGuard) WithGroup(name string) (child Logger) {
+	defer func() {
+		if reportLoggerPanic(context.Background(), "WithGroup", recover()) {
+			child = g
+		}
+	}()
+
+	return Guard(g.next.WithGroup(name))
+}
+
+func (g *panicGuard) Enabled(level int) (enabled bool) {
+	defer func() {
+		if reportLoggerPanic(context.Background(), "Enabled", recover()) {
+			enabled = LevelValid(level)
+		}
+	}()
+
+	return g.next.Enabled(level)
+}
+
+func (g *panicGuard) Sync(ctx context.Context) (err error) {
+	defer func() {
+		if reportLoggerPanic(ctx, "Sync", recover()) {
+			err = errLoggerPanicked
+		}
+	}()
+
+	return g.next.Sync(ctx)
+}

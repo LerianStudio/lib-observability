@@ -17,6 +17,11 @@ import (
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
+// panicsInFullLog is a consumer's own full Logger whose Log always panics.
+type panicsInFullLog struct{ log.NopLogger }
+
+func (*panicsInFullLog) Log(context.Context, int, string, ...any) { panic("boom") }
+
 // panicsInLog is a Log-only consumer logger that always panics.
 type panicsInLog struct{}
 
@@ -51,9 +56,9 @@ func recoveredPanics(t *testing.T, reader *sdkmetric.ManualReader, attrs attribu
 	return total
 }
 
-// TestAdapt_PanicInsideLoggerIncrementsRecoveredPanicCounter: the panic counts
-// on the same panic_recovered_total runtime's recover helpers feed, once
-// runtime.InitPanicMetrics is wired, labelled component=log and the method.
+// TestAdapt_PanicInsideLoggerIncrementsRecoveredPanicCounter: a panic inside an
+// adapted and inside a guarded logger each count on runtime's
+// panic_recovered_total, labelled component=log and the method.
 func TestAdapt_PanicInsideLoggerIncrementsRecoveredPanicCounter(t *testing.T) {
 	reader := sdkmetric.NewManualReader()
 	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
@@ -69,9 +74,10 @@ func TestAdapt_PanicInsideLoggerIncrementsRecoveredPanicCounter(t *testing.T) {
 
 	require.NotPanics(t, func() {
 		log.Adapt(panicsInLog{}).Log(context.Background(), log.LevelInfo, "m")
+		log.Guard(&panicsInFullLog{}).Log(context.Background(), log.LevelInfo, "m")
 	})
 
-	assert.Equal(t, int64(1), recoveredPanics(t, reader, attribute.NewSet(
+	assert.Equal(t, int64(2), recoveredPanics(t, reader, attribute.NewSet(
 		attribute.String("component", "log"),
 		attribute.String("goroutine_name", "Log"),
 	)))
