@@ -3,6 +3,19 @@ name: Release
 on:
   push:
     branches: [main, release-candidate, develop]
+    paths-ignore:
+      - '.github/**'
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE'
+      - '.gitignore'
+      - '.golangci.yml'
+      - '.golangci.yaml'
+      - '.releaserc.yml'
+      - '.releaserc.yaml'
+      - '.goreleaser.yml'
+      - '.goreleaser.yaml'
+      - '.ignorecoverunit'
 
 permissions:
   id-token: write
@@ -16,4 +29,13 @@ jobs:
     uses: LerianStudio/github-actions-shared-workflows/.github/workflows/release.yml@v1.30.0
     with:
       enable_changelog: ${{ github.ref == 'refs/heads/main' }}
+    secrets: inherit
+
+  backmerge:
+    if: github.ref == 'refs/heads/main'
+    needs: release
+    uses: LerianStudio/github-actions-shared-workflows/.github/workflows/backmerge.yml@v1
+    with:
+      rules: '[{"from": "main", "to": "develop", "mode": "direct-with-pr-fallback"}]'
+      pr_labels: "backmerge,automated"
     secrets: inherit

@@ -124,7 +124,7 @@ func TestAdapt_WrapsLogOnlyLogger(t *testing.T) {
 	assert.Equal(t, []Field{{Key: "k", Value: "v"}}, entry.fields)
 }
 
-func TestAdaptedShim_EnabledMirrorsLevelValid(t *testing.T) {
+func TestAdaptedShim_EnabledMirrorsLevelValidWhenWrappedHasNoEnabled(t *testing.T) {
 	t.Parallel()
 
 	adapted := Adapt(&recordingUniversal{})
@@ -147,12 +147,59 @@ func TestAdaptedShim_EnabledMirrorsLevelValid(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			// A Log-only logger exposes no level check, so answering false for
+			// This logger exposes no level check, so answering false for
 			// a DEFINED level would silently drop entries it would have emitted.
 			assert.Equal(t, tt.want, adapted.Enabled(tt.level))
 			assert.Equal(t, LevelValid(tt.level), adapted.Enabled(tt.level))
 		})
 	}
+}
+
+// levelCheckingUniversal implements Universal plus its own level check, but
+// not the rest of Logger: the common shape of a consumer logger that cannot
+// declare the self-returning With/WithGroup.
+type levelCheckingUniversal struct {
+	recordingUniversal
+	enabled func(level int) bool
+}
+
+func (l *levelCheckingUniversal) Enabled(level int) bool { return l.enabled(level) }
+
+func TestAdaptedShim_EnabledDelegatesToWrappedLevelCheck(t *testing.T) {
+	t.Parallel()
+
+	atInfo := &levelCheckingUniversal{enabled: func(level int) bool { return level <= LevelInfo }}
+	adapted := Adapt(atInfo)
+	require.IsType(t, &universalShim{}, adapted)
+
+	loggers := map[string]Logger{
+		"direct":    adapted,
+		"with":      adapted.With(String("k", "v")),
+		"withGroup": adapted.WithGroup("g"),
+		"both":      adapted.WithGroup("g").With(String("k", "v")),
+	}
+
+	for name, logger := range loggers {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			assert.True(t, logger.Enabled(LevelError))
+			assert.True(t, logger.Enabled(LevelInfo))
+			assert.False(t, logger.Enabled(LevelDebug), "the wrapped logger runs at info, so debug must be off")
+		})
+	}
+}
+
+func TestAdaptedShim_EnabledRejectsUndefinedLevelEvenIfWrappedSaysYes(t *testing.T) {
+	t.Parallel()
+
+	adapted := Adapt(&levelCheckingUniversal{enabled: func(int) bool { return true }})
+
+	for _, level := range []int{4, -1, LevelUnknown} {
+		assert.False(t, adapted.Enabled(level), "level %d", level)
+	}
+
+	assert.True(t, adapted.Enabled(LevelDebug))
 }
 
 func TestAdaptedShim_SyncIsNoop(t *testing.T) {

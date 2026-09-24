@@ -21,6 +21,7 @@ import (
 	constant "github.com/LerianStudio/lib-observability/v4/constants"
 	"github.com/LerianStudio/lib-observability/v4/log"
 	"github.com/LerianStudio/lib-observability/v4/metrics"
+	"github.com/google/uuid"
 	otelruntime "go.opentelemetry.io/contrib/instrumentation/runtime"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -88,8 +89,27 @@ type TelemetryConfig struct {
 	// the attribute is omitted. Surrounding whitespace is trimmed before the
 	// value is published, so a padded SHA still matches an exact-match
 	// dashboard query. No other format validation happens here.
-	ServiceRevision           string
-	DeploymentEnv             string
+	ServiceRevision string
+	DeploymentEnv   string
+	// ServiceInstanceID is the OpenTelemetry service.instance.id resource
+	// attribute: the identity that tells one replica of a service apart from
+	// the others, so traces, metrics and logs can be read per instance. It is
+	// optional. Precedence: this field, when non-empty, wins; otherwise a
+	// service.instance.id supplied through OTEL_RESOURCE_ATTRIBUTES is used;
+	// otherwise a random UUID v4 is generated once per NewTelemetry call, as
+	// the OpenTelemetry semantic conventions recommend. A generated id is
+	// therefore stable for the life of one Telemetry instance and different
+	// on every process start.
+	//
+	// The other attributes OTEL_RESOURCE_ATTRIBUTES carries (for example
+	// k8s.pod.name and k8s.namespace.name injected through the Kubernetes
+	// downward API) are added to the resource too. ServiceName,
+	// ServiceVersion and DeploymentEnv follow the same rule as this field: a
+	// non-empty value wins over OTEL_SERVICE_NAME and over the same key in
+	// OTEL_RESOURCE_ATTRIBUTES; an empty one is unset and takes the
+	// environment's value; when neither supplies one the attribute is omitted
+	// rather than published as an empty string.
+	ServiceInstanceID         string
 	CollectorExporterEndpoint string
 	EnableTelemetry           bool
 	InsecureExporter          bool
@@ -429,7 +449,13 @@ func buildTelemetry(
 	mExp sdkmetric.Exporter,
 	lExp sdklog.Exporter,
 ) (*Telemetry, error) {
-	r := cfg.newResource()
+	r, err := cfg.newResource(ctx)
+	if err != nil {
+		// No provider owns the exporters yet, so they are what rolls back.
+		shutdownAll(ctx, []shutdownable{tExp, mExp, lExp})
+
+		return nil, fmt.Errorf("can't initialize resource: %w", err)
+	}
 
 	mp := cfg.newMeterProvider(r, mExp, options.metricCardinalityLimit)
 	tp := cfg.newTracerProvider(r, tExp)
@@ -664,20 +690,67 @@ func (tl *Telemetry) ForceFlush(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-func (tl *TelemetryConfig) newResource() *sdkresource.Resource {
-	attrs := []attribute.KeyValue{
-		semconv.ServiceName(tl.ServiceName),
-		semconv.ServiceVersion(tl.ServiceVersion),
-		semconv.DeploymentEnvironmentName(tl.DeploymentEnv),
+// newResource builds the resource shared by every provider. The SDK applies
+// the options below in order and, on a key conflict, the later one wins
+// (resource.Merge: "the value from b will overwrite the value from a"). So the
+// generated instance id goes first, the environment detector
+// (OTEL_RESOURCE_ATTRIBUTES, OTEL_SERVICE_NAME) second, and the explicit
+// config last: explicit config > environment > generated id.
+//
+// A malformed OTEL_RESOURCE_ATTRIBUTES makes the SDK return
+// ErrPartialResource together with the pairs it could parse. That is not
+// worth refusing telemetry over: the partial resource is kept and one warning
+// is logged. Any other error is returned.
+func (tl *TelemetryConfig) newResource(ctx context.Context) (*sdkresource.Resource, error) {
+	explicit := []attribute.KeyValue{
 		semconv.TelemetrySDKName(constant.TelemetrySDKName),
 		semconv.TelemetrySDKLanguageGo,
 	}
 
-	if revision := strings.TrimSpace(tl.ServiceRevision); revision != "" {
-		attrs = append(attrs, semconv.VCSRefHeadRevision(revision))
+	// A non-empty config field wins over the environment. An empty one is
+	// unset: it falls through to OTEL_SERVICE_NAME / OTEL_RESOURCE_ATTRIBUTES,
+	// and when neither supplies a value the attribute is omitted rather than
+	// published as an empty string that would overwrite the environment's.
+	if strings.TrimSpace(tl.ServiceName) != "" {
+		explicit = append(explicit, semconv.ServiceName(tl.ServiceName))
 	}
 
-	return sdkresource.NewWithAttributes(semconv.SchemaURL, attrs...)
+	if strings.TrimSpace(tl.ServiceVersion) != "" {
+		explicit = append(explicit, semconv.ServiceVersion(tl.ServiceVersion))
+	}
+
+	if strings.TrimSpace(tl.DeploymentEnv) != "" {
+		explicit = append(explicit, semconv.DeploymentEnvironmentName(tl.DeploymentEnv))
+	}
+
+	if revision := strings.TrimSpace(tl.ServiceRevision); revision != "" {
+		explicit = append(explicit, semconv.VCSRefHeadRevision(revision))
+	}
+
+	opts := []sdkresource.Option{sdkresource.WithSchemaURL(semconv.SchemaURL)}
+
+	if id := strings.TrimSpace(tl.ServiceInstanceID); id != "" {
+		explicit = append(explicit, semconv.ServiceInstanceID(id))
+	} else {
+		opts = append(opts, sdkresource.WithAttributes(semconv.ServiceInstanceID(uuid.NewString())))
+	}
+
+	opts = append(opts, sdkresource.WithFromEnv(), sdkresource.WithAttributes(explicit...))
+
+	r, err := sdkresource.New(ctx, opts...)
+	if err != nil {
+		if !errors.Is(err, sdkresource.ErrPartialResource) {
+			return nil, err
+		}
+
+		if !log.IsNil(tl.Logger) {
+			tl.Logger.Log(ctx, log.LevelWarn,
+				"Malformed OTEL_RESOURCE_ATTRIBUTES; keeping the attributes that parsed",
+				log.String("env_var", "OTEL_RESOURCE_ATTRIBUTES"), log.Err(err))
+		}
+	}
+
+	return r, nil
 }
 
 // exporterTLSCredentials builds the transport credentials used by every OTLP

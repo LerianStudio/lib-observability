@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/LerianStudio/lib-observability/v4/internal/panicobs"
 	"github.com/LerianStudio/lib-observability/v4/log"
 )
 
@@ -67,30 +68,18 @@ func GetErrorReporter() ErrorReporter {
 	return errorReporterInstance
 }
 
-var (
-	// productionMode controls whether sensitive data is redacted in error reports.
-	// When true, stack traces and detailed panic values are suppressed.
-	productionMode   bool
-	productionModeMu sync.RWMutex
-)
-
 const redactedPanicMsg = "panic recovered (details redacted)"
 
 // SetProductionMode enables or disables production mode for error reporting.
 // In production mode, stack traces and potentially sensitive panic details are redacted.
+// The switch also governs panics recovered inside a logger returned by log.Adapt.
 func SetProductionMode(enabled bool) {
-	productionModeMu.Lock()
-	defer productionModeMu.Unlock()
-
-	productionMode = enabled
+	panicobs.SetProductionMode(enabled)
 }
 
 // IsProductionMode returns whether production mode is enabled.
 func IsProductionMode() bool {
-	productionModeMu.RLock()
-	defer productionModeMu.RUnlock()
-
-	return productionMode
+	return panicobs.ProductionMode()
 }
 
 // reportPanicToErrorService reports a panic to the configured error reporter if one exists.

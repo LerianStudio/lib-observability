@@ -119,7 +119,7 @@ func New(cfg Config) (*Logger, error) {
 				core = outputCore(baseConfig, level, cfg.Output)
 			}
 
-			return zapcore.NewTee(core, otelzap.NewCore(cfg.OTelLibraryName))
+			return zapcore.NewTee(core, levelGate{Core: otelzap.NewCore(cfg.OTelLibraryName), level: level})
 		}),
 	}
 
@@ -152,6 +152,30 @@ func outputCore(baseConfig zap.Config, level zap.AtomicLevel, w io.Writer) zapco
 	}
 
 	return core
+}
+
+// levelGate applies the logger's AtomicLevel to a core that has none of its
+// own: an entry below the level never reaches the inner core, and a runtime
+// SetLevel moves this output together with the local sink.
+type levelGate struct {
+	zapcore.Core
+	level zap.AtomicLevel
+}
+
+func (g levelGate) Enabled(l zapcore.Level) bool {
+	return g.level.Enabled(l) && g.Core.Enabled(l)
+}
+
+func (g levelGate) With(fields []zapcore.Field) zapcore.Core {
+	return levelGate{Core: g.Core.With(fields), level: g.level}
+}
+
+func (g levelGate) Check(ent zapcore.Entry, ce *zapcore.CheckedEntry) *zapcore.CheckedEntry {
+	if !g.level.Enabled(ent.Level) {
+		return ce
+	}
+
+	return g.Core.Check(ent, ce)
 }
 
 func resolveLevel(cfg Config) (zap.AtomicLevel, error) {

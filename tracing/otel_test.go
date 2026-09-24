@@ -12,6 +12,7 @@ import (
 	observability "github.com/LerianStudio/lib-observability/v4"
 	constant "github.com/LerianStudio/lib-observability/v4/constants"
 	"github.com/LerianStudio/lib-observability/v4/log"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
@@ -25,6 +26,7 @@ import (
 	sdkresource "go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	semconv "go.opentelemetry.io/otel/semconv/v1.34.0"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc/metadata"
 )
@@ -1678,6 +1680,167 @@ func TestFlattenAttributes_DefaultBranch(t *testing.T) {
 // 21. newResource coverage
 // ===========================================================================
 
+// newResource reads OTEL_RESOURCE_ATTRIBUTES and OTEL_SERVICE_NAME, so each
+// test pins both with t.Setenv (which also rules out t.Parallel).
+
+func resourceValue(t *testing.T, r *sdkresource.Resource, key attribute.Key) (string, bool) {
+	t.Helper()
+	require.NotNil(t, r)
+
+	v, ok := r.Set().Value(key)
+
+	return v.AsString(), ok
+}
+
+func newTestResource(t *testing.T, cfg TelemetryConfig) *sdkresource.Resource {
+	t.Helper()
+
+	r, err := cfg.newResource(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, semconv.SchemaURL, r.SchemaURL())
+
+	return r
+}
+
+func TestNewResource_GeneratesUUIDInstanceIDWhenUnset(t *testing.T) {
+	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "")
+	t.Setenv("OTEL_SERVICE_NAME", "")
+
+	r := newTestResource(t, TelemetryConfig{ServiceName: "svc", ServiceVersion: "1.0", DeploymentEnv: "test"})
+
+	id, ok := resourceValue(t, r, semconv.ServiceInstanceIDKey)
+	require.True(t, ok)
+
+	parsed, err := uuid.Parse(id)
+	require.NoError(t, err)
+	assert.Equal(t, uuid.Version(4), parsed.Version())
+
+	name, _ := resourceValue(t, r, semconv.ServiceNameKey)
+	assert.Equal(t, "svc", name)
+	version, _ := resourceValue(t, r, semconv.ServiceVersionKey)
+	assert.Equal(t, "1.0", version)
+	env, _ := resourceValue(t, r, semconv.DeploymentEnvironmentNameKey)
+	assert.Equal(t, "test", env)
+}
+
+func TestNewResource_GeneratedInstanceIDDiffersPerConstruction(t *testing.T) {
+	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "")
+	t.Setenv("OTEL_SERVICE_NAME", "")
+
+	cfg := TelemetryConfig{ServiceName: "svc"}
+	first, _ := resourceValue(t, newTestResource(t, cfg), semconv.ServiceInstanceIDKey)
+	second, _ := resourceValue(t, newTestResource(t, cfg), semconv.ServiceInstanceIDKey)
+
+	assert.NotEmpty(t, first)
+	assert.NotEqual(t, first, second)
+}
+
+func TestNewResource_ExplicitInstanceIDWinsOverEnv(t *testing.T) {
+	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "service.instance.id=from-env")
+	t.Setenv("OTEL_SERVICE_NAME", "")
+
+	r := newTestResource(t, TelemetryConfig{ServiceName: "svc", ServiceInstanceID: "explicit-1"})
+
+	id, _ := resourceValue(t, r, semconv.ServiceInstanceIDKey)
+	assert.Equal(t, "explicit-1", id)
+}
+
+func TestNewResource_EnvInstanceIDWinsOverGenerated(t *testing.T) {
+	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "service.instance.id=from-env")
+	t.Setenv("OTEL_SERVICE_NAME", "")
+
+	r := newTestResource(t, TelemetryConfig{ServiceName: "svc"})
+
+	id, _ := resourceValue(t, r, semconv.ServiceInstanceIDKey)
+	assert.Equal(t, "from-env", id)
+}
+
+func TestNewResource_ExplicitConfigWinsOverEnvServiceAttributes(t *testing.T) {
+	t.Setenv("OTEL_SERVICE_NAME", "env-svc")
+	t.Setenv("OTEL_RESOURCE_ATTRIBUTES",
+		"service.version=9.9,deployment.environment.name=env-env,k8s.pod.name=pod-7")
+
+	r := newTestResource(t, TelemetryConfig{ServiceName: "svc", ServiceVersion: "1.0", DeploymentEnv: "test"})
+
+	name, _ := resourceValue(t, r, semconv.ServiceNameKey)
+	assert.Equal(t, "svc", name)
+	version, _ := resourceValue(t, r, semconv.ServiceVersionKey)
+	assert.Equal(t, "1.0", version)
+	env, _ := resourceValue(t, r, semconv.DeploymentEnvironmentNameKey)
+	assert.Equal(t, "test", env)
+
+	pod, ok := resourceValue(t, r, semconv.K8SPodNameKey)
+	require.True(t, ok)
+	assert.Equal(t, "pod-7", pod)
+}
+
+func TestNewResource_EmptyConfigFieldsTakeTheEnvValue(t *testing.T) {
+	t.Setenv("OTEL_SERVICE_NAME", "env-svc")
+	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "service.version=9.9,deployment.environment.name=env-env")
+
+	r := newTestResource(t, TelemetryConfig{ServiceName: " ", ServiceVersion: "", DeploymentEnv: ""})
+
+	name, _ := resourceValue(t, r, semconv.ServiceNameKey)
+	assert.Equal(t, "env-svc", name)
+	version, _ := resourceValue(t, r, semconv.ServiceVersionKey)
+	assert.Equal(t, "9.9", version)
+	env, _ := resourceValue(t, r, semconv.DeploymentEnvironmentNameKey)
+	assert.Equal(t, "env-env", env)
+}
+
+func TestNewResource_EmptyConfigAndNoEnvOmitsTheServiceAttributes(t *testing.T) {
+	t.Setenv("OTEL_SERVICE_NAME", "")
+	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "")
+
+	r := newTestResource(t, TelemetryConfig{})
+
+	for _, key := range []attribute.Key{semconv.ServiceNameKey, semconv.ServiceVersionKey, semconv.DeploymentEnvironmentNameKey} {
+		_, ok := resourceValue(t, r, key)
+		assert.False(t, ok, "%s must be omitted, not published as an empty string", key)
+	}
+}
+
+func TestNewResource_MalformedEnvKeepsPartialResourceAndWarns(t *testing.T) {
+	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "k8s.pod.name=pod-7,not-a-pair")
+	t.Setenv("OTEL_SERVICE_NAME", "")
+
+	logger := &warnCaptureLogger{}
+	r := newTestResource(t, TelemetryConfig{ServiceName: "svc", Logger: logger})
+
+	pod, ok := resourceValue(t, r, semconv.K8SPodNameKey)
+	require.True(t, ok)
+	assert.Equal(t, "pod-7", pod)
+
+	name, _ := resourceValue(t, r, semconv.ServiceNameKey)
+	assert.Equal(t, "svc", name)
+	_, ok = resourceValue(t, r, semconv.ServiceInstanceIDKey)
+	assert.True(t, ok)
+
+	require.Len(t, logger.warnFields, 1)
+	assert.Contains(t, logger.warnFields[0], log.String("env_var", "OTEL_RESOURCE_ATTRIBUTES"))
+}
+
+// warnCaptureLogger records the fields of each warning it receives.
+type warnCaptureLogger struct {
+	warnFields [][]any
+}
+
+func (l *warnCaptureLogger) Log(_ context.Context, level int, _ string, fields ...any) {
+	if level == log.LevelWarn {
+		l.warnFields = append(l.warnFields, fields)
+	}
+}
+
+func TestNewResource_MalformedEnvWithoutLoggerDoesNotFail(t *testing.T) {
+	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "not-a-pair")
+	t.Setenv("OTEL_SERVICE_NAME", "")
+
+	r := newTestResource(t, TelemetryConfig{ServiceName: "svc"})
+
+	name, _ := resourceValue(t, r, semconv.ServiceNameKey)
+	assert.Equal(t, "svc", name)
+}
+
 func resourceAttrs(t *testing.T, r *sdkresource.Resource) map[string]string {
 	t.Helper()
 
@@ -1694,7 +1857,10 @@ func resourceAttrs(t *testing.T, r *sdkresource.Resource) map[string]string {
 }
 
 func TestNewResource(t *testing.T) {
-	t.Parallel()
+	// newResource reads OTEL_RESOURCE_ATTRIBUTES and OTEL_SERVICE_NAME; pin
+	// both empty so only the config decides the map (and no t.Parallel).
+	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "")
+	t.Setenv("OTEL_SERVICE_NAME", "")
 
 	const revision = "9d59409acf479dfa0df1aa568182e43e43df8bbe"
 
@@ -1704,6 +1870,7 @@ func TestNewResource(t *testing.T) {
 	base := func() map[string]string {
 		return map[string]string{
 			"service.name":                "svc",
+			"service.instance.id":         "inst",
 			"service.version":             "1.0",
 			"deployment.environment.name": "test",
 			"telemetry.sdk.name":          constant.TelemetrySDKName,
@@ -1750,16 +1917,15 @@ func TestNewResource(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			cfg := &TelemetryConfig{
-				ServiceName:     "svc",
-				ServiceVersion:  "1.0",
-				ServiceRevision: tt.revision,
-				DeploymentEnv:   "test",
+			cfg := TelemetryConfig{
+				ServiceName:       "svc",
+				ServiceInstanceID: "inst",
+				ServiceVersion:    "1.0",
+				ServiceRevision:   tt.revision,
+				DeploymentEnv:     "test",
 			}
 
-			assert.Equal(t, tt.want, resourceAttrs(t, cfg.newResource()))
+			assert.Equal(t, tt.want, resourceAttrs(t, newTestResource(t, cfg)))
 		})
 	}
 }

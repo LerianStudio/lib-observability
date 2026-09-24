@@ -2,21 +2,15 @@ package runtime
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"regexp"
 
 	constant "github.com/LerianStudio/lib-observability/v4/constants"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
-	"go.opentelemetry.io/otel/trace"
+	"github.com/LerianStudio/lib-observability/v4/internal/panicobs"
 )
 
 // maxPanicValueLen is the maximum length for a panic value string exported to spans.
 const maxPanicValueLen = 1024
-
-// maxStackTraceLen is the maximum length for a stack trace string exported to spans.
-const maxStackTraceLen = 4096
 
 // sensitivePattern matches common sensitive data patterns for redaction in span attributes.
 // Covers passwords, tokens, secrets, API keys, credentials, and connection strings.
@@ -38,19 +32,8 @@ func sanitizePanicValue(raw string) string {
 	return sanitized
 }
 
-// sanitizeStackTrace truncates a stack trace for safe span export.
-func sanitizeStackTrace(stack []byte) string {
-	s := string(stack)
-
-	if len(s) > maxStackTraceLen {
-		return s[:maxStackTraceLen] + "\n...[truncated]"
-	}
-
-	return s
-}
-
 // ErrPanic is the sentinel error for recovered panics recorded to spans.
-var ErrPanic = errors.New("panic")
+var ErrPanic = panicobs.ErrPanic
 
 // PanicSpanEventName is the event name used when recording panic events on spans.
 const PanicSpanEventName = constant.EventPanicRecovered
@@ -93,49 +76,13 @@ func RecordPanicToSpanWithComponent(
 }
 
 // recordPanicToSpanInternal is the shared implementation for recording panic events.
-// Panic values and stack traces are sanitized to prevent leaking sensitive data
-// into distributed tracing backends.
+// Panic values are sanitized to prevent leaking sensitive data into
+// distributed tracing backends; panicobs truncates the stack.
 func recordPanicToSpanInternal(
 	ctx context.Context,
 	panicValue any,
 	stack []byte,
 	component, goroutineName string,
 ) {
-	if ctx == nil {
-		return
-	}
-
-	span := trace.SpanFromContext(ctx)
-	if !span.IsRecording() {
-		return
-	}
-
-	panicStr := sanitizePanicValue(fmt.Sprintf("%v", panicValue))
-	stackStr := sanitizeStackTrace(stack)
-
-	// Build attributes list
-	attrs := []attribute.KeyValue{
-		attribute.String("panic.value", panicStr),
-		attribute.String("panic.stack", stackStr),
-		attribute.String("panic.goroutine_name", goroutineName),
-	}
-
-	// Add component if provided
-	if component != "" {
-		attrs = append(attrs, attribute.String("panic.component", component))
-	}
-
-	// Add detailed event with all panic information
-	span.AddEvent(PanicSpanEventName, trace.WithAttributes(attrs...))
-
-	// Record sanitized error for error-tracking integrations
-	span.RecordError(fmt.Errorf("%w: %s", ErrPanic, panicStr))
-
-	// Set span status to Error
-	statusMsg := "panic recovered in " + goroutineName
-	if component != "" {
-		statusMsg = fmt.Sprintf("panic recovered in %s/%s", component, goroutineName)
-	}
-
-	span.SetStatus(codes.Error, statusMsg)
+	panicobs.RecordToSpan(ctx, sanitizePanicValue(fmt.Sprintf("%v", panicValue)), stack, component, goroutineName)
 }
