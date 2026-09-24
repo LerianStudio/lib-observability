@@ -119,7 +119,7 @@ func New(cfg Config) (*Logger, error) {
 				core = outputCore(baseConfig, level, cfg.Output)
 			}
 
-			return zapcore.NewTee(core, otelzap.NewCore(cfg.OTelLibraryName))
+			return zapcore.NewTee(core, levelGate{inner: otelzap.NewCore(cfg.OTelLibraryName), level: level})
 		}),
 	}
 
@@ -152,6 +152,46 @@ func outputCore(baseConfig zap.Config, level zap.AtomicLevel, w io.Writer) zapco
 	}
 
 	return core
+}
+
+// levelGate holds a core to the logger's configured level. The otelzap bridge
+// core carries no level of its own - it asks the OTel LoggerProvider, and the
+// SDK provider enables every severity - while zapcore.Tee accepts an entry when
+// any child does. Ungated, the bridge would export over OTLP every entry the
+// Output core drops. The gate shares the logger's AtomicLevel, so a runtime
+// Level().SetLevel reaches both outputs.
+//
+// zapcore.NewIncreaseLevelCore is not usable here: its constructor refuses a
+// core that is disabled at a level the enabler allows, and the OTel global
+// delegate reports every level disabled until an SDK provider is installed,
+// which services do after building this logger.
+type levelGate struct {
+	inner zapcore.Core
+	level zap.AtomicLevel
+}
+
+func (g levelGate) Enabled(l zapcore.Level) bool {
+	return g.level.Enabled(l) && g.inner.Enabled(l)
+}
+
+func (g levelGate) With(fields []zapcore.Field) zapcore.Core {
+	return levelGate{inner: g.inner.With(fields), level: g.level}
+}
+
+func (g levelGate) Check(ent zapcore.Entry, ce *zapcore.CheckedEntry) *zapcore.CheckedEntry {
+	if !g.level.Enabled(ent.Level) {
+		return ce
+	}
+
+	return g.inner.Check(ent, ce)
+}
+
+func (g levelGate) Write(ent zapcore.Entry, fields []zapcore.Field) error {
+	return g.inner.Write(ent, fields)
+}
+
+func (g levelGate) Sync() error {
+	return g.inner.Sync()
 }
 
 func resolveLevel(cfg Config) (zap.AtomicLevel, error) {
