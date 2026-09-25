@@ -2056,3 +2056,34 @@ func attrsToMap(attrs []attribute.KeyValue) map[string]string {
 
 	return m
 }
+
+func TestSanitizeSpanMessage_RedactsSchemeCredentials(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		msg     string
+		want    string
+		secrets []string
+	}{
+		{"lowercase bearer", "authorization: bearer abc123", "bearer [REDACTED]", []string{"abc123"}},
+		{"two tokens", "Bearer aaa111 rejected, retried Bearer bbb222", "Bearer [REDACTED]", []string{"aaa111", "bbb222"}},
+		{"basic", "Basic dXNlcjpwYXNz", "Basic [REDACTED]", []string{"dXNlcjpwYXNz"}},
+		{"repeated scheme", "Bearer Bearer abc123", "Bearer [REDACTED]", []string{"abc123"}},
+		{"mixed schemes", "Bearer Basic dXNlcjpwYXNz", "Basic [REDACTED]", []string{"dXNlcjpwYXNz"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := sanitizeSpanMessage(tt.msg)
+
+			assert.Contains(t, got, tt.want)
+
+			for _, secret := range tt.secrets {
+				assert.NotContains(t, got, secret)
+			}
+		})
+	}
+}
