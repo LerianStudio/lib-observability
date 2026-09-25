@@ -13,9 +13,10 @@ import (
 const maxPanicValueLen = 1024
 
 // sensitivePattern matches common sensitive data patterns for redaction in span attributes.
-// Covers passwords, tokens, secrets, API keys, credentials, and connection strings.
+// Covers passwords, tokens, secrets, API keys, credentials, and connection strings,
+// plus the credential after every Bearer or Basic scheme word, with or without a key.
 var sensitivePattern = regexp.MustCompile(
-	`(?i)(password|passwd|pwd|token|secret|api[_-]?key|credential|bearer|authorization)[=:]\s*\S+`,
+	`(?i)(password|passwd|pwd|token|secret|api[_-]?key|credential|bearer|authorization)[=:]\s*(?:(?:bearer|basic)\s+)?\S+|\b(?:bearer|basic)\s+\S+`,
 )
 
 // sensitiveRedaction is the replacement string for redacted sensitive data.

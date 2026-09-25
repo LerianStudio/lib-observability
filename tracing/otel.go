@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -919,26 +920,14 @@ func isNilSpan(span trace.Span) bool {
 // maxSpanErrorLength is the maximum length for error messages written to span status/events.
 const maxSpanErrorLength = 1024
 
+// credentialSchemePattern matches a Bearer or Basic scheme word and the credential after it.
+var credentialSchemePattern = regexp.MustCompile(`(?i)\b(bearer|basic)\s+\S+`)
+
 // sanitizeSpanMessage sanitizes an error message for span output:
+// - Redacts the credential after every Bearer or Basic scheme word, keeping the word
 // - Truncates to a safe maximum length
-// - Strips common sensitive-looking patterns (bearer tokens, passwords in URLs)
 func sanitizeSpanMessage(msg string) string {
-	// Strip common sensitive patterns
-	for _, pattern := range []struct{ prefix, replacement string }{
-		{"Bearer ", "Bearer [REDACTED]"},
-		{"Basic ", "Basic [REDACTED]"},
-	} {
-		if idx := strings.Index(msg, pattern.prefix); idx >= 0 {
-			end := idx + len(pattern.prefix)
-			// Find the end of the token (next space or end of string)
-			tokenEnd := strings.IndexByte(msg[end:], ' ')
-			if tokenEnd < 0 {
-				msg = msg[:idx] + pattern.replacement
-			} else {
-				msg = msg[:idx] + pattern.replacement + msg[end+tokenEnd:]
-			}
-		}
-	}
+	msg = credentialSchemePattern.ReplaceAllString(msg, "${1} [REDACTED]")
 
 	if len(msg) > maxSpanErrorLength {
 		msg = msg[:maxSpanErrorLength]

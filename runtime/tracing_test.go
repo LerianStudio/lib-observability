@@ -459,3 +459,34 @@ func TestRecordPanicToSpan_ComplexPanicValues(t *testing.T) {
 		})
 	}
 }
+
+func TestSanitizePanicValue_RedactsCredentials(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		raw     string
+		secrets []string
+	}{
+		{"authorization header with bearer", "Authorization: Bearer abc123", []string{"abc123"}},
+		{"lowercase authorization header", "authorization: bearer abc123", []string{"abc123"}},
+		{"bare bearer", "Bearer abc123", []string{"abc123"}},
+		{"bare basic", "Basic dXNlcjpwYXNz", []string{"dXNlcjpwYXNz"}},
+		{"two tokens", "rejected Bearer aaa111 then Bearer bbb222", []string{"aaa111", "bbb222"}},
+		{"key value", "password=hunter2", []string{"hunter2"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := sanitizePanicValue(tt.raw)
+
+			assert.Contains(t, got, sensitiveRedaction)
+
+			for _, secret := range tt.secrets {
+				assert.NotContains(t, got, secret)
+			}
+		})
+	}
+}
