@@ -920,8 +920,8 @@ func isNilSpan(span trace.Span) bool {
 // maxSpanErrorLength is the maximum length for error messages written to span status/events.
 const maxSpanErrorLength = 1024
 
-// credentialSchemePattern matches a Bearer or Basic scheme word and the credential after it.
-var credentialSchemePattern = regexp.MustCompile(`(?i)\b(bearer|basic)\s+\S+`)
+// credentialSchemePattern matches one or more Bearer or Basic scheme words and the credential after them.
+var credentialSchemePattern = regexp.MustCompile(`(?i)\b((?:bearer|basic)(?:\s+(?:bearer|basic))*)\s+\S+`)
 
 // sanitizeSpanMessage sanitizes an error message for span output:
 // - Redacts the credential after every Bearer or Basic scheme word, keeping the word

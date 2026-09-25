@@ -473,6 +473,8 @@ func TestSanitizePanicValue_RedactsCredentials(t *testing.T) {
 		{"bare bearer", "Bearer abc123", []string{"abc123"}},
 		{"bare basic", "Basic dXNlcjpwYXNz", []string{"dXNlcjpwYXNz"}},
 		{"two tokens", "rejected Bearer aaa111 then Bearer bbb222", []string{"aaa111", "bbb222"}},
+		{"repeated scheme", "Bearer Bearer abc123", []string{"abc123"}},
+		{"mixed schemes after a key", "Authorization: Bearer Basic dXNlcjpwYXNz", []string{"dXNlcjpwYXNz"}},
 		{"key value", "password=hunter2", []string{"hunter2"}},
 	}
 
