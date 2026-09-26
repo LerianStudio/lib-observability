@@ -1,5 +1,16 @@
 # Lib-observability Changelog
 
+## [4.6.1](https://github.com/LerianStudio/lib-observability/releases/tag/v4.6.1)
+
+Fixes:
+
+- Redacted credentials after repeated scheme words to enhance security. (@fredcamaral)
+- Improved credential redaction following a bearer or basic scheme to prevent exposure. (@fredcamaral)
+
+[Compare changes](https://github.com/LerianStudio/lib-observability/compare/v4.6.0...v4.6.1)
+
+---
+
 ## [4.6.0](https://github.com/LerianStudio/lib-observability/releases/tag/v4.6.0)
 
 Features:
