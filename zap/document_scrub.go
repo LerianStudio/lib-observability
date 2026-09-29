@@ -13,6 +13,7 @@ import (
 
 	logpkg "github.com/LerianStudio/lib-observability/v4/log"
 	"github.com/LerianStudio/lib-observability/v4/redaction"
+	"go.opentelemetry.io/otel/attribute"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
@@ -101,6 +102,12 @@ func scrubDocumentField(f zapcore.Field) (zapcore.Field, bool) {
 		return scrubContextField(f, ctx)
 	}
 
+	if isAttributeValue(f.Interface) {
+		// zap takes an attribute.Value for a Stringer, whose String form shows
+		// bytes as base64; it is judged, and replaced, by the text it carries.
+		return scrubRenderedField(zap.Reflect(f.Key, f.Interface), f)
+	}
+
 	switch f.Type {
 	case zapcore.StringType:
 		scrubbed := redaction.ScrubDocuments(f.String)
@@ -111,7 +118,8 @@ func scrubDocumentField(f zapcore.Field) (zapcore.Field, bool) {
 		f.String = scrubbed
 
 		return f, true
-	case zapcore.ByteStringType:
+	case zapcore.ByteStringType, zapcore.BinaryType:
+		// The bridge exports binary as raw bytes; the local sink as base64.
 		b, ok := f.Interface.([]byte)
 		if !ok {
 			return f, false
@@ -132,7 +140,7 @@ func scrubDocumentField(f zapcore.Field) (zapcore.Field, bool) {
 		return zap.String(f.Key, redaction.ScrubDocuments(logpkg.SafeErrorMessage(err))), true
 	case zapcore.StringerType, zapcore.ObjectMarshalerType, zapcore.ArrayMarshalerType,
 		zapcore.InlineMarshalerType, zapcore.ReflectType:
-		return scrubRenderedField(f)
+		return scrubRenderedField(f, f)
 	default:
 		return f, false
 	}
@@ -142,14 +150,20 @@ func scrubDocumentField(f zapcore.Field) (zapcore.Field, bool) {
 // entries its own AddTo produces (so a zapcore.ObjectMarshaler is read through
 // MarshalLogObject, and the "<key>Error" text zap adds for a failing marshaler
 // or a panicking Stringer is included), each read both as the local sink's
-// JSON and as the OTLP bridge's rendering. A field without a document is kept
-// as is. One with a document is replaced by an inline object holding each
-// entry as a scrubbed string, so every key the sinks would have written is
-// still written.
-func scrubRenderedField(f zapcore.Field) (zapcore.Field, bool) {
+// JSON and as the OTLP bridge's rendering, with every attribute value in it
+// read as the text it carries. When no document is found, original is kept as
+// is. Otherwise it is replaced by an inline object holding each entry as a
+// scrubbed string, so every key the sinks would have written is still written.
+func scrubRenderedField(f, original zapcore.Field) (zapcore.Field, bool) {
 	entries, ok := renderEntries(f)
 	if !ok {
-		return f, false
+		return original, false
+	}
+
+	for key, value := range entries {
+		if plain, held := plainAttributes(value, 0); held {
+			entries[key] = plain
+		}
 	}
 
 	found := false
@@ -163,7 +177,7 @@ func scrubRenderedField(f zapcore.Field) (zapcore.Field, bool) {
 	}
 
 	if !found {
-		return f, false
+		return original, false
 	}
 
 	scrubbed := make(scrubbedEntries, 0, len(entries))
@@ -346,5 +360,112 @@ func writeBridgeReflected(b *strings.Builder, v reflect.Value, depth int) {
 		}
 	default:
 		fmt.Fprintf(b, "%+v\n", v.Interface())
+	}
+}
+
+// isAttributeValue reports whether value is an OpenTelemetry attribute value,
+// directly or through a non-nil pointer.
+func isAttributeValue(value any) bool {
+	switch v := value.(type) {
+	case attribute.Value:
+		return true
+	case *attribute.Value:
+		return v != nil
+	default:
+		return false
+	}
+}
+
+// plainAttributes returns value with every OpenTelemetry attribute value in it
+// (at the top, or inside slices, arrays, maps and pointers, as the bridge
+// walks them) replaced by the text and structure it carries, and whether it
+// held any. The bridge forwards an attribute.Value as is, so a byte value is
+// exported as its raw bytes, while its String and JSON forms show base64. A
+// value holding none is returned as is, so its renderings keep their shape.
+// A struct is a leaf: the bridge renders it with %+v.
+func plainAttributes(value any, depth int) (any, bool) {
+	if depth > maxBridgeDepth {
+		return value, false
+	}
+
+	switch v := value.(type) {
+	case nil, []byte:
+		return value, false
+	case attribute.Value:
+		return plainAttributeValue(v, depth), true
+	case attribute.KeyValue:
+		return map[string]any{string(v.Key): plainAttributeValue(v.Value, depth)}, true
+	}
+
+	rv := reflect.ValueOf(value)
+
+	switch rv.Kind() {
+	case reflect.Slice, reflect.Array:
+		items := make([]any, rv.Len())
+		held := false
+
+		for i := range rv.Len() {
+			var itemHeld bool
+
+			items[i], itemHeld = plainAttributes(rv.Index(i).Interface(), depth+1)
+			held = held || itemHeld
+		}
+
+		if held {
+			return items, true
+		}
+	case reflect.Map:
+		entries := make(map[string]any, rv.Len())
+		held := false
+
+		iter := rv.MapRange()
+		for iter.Next() {
+			item, itemHeld := plainAttributes(iter.Value().Interface(), depth+1)
+			entries[fmt.Sprintf("%+v", iter.Key().Interface())] = item
+			held = held || itemHeld
+		}
+
+		if held {
+			return entries, true
+		}
+	case reflect.Pointer, reflect.Interface:
+		if !rv.IsNil() {
+			if elem, held := plainAttributes(rv.Elem().Interface(), depth+1); held {
+				return elem, true
+			}
+		}
+	default:
+	}
+
+	return value, false
+}
+
+// plainAttributeValue is the text and structure v carries: bytes as their
+// text, a map as one single-key object per entry (a map value may repeat a
+// key, and every entry must be judged), a slice element by element.
+func plainAttributeValue(v attribute.Value, depth int) any {
+	if depth > maxBridgeDepth {
+		return nil
+	}
+
+	switch v.Type() {
+	case attribute.BYTESLICE:
+		return string(v.AsByteSlice())
+	case attribute.SLICE:
+		items := make([]any, 0, len(v.AsSlice()))
+		for _, item := range v.AsSlice() {
+			items = append(items, plainAttributeValue(item, depth+1))
+		}
+
+		return items
+	case attribute.MAP:
+		entries := make([]any, 0, len(v.AsMap()))
+		for _, kv := range v.AsMap() {
+			entries = append(entries, map[string]any{string(kv.Key): plainAttributeValue(kv.Value, depth+1)})
+		}
+
+		return entries
+	default:
+		return v.AsInterface()
 	}
 }

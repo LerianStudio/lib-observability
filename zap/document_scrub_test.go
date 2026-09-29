@@ -15,6 +15,7 @@ import (
 	"github.com/LerianStudio/lib-observability/v4/redaction"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/attribute"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
@@ -217,6 +218,9 @@ func TestScrubDocuments_UnmatchedFieldsKeepTheirShape(t *testing.T) {
 			zap.Any("payload", docHolder{Note: "ok", N: 7}),
 			zap.Stringer("st", docStringer{v: "fine"}),
 			zap.Object("obj", docObject{v: "fine"}),
+			zap.Any("attr", attribute.ByteSliceValue([]byte("fine"))),
+			zap.Any("attrs", map[string]attribute.Value{"k": attribute.StringValue("fine")}),
+			zap.Binary("bin", []byte("fine")),
 			zap.Int64("n", 12345))
 	}
 

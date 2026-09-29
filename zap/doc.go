@@ -17,7 +17,9 @@
 // redaction.DocumentPlaceholder, on the local sink and the OTLP bridge alike,
 // whether the entry comes through Log, the zap-typed helpers, With or Raw(). A
 // structured field is judged as each sink renders it: the local JSON, and the
-// bridge's %+v, which also prints unexported and json:"-" struct fields. It
+// bridge's %+v, which also prints unexported and json:"-" struct fields. Raw
+// bytes and OpenTelemetry attribute values, which the bridge exports as they
+// are, are judged by the text they carry, not by their base64 form. It
 // is defence in depth, not a licence to format documents into log lines. The
 // stdlib log.GoLogger fallback does not scrub content; call
 // redaction.ScrubDocuments yourself on text you hand it.

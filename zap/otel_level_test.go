@@ -5,6 +5,7 @@ package zap
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"strings"
 	"sync"
@@ -31,6 +32,7 @@ type recordingExporter struct {
 	mu       sync.Mutex
 	bodies   []string
 	attrs    []string
+	raw      []string
 	traceIDs []string
 }
 
@@ -44,6 +46,7 @@ func (e *recordingExporter) Export(_ context.Context, records []sdklog.Record) e
 
 		r.WalkAttributes(func(kv attribute.KeyValue) bool {
 			e.attrs = append(e.attrs, string(kv.Key)+"="+kv.Value.Emit())
+			e.raw = append(e.raw, string(kv.Key)+"="+exportedText(kv.Value))
 
 			return true
 		})
@@ -67,6 +70,40 @@ func (e *recordingExporter) seenTraceIDs() []string {
 	defer e.mu.Unlock()
 
 	return append([]string(nil), e.traceIDs...)
+}
+
+// seenRawAttrs is each exported attribute with byte values as their raw text,
+// which is what the collector receives on the wire: Emit and String render
+// bytes as base64, where no document pattern matches.
+func (e *recordingExporter) seenRawAttrs() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	return append([]string(nil), e.raw...)
+}
+
+// exportedText flattens v with every byte value as its raw text.
+func exportedText(v attribute.Value) string {
+	switch v.Type() {
+	case attribute.BYTESLICE:
+		return string(v.AsByteSlice())
+	case attribute.SLICE:
+		parts := make([]string, 0, len(v.AsSlice()))
+		for _, item := range v.AsSlice() {
+			parts = append(parts, exportedText(item))
+		}
+
+		return "[" + strings.Join(parts, " ") + "]"
+	case attribute.MAP:
+		parts := make([]string, 0, len(v.AsMap()))
+		for _, kv := range v.AsMap() {
+			parts = append(parts, string(kv.Key)+":"+exportedText(kv.Value))
+		}
+
+		return "{" + strings.Join(parts, " ") + "}"
+	default:
+		return v.String()
+	}
 }
 
 func (e *recordingExporter) seenAttrs() []string {
@@ -221,4 +258,71 @@ func TestScrubDocumentsCoversTheBridgeRendering(t *testing.T) {
 	require.NotEmpty(t, traceIDs)
 	assert.Equal(t, traceID.String(), traceIDs[len(traceIDs)-1],
 		"a context field must remain the bridge's emit context")
+}
+
+// A document carried as an OpenTelemetry attribute value, or as raw bytes,
+// reaches the bridge unchanged (otelzap forwards an attribute.Value as is and
+// a byte field as bytes), so it must be judged by its text, not by the base64
+// its String and JSON forms show, at the top level and nested.
+func TestScrubDocumentsCoversAttributeValuesAndBytes(t *testing.T) {
+	prev := global.GetLoggerProvider()
+	t.Cleanup(func() { global.SetLoggerProvider(prev) })
+
+	exporter := &recordingExporter{}
+	provider := sdklog.NewLoggerProvider(sdklog.WithProcessor(sdklog.NewSimpleProcessor(exporter)))
+	global.SetLoggerProvider(provider)
+
+	var buf bytes.Buffer
+
+	logger, err := New(Config{
+		Environment: EnvironmentProduction, Level: "info", OTelLibraryName: "t", Output: &buf,
+		ScrubDocuments: true, DisableSampling: true,
+	})
+	require.NoError(t, err)
+
+	const cpf = "529.982.247-25"
+
+	cases := map[string]zap.Field{
+		"attribute bytes": zap.Any("doc", attribute.ByteSliceValue([]byte(cpf))),
+		"attribute bytes pointer": zap.Any("doc", func() *attribute.Value {
+			v := attribute.ByteSliceValue([]byte(cpf))
+
+			return &v
+		}()),
+		"attribute string":       zap.Any("doc", attribute.StringValue(cpf)),
+		"attribute string slice": zap.Any("doc", attribute.StringSliceValue([]string{"a", cpf})),
+		"attribute slice":        zap.Any("doc", attribute.SliceValue(attribute.IntValue(1), attribute.ByteSliceValue([]byte(cpf)))),
+		"attribute map":          zap.Any("doc", attribute.MapValue(attribute.ByteSlice("raw", []byte(cpf)), attribute.String("s", "x"))),
+		"attribute map key":      zap.Any("doc", attribute.MapValue(attribute.Int(cpf, 1))),
+		"attribute mixed map": zap.Any("doc", attribute.MapValue(
+			attribute.String("s", "52998224725"), attribute.ByteSlice("raw", []byte(cpf)))),
+		"attribute in a map":   zap.Any("doc", map[string]attribute.Value{"k": attribute.ByteSliceValue([]byte(cpf))}),
+		"attribute in a slice": zap.Any("doc", []attribute.Value{attribute.ByteSliceValue([]byte(cpf))}),
+		"key values":           zap.Any("doc", []attribute.KeyValue{attribute.ByteSlice("raw", []byte(cpf))}),
+		"binary field":         zap.Binary("doc", []byte(cpf)),
+		"bytes via log.Any":    zap.Any("doc", []byte("payer "+cpf)),
+	}
+
+	encoded := base64.StdEncoding.EncodeToString([]byte(cpf))
+
+	for name, field := range cases {
+		t.Run(name, func(t *testing.T) {
+			before := len(exporter.seenRawAttrs())
+			buf.Reset()
+
+			logger.Info(name, field)
+			require.NoError(t, provider.ForceFlush(context.Background()))
+
+			raw := exporter.seenRawAttrs()
+			require.Greater(t, len(raw), before, "the entry must still reach the bridge")
+
+			exported := strings.Join(raw[before:], " ")
+			for _, leak := range []string{cpf, "52998224725", encoded} {
+				assert.NotContains(t, exported, leak, "the bridge exported a document")
+				assert.NotContains(t, buf.String(), leak, "the local sink wrote a document")
+			}
+
+			assert.Contains(t, exported, "[REDACTED_DOCUMENT]")
+		})
+	}
 }
