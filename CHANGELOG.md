@@ -298,6 +298,17 @@ Features:
   for audit and free-text fields; it is defence in depth, not a licence to
   format identifiers into errors.
 
+- **`zap.Config.ScrubDocuments`** (opt-in, default false) runs every log entry
+  through `redaction.ScrubDocuments` before either sink sees it: the message
+  and string, byte-string, error, `Stringer`, object, array and reflected
+  field values, on the local sink (stderr or `Output`) and the OTLP bridge
+  alike, whether the entry comes through `Log`, the zap-typed helpers, `With`
+  or `Raw()`. Level gating and sampling are unchanged. While it is on, an
+  error field is emitted as its message only (no `errorVerbose`), and a
+  structured field that held a document becomes a string of its JSON with the
+  document replaced; one that held none keeps its shape. Off, output is
+  byte-identical to before. `log.GoLogger` does not scrub content.
+
 - Add symmetric opt-in `lerian.http.server.responses_4xx.by_tenant` and
   `lerian.http.server.responses_5xx.by_tenant` counters for authenticated tenant
   and normalized route, without exact status-code cardinality. Tenant metrics

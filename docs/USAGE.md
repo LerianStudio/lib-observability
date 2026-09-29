@@ -115,7 +115,7 @@ defer tel.ShutdownTelemetryWithContext(ctx) // flush/close no shutdown (ou tel.S
 
 ### 1a. Logger (`zap`) — dois botões que o ambiente não decide por você
 
-O `zap.New(zap.Config{...})` deriva encoder e amostragem do `Environment`. Dois campos opcionais quebram esse acoplamento quando ele não serve:
+O `zap.New(zap.Config{...})` deriva encoder e amostragem do `Environment`. Dois campos opcionais quebram esse acoplamento quando ele não serve; um terceiro, `ScrubDocuments`, liga a limpeza de CPF/CNPJ no conteúdo:
 
 ```go
 logger, err := zap.New(zap.Config{
@@ -123,11 +123,13 @@ logger, err := zap.New(zap.Config{
     OTelLibraryName: os.Getenv("OTEL_LIBRARY_NAME"),
     Encoding:        "json", // opt-in: encoder explícito ("json" | "console")
     DisableSampling: true,   // opt-in: sem sampler, nenhuma linha some
+    ScrubDocuments:  true,   // opt-in: CPF/CNPJ em texto livre vira [REDACTED_DOCUMENT]
 })
 ```
 
 - **`Encoding`** → escolhe o encoder **direto**, sem passar pelo `Environment`. Serve ao processo cujo config próprio pede JSON enquanto o ambiente de deploy é `development`: antes ele precisava **mentir o ambiente** para conseguir JSON. Vazio mantém o comportamento de sempre. Precedência **igual à do `Level`**: o campo vence, `LOG_ENCODING` é o fallback, o `Environment` é o default. Valor desconhecido → **erro do `New`** (nunca fallback silencioso: typo de config aparece no start-up).
 - **`DisableSampling`** → remove o sampler. O perfil de produção amostra **100:100**: passada a centésima cópia de uma mensagem dentro de um segundo, só a cada 100ª é escrita e **o resto some sem registro**. Para serviço sob carga é o trade certo; para log de diagnóstico que um humano lê depois (agent harness, CLI, job cujo output é a entrega) linha perdida é pista perdida — ligue lá. `false` mantém a amostragem.
+- **`ScrubDocuments`** → troca todo trecho com forma de CPF/CNPJ por `[REDACTED_DOCUMENT]` na mensagem e nos valores de campo renderizados como texto (string, erro, `Stringer`, bytes, struct/objeto/array), no sink local **e** no bridge OTLP, venha a entrada de `Log`, dos helpers zap, de `With` ou de `Raw()`. Campo numérico não é inspecionado. Com ele ligado, um campo de erro sai só com a mensagem (sem `errorVerbose`), e um campo estruturado só vira string quando carregava documento; sem documento, a saída é a mesma. `false` (default) deixa a saída byte a byte igual. É **defesa em profundidade**, não licença para formatar documento em mensagem ou erro. O `log.GoLogger` (fallback stdlib) não limpa conteúdo.
 
 ---
 

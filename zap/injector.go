@@ -65,6 +65,22 @@ type Config struct {
 	// afterwards - an agent harness, a CLI, a job whose output is the
 	// deliverable - where a dropped line is a lost clue. False keeps sampling.
 	DisableSampling bool
+	// ScrubDocuments replaces every CPF/CNPJ-shaped span in the entry message
+	// and in string-rendered field values with redaction.DocumentPlaceholder,
+	// on the local sink (stderr or Output) and on the OTLP log bridge alike.
+	// It covers messages, string, byte-string, error, Stringer, object, array
+	// and reflected fields, whether logged through Log, the zap-typed
+	// helpers, With or Raw(); numeric fields are left alone. An error field is
+	// rendered to its message, so errorVerbose is not emitted while this is
+	// on. A structured field whose rendering holds a document becomes a string
+	// of its JSON with the document replaced; one that holds none keeps its
+	// shape. False (the default) leaves every entry byte-identical to a logger
+	// without the knob.
+	//
+	// This is defence in depth, not a licence to format documents into log
+	// lines or errors: fix the origin first. See redaction.ScrubDocuments for
+	// the matching rule and its accepted false positives.
+	ScrubDocuments bool
 }
 
 func (c Config) validate() error {
@@ -119,7 +135,12 @@ func New(cfg Config) (*Logger, error) {
 				core = outputCore(baseConfig, level, cfg.Output)
 			}
 
-			return zapcore.NewTee(core, levelGate{Core: otelzap.NewCore(cfg.OTelLibraryName), level: level})
+			tee := zapcore.NewTee(core, levelGate{Core: otelzap.NewCore(cfg.OTelLibraryName), level: level})
+			if cfg.ScrubDocuments {
+				return documentScrubCore{Core: tee, errorOutput: zapcore.Lock(os.Stderr)}
+			}
+
+			return tee
 		}),
 	}
 

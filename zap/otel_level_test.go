@@ -5,12 +5,15 @@ package zap
 import (
 	"bytes"
 	"context"
+	"errors"
+	"strings"
 	"sync"
 	"testing"
 
 	logpkg "github.com/LerianStudio/lib-observability/v4/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/attribute"
 	otellog "go.opentelemetry.io/otel/log"
 	"go.opentelemetry.io/otel/log/global"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
@@ -25,6 +28,7 @@ import (
 type recordingExporter struct {
 	mu     sync.Mutex
 	bodies []string
+	attrs  []string
 }
 
 func (e *recordingExporter) Export(_ context.Context, records []sdklog.Record) error {
@@ -33,6 +37,12 @@ func (e *recordingExporter) Export(_ context.Context, records []sdklog.Record) e
 
 	for _, r := range records {
 		e.bodies = append(e.bodies, r.Body().AsString())
+
+		r.WalkAttributes(func(kv attribute.KeyValue) bool {
+			e.attrs = append(e.attrs, string(kv.Key)+"="+kv.Value.Emit())
+
+			return true
+		})
 	}
 
 	return nil
@@ -46,6 +56,13 @@ func (e *recordingExporter) seen() []string {
 	defer e.mu.Unlock()
 
 	return append([]string(nil), e.bodies...)
+}
+
+func (e *recordingExporter) seenAttrs() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	return append([]string(nil), e.attrs...)
 }
 
 // Services build the logger before installing the OTel SDK, while the global
@@ -99,4 +116,36 @@ func TestConfiguredLevelGatesTheOTelBridge(t *testing.T) {
 	assert.Equal(t, []string{"info at level", "debug after SetLevel"}, exporter.seen(),
 		"a runtime level change must reach the OTLP bridge")
 	assert.Contains(t, buf.String(), "debug after SetLevel")
+}
+
+// Config.ScrubDocuments must reach the OTLP bridge, not only the local sink:
+// the record body and its attributes leave the process too.
+func TestScrubDocumentsReachesTheOTelBridge(t *testing.T) {
+	prev := global.GetLoggerProvider()
+	t.Cleanup(func() { global.SetLoggerProvider(prev) })
+
+	exporter := &recordingExporter{}
+	provider := sdklog.NewLoggerProvider(sdklog.WithProcessor(sdklog.NewSimpleProcessor(exporter)))
+	global.SetLoggerProvider(provider)
+
+	var buf bytes.Buffer
+
+	logger, err := New(Config{
+		Environment: EnvironmentProduction, Level: "info", OTelLibraryName: "t", Output: &buf, ScrubDocuments: true,
+	})
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	logger.With(logpkg.String("payer", "529.982.247-25")).
+		Log(ctx, logpkg.LevelError, "payer 52998224725 rejected", logpkg.Err(errors.New("cnpj 12.345.678/0001-95")))
+	require.NoError(t, provider.ForceFlush(ctx))
+
+	assert.Equal(t, []string{"payer [REDACTED_DOCUMENT] rejected"}, exporter.seen())
+
+	attrs := strings.Join(exporter.seenAttrs(), " ")
+	assert.Contains(t, attrs, "payer=[REDACTED_DOCUMENT]")
+	assert.Contains(t, attrs, "error=cnpj [REDACTED_DOCUMENT]")
+	assert.NotContains(t, attrs, "529.982.247-25")
+	assert.NotContains(t, attrs, "12.345.678/0001-95")
+	assert.NotContains(t, buf.String(), "52998224725")
 }
