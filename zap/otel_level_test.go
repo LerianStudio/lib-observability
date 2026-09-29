@@ -9,6 +9,7 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	logpkg "github.com/LerianStudio/lib-observability/v4/log"
@@ -323,6 +324,103 @@ func TestScrubDocumentsCoversAttributeValuesAndBytes(t *testing.T) {
 			}
 
 			assert.Contains(t, exported, "[REDACTED_DOCUMENT]")
+		})
+	}
+}
+
+// flipStringer renders safe text on its first call and a document afterwards.
+type flipStringer struct{ calls atomic.Int32 }
+
+func (s *flipStringer) String() string {
+	if s.calls.Add(1) == 1 {
+		return "safe"
+	}
+
+	return "529.982.247-25"
+}
+
+// The sinks must write the rendering the scrub judged, not a second one: a
+// Stringer is asked once, and what it said then is what is written.
+func TestScrubDocumentsWritesTheRenderingItJudged(t *testing.T) {
+	prev := global.GetLoggerProvider()
+	t.Cleanup(func() { global.SetLoggerProvider(prev) })
+
+	exporter := &recordingExporter{}
+	provider := sdklog.NewLoggerProvider(sdklog.WithProcessor(sdklog.NewSimpleProcessor(exporter)))
+	global.SetLoggerProvider(provider)
+
+	var buf bytes.Buffer
+
+	logger, err := New(Config{
+		Environment: EnvironmentProduction, Level: "info", OTelLibraryName: "t", Output: &buf,
+		ScrubDocuments: true, DisableSampling: true,
+	})
+	require.NoError(t, err)
+
+	logger.Info("flip", zap.Stringer("s", &flipStringer{}))
+	require.NoError(t, provider.ForceFlush(context.Background()))
+
+	exported := strings.Join(exporter.seenRawAttrs(), " ")
+	assert.NotContains(t, exported, "529.982.247-25", "the bridge exported a document")
+	assert.NotContains(t, buf.String(), "529.982.247-25", "the local sink wrote a document")
+	assert.Contains(t, exported, "s=safe")
+	assert.Contains(t, buf.String(), `"s":"safe"`)
+}
+
+// A value nested past the walk's depth bound is not inspected, so it must not
+// be forwarded either: the field fails closed to the placeholder.
+func TestScrubDocumentsFailsClosedPastTheWalkDepth(t *testing.T) {
+	prev := global.GetLoggerProvider()
+	t.Cleanup(func() { global.SetLoggerProvider(prev) })
+
+	exporter := &recordingExporter{}
+	provider := sdklog.NewLoggerProvider(sdklog.WithProcessor(sdklog.NewSimpleProcessor(exporter)))
+	global.SetLoggerProvider(provider)
+
+	var buf bytes.Buffer
+
+	logger, err := New(Config{
+		Environment: EnvironmentProduction, Level: "info", OTelLibraryName: "t", Output: &buf,
+		ScrubDocuments: true, DisableSampling: true,
+	})
+	require.NoError(t, err)
+
+	const cpf = "529.982.247-25"
+
+	nest := func(leaf any) any {
+		v := leaf
+		for range 2 * maxBridgeDepth {
+			v = []any{v}
+		}
+
+		return v
+	}
+
+	cases := map[string]any{
+		"attribute bytes": nest(attribute.ByteSliceValue([]byte(cpf))),
+		"string":          nest(cpf),
+	}
+
+	encoded := base64.StdEncoding.EncodeToString([]byte(cpf))
+
+	for name, value := range cases {
+		t.Run(name, func(t *testing.T) {
+			before := len(exporter.seenRawAttrs())
+			buf.Reset()
+
+			logger.Info(name, zap.Any("deep", value))
+			require.NoError(t, provider.ForceFlush(context.Background()))
+
+			raw := exporter.seenRawAttrs()
+			require.Greater(t, len(raw), before, "the entry must still reach the bridge")
+
+			exported := strings.Join(raw[before:], " ")
+			for _, leak := range []string{cpf, encoded} {
+				assert.NotContains(t, exported, leak, "the bridge exported a document")
+				assert.NotContains(t, buf.String(), leak, "the local sink wrote a document")
+			}
+
+			assert.Contains(t, exported, "deep=[REDACTED_DOCUMENT]")
 		})
 	}
 }

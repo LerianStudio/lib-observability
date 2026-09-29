@@ -152,8 +152,11 @@ func scrubDocumentField(f zapcore.Field) (zapcore.Field, bool) {
 // or a panicking Stringer is included), each read both as the local sink's
 // JSON and as the OTLP bridge's rendering, with every attribute value in it
 // read as the text it carries. When no document is found, original is kept as
-// is. Otherwise it is replaced by an inline object holding each entry as a
-// scrubbed string, so every key the sinks would have written is still written.
+// is, except a Stringer: each sink would ask it again, and a second answer is
+// one nobody judged, so the text judged here is written instead (the sinks
+// write a Stringer as a string either way). Otherwise the field is replaced by
+// an inline object holding each entry as a scrubbed string, so every key the
+// sinks would have written is still written.
 func scrubRenderedField(f, original zapcore.Field) (zapcore.Field, bool) {
 	entries, ok := renderEntries(f)
 	if !ok {
@@ -176,20 +179,29 @@ func scrubRenderedField(f, original zapcore.Field) (zapcore.Field, bool) {
 		}
 	}
 
-	if !found {
+	if !found && f.Type != zapcore.StringerType {
 		return original, false
 	}
 
 	scrubbed := make(scrubbedEntries, 0, len(entries))
 
 	for _, key := range slices.Sorted(maps.Keys(entries)) {
-		scrubbed = append(scrubbed, scrubbedEntry{
-			key:   key,
-			value: redaction.ScrubDocuments(localRendering(entries[key])),
-		})
+		scrubbed = append(scrubbed, scrubbedEntry{key: key, value: scrubbedRendering(entries[key])})
 	}
 
 	return zap.Inline(scrubbed), true
+}
+
+// scrubbedRendering is what a sink may write for value once a document was
+// found in its field: its local rendering scrubbed, or the placeholder alone
+// when the value nests past the walk's bound, since what lies deeper was never
+// inspected.
+func scrubbedRendering(value any) string {
+	if _, complete := bridgeRendering(value); !complete {
+		return redaction.DocumentPlaceholder
+	}
+
+	return redaction.ScrubDocuments(localRendering(value))
 }
 
 // scrubContextField keeps a context field a context: the OTLP bridge takes any
@@ -258,13 +270,19 @@ func renderEntries(f zapcore.Field) (entries map[string]any, ok bool) {
 
 // valueHoldsDocument reports whether either sink's rendering of value carries
 // a document. The two differ for reflected values: encoding/json skips
-// unexported and json:"-" fields, the bridge's %+v prints them.
+// unexported and json:"-" fields, the bridge's %+v prints them. A value
+// nesting past the walk's bound counts as holding one: it fails closed.
 func valueHoldsDocument(value any) bool {
 	if s, isString := value.(string); isString {
 		return redaction.ScrubDocuments(s) != s
 	}
 
-	for _, rendered := range []string{localRendering(value), bridgeRendering(value)} {
+	bridge, complete := bridgeRendering(value)
+	if !complete {
+		return true
+	}
+
+	for _, rendered := range []string{localRendering(value), bridge} {
 		if redaction.ScrubDocuments(rendered) != rendered {
 			return true
 		}
@@ -282,26 +300,30 @@ func localRendering(value any) (rendered string) {
 
 	defer func() {
 		if recover() != nil {
-			rendered = bridgeRendering(value)
+			rendered, _ = bridgeRendering(value)
 		}
 	}()
 
 	b, err := json.Marshal(value)
 	if err != nil {
-		return bridgeRendering(value)
+		rendered, _ = bridgeRendering(value)
+
+		return rendered
 	}
 
 	return string(b)
 }
 
-// maxBridgeDepth bounds the walk over nested slices, maps and pointers; the
-// bridge itself has no bound, so a deeper value would overflow it first.
+// maxBridgeDepth bounds the walk over nested slices, maps and pointers. The
+// bridge itself has no bound, so a value nested deeper is exported without
+// having been inspected; the field holding it fails closed instead.
 const maxBridgeDepth = 32
 
 // bridgeRendering is the text the OTLP bridge (otelzap's convertValue) emits
 // for value, one leaf per line so digits of adjacent leaves never join: a
 // struct as %+v, slices, arrays, maps and pointers walked element by element.
-func bridgeRendering(value any) (rendered string) {
+// complete is false when the walk stopped at maxBridgeDepth.
+func bridgeRendering(value any) (rendered string, complete bool) {
 	var b strings.Builder
 
 	defer func() {
@@ -310,19 +332,21 @@ func bridgeRendering(value any) (rendered string) {
 		}
 	}()
 
-	writeBridgeValue(&b, value, 0)
+	complete = writeBridgeValue(&b, value, 0)
 
-	return b.String()
+	return b.String(), complete
 }
 
-func writeBridgeValue(b *strings.Builder, value any, depth int) {
+// writeBridgeValue writes value's leaves and reports whether it reached all of
+// them within maxBridgeDepth.
+func writeBridgeValue(b *strings.Builder, value any, depth int) bool {
 	if depth > maxBridgeDepth {
-		return
+		return false
 	}
 
 	switch v := value.(type) {
 	case nil:
-		return
+		return true
 	case string:
 		b.WriteString(v)
 	case []byte:
@@ -334,33 +358,37 @@ func writeBridgeValue(b *strings.Builder, value any, depth int) {
 	case time.Time:
 		b.WriteString(strconv.FormatInt(v.UnixNano(), 10))
 	default:
-		writeBridgeReflected(b, reflect.ValueOf(value), depth)
-
-		return
+		return writeBridgeReflected(b, reflect.ValueOf(value), depth)
 	}
 
 	b.WriteByte('\n')
+
+	return true
 }
 
-func writeBridgeReflected(b *strings.Builder, v reflect.Value, depth int) {
+func writeBridgeReflected(b *strings.Builder, v reflect.Value, depth int) bool {
+	complete := true
+
 	switch v.Kind() {
 	case reflect.Slice, reflect.Array:
 		for i := range v.Len() {
-			writeBridgeValue(b, v.Index(i).Interface(), depth+1)
+			complete = writeBridgeValue(b, v.Index(i).Interface(), depth+1) && complete
 		}
 	case reflect.Map:
 		iter := v.MapRange()
 		for iter.Next() {
-			writeBridgeValue(b, fmt.Sprintf("%+v", iter.Key().Interface()), depth+1)
-			writeBridgeValue(b, iter.Value().Interface(), depth+1)
+			complete = writeBridgeValue(b, fmt.Sprintf("%+v", iter.Key().Interface()), depth+1) && complete
+			complete = writeBridgeValue(b, iter.Value().Interface(), depth+1) && complete
 		}
 	case reflect.Pointer, reflect.Interface:
 		if !v.IsNil() {
-			writeBridgeValue(b, v.Elem().Interface(), depth+1)
+			complete = writeBridgeValue(b, v.Elem().Interface(), depth+1)
 		}
 	default:
 		fmt.Fprintf(b, "%+v\n", v.Interface())
 	}
+
+	return complete
 }
 
 // isAttributeValue reports whether value is an OpenTelemetry attribute value,
@@ -415,19 +443,7 @@ func plainAttributes(value any, depth int) (any, bool) {
 			return items, true
 		}
 	case reflect.Map:
-		entries := make(map[string]any, rv.Len())
-		held := false
-
-		iter := rv.MapRange()
-		for iter.Next() {
-			item, itemHeld := plainAttributes(iter.Value().Interface(), depth+1)
-			entries[fmt.Sprintf("%+v", iter.Key().Interface())] = item
-			held = held || itemHeld
-		}
-
-		if held {
-			return entries, true
-		}
+		return plainMapAttributes(rv, depth)
 	case reflect.Pointer, reflect.Interface:
 		if !rv.IsNil() {
 			if elem, held := plainAttributes(rv.Elem().Interface(), depth+1); held {
@@ -468,4 +484,37 @@ func plainAttributeValue(v attribute.Value, depth int) any {
 	default:
 		return v.AsInterface()
 	}
+}
+
+// plainMapAttributes is plainAttributes for a map: one single-key object per
+// entry, ordered by key, so keys that print alike (1 and "1") never collapse
+// before every value is judged.
+func plainMapAttributes(rv reflect.Value, depth int) (any, bool) {
+	type entry struct {
+		key  string
+		item any
+	}
+
+	entries := make([]entry, 0, rv.Len())
+	held := false
+
+	iter := rv.MapRange()
+	for iter.Next() {
+		item, itemHeld := plainAttributes(iter.Value().Interface(), depth+1)
+		entries = append(entries, entry{key: fmt.Sprintf("%+v", iter.Key().Interface()), item: item})
+		held = held || itemHeld
+	}
+
+	if !held {
+		return rv.Interface(), false
+	}
+
+	slices.SortStableFunc(entries, func(a, b entry) int { return strings.Compare(a.key, b.key) })
+
+	items := make([]any, len(entries))
+	for i, e := range entries {
+		items[i] = map[string]any{e.key: e.item}
+	}
+
+	return items, true
 }

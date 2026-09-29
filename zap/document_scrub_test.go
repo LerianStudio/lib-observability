@@ -318,3 +318,21 @@ func TestScrubDocuments_ConcurrentLogging(t *testing.T) {
 	assert.NotContains(t, got, scrubTestCPF)
 	assert.NotContains(t, got, scrubTestCNPJ)
 }
+
+// Keys of a reflected map that print alike (1 and "1") must not collapse into
+// one entry while the values are inspected: the one dropped could be the one
+// holding the document.
+func TestPlainAttributes_KeepsEveryMapEntry(t *testing.T) {
+	value := map[any]attribute.Value{
+		1:   attribute.ByteSliceValue([]byte(scrubTestCPF)),
+		"1": attribute.StringValue("ok"),
+	}
+
+	plain, held := plainAttributes(value, 0)
+	require.True(t, held)
+
+	rendered, complete := bridgeRendering(plain)
+	require.True(t, complete)
+	assert.Contains(t, rendered, scrubTestCPF)
+	assert.Contains(t, rendered, "ok")
+}
