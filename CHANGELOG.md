@@ -420,10 +420,14 @@ Fixes:
   It is now stripped and dialed over TLS, exactly like `https://`; `HTTP://`
   behaves like `http://`. `OTEL_EXPORTER_OTLP_*` values that already carry a
   scheme in any letter case are no longer double-prefixed (`https://HTTPS://…`).
-  An endpoint with any other scheme (`grpc://`, `dns:///`, `unix://`, …) now
-  fails `NewTelemetry` with the new `ErrUnsupportedEndpointScheme` when telemetry
-  is enabled; the error names the scheme only, never the endpoint. With
-  telemetry disabled it is logged as a warning and ignored.
+  A gRPC resolver target whose scheme is registered in the process (`dns:///`,
+  `unix://`, `unix-abstract://`, `passthrough:///` by default) is passed to
+  gRPC verbatim with the bare-address plaintext default, exactly as before. An
+  endpoint with any other scheme (`grpc://`, `otlp://`, …), which gRPC cannot
+  resolve and which used to boot and silently export nothing, now fails
+  `NewTelemetry` with the new `ErrUnsupportedEndpointScheme` when telemetry is
+  enabled; the error names the scheme only, never the endpoint. With telemetry
+  disabled it is logged as a warning and ignored.
 
 Known limitations (documented, not addressed by this release):
 

@@ -43,6 +43,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/resolver"
 )
 
 const (
@@ -67,10 +68,12 @@ var (
 	// outside the accepted range: 0 (unset) or (0, 1].
 	ErrInvalidSampleRatio = errors.New("telemetry sample ratio must be 0 (unset) or within (0, 1]")
 	// ErrUnsupportedEndpointScheme is returned when telemetry is enabled and
-	// TelemetryConfig.CollectorExporterEndpoint carries a scheme other than
-	// http:// or https:// (matched case-insensitively). The wrapped message names
-	// the scheme only, never the endpoint, which may carry userinfo.
-	ErrUnsupportedEndpointScheme = errors.New("collector exporter endpoint has an unsupported scheme; use http:// or https://")
+	// TelemetryConfig.CollectorExporterEndpoint carries a scheme that is neither
+	// http:// nor https:// (matched case-insensitively) nor a gRPC resolver
+	// scheme registered in the process (dns, unix, unix-abstract, passthrough by
+	// default). The wrapped message names the scheme only, never the endpoint,
+	// which may carry userinfo.
+	ErrUnsupportedEndpointScheme = errors.New("collector exporter endpoint has an unsupported scheme; use http://, https:// or a registered gRPC resolver scheme")
 )
 
 // TelemetryConfig configures tracing, metrics, logging, and propagation behavior.
@@ -347,8 +350,12 @@ func normalizeEndpoints(cfg *TelemetryConfig) error {
 //   - http://  is stripped and forces InsecureExporter.
 //   - https:// is stripped and leaves InsecureExporter as configured.
 //   - no scheme keeps the bare host:port and infers insecure (k8s internal comms).
+//   - a gRPC resolver scheme registered in the process (dns:///, unix://,
+//     unix-abstract://, passthrough:/// by default) is a gRPC target, not a URL:
+//     it is kept verbatim and infers insecure, as a bare address does.
 //   - any other scheme returns ErrUnsupportedEndpointScheme and leaves cfg as it
-//     was, so it never becomes a plaintext gRPC target with the scheme inside it.
+//     was: gRPC would not resolve it, so it would become a plaintext target with
+//     the scheme inside it that never exports anything.
 func normalizeEndpoint(cfg *TelemetryConfig) error {
 	ep := strings.TrimSpace(cfg.CollectorExporterEndpoint)
 	if ep == "" {
@@ -371,6 +378,13 @@ func normalizeEndpoint(cfg *TelemetryConfig) error {
 	case "https":
 		cfg.CollectorExporterEndpoint = rest
 	default:
+		if scheme != "" && resolver.Get(scheme) != nil {
+			cfg.CollectorExporterEndpoint = ep
+			cfg.InsecureExporter = true
+
+			return nil
+		}
+
 		// Name the scheme only: the endpoint may carry userinfo.
 		return fmt.Errorf("%w: %q", ErrUnsupportedEndpointScheme, scheme)
 	}

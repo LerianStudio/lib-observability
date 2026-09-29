@@ -369,8 +369,7 @@ func TestNewTelemetry_UnsupportedEndpointSchemeRefusedWhenEnabled(t *testing.T) 
 
 	for _, endpoint := range []string{
 		"grpc://user:secret@otel-collector:4317",
-		"dns:///otel-collector:4317",
-		"unix:///var/run/otel.sock",
+		"otlp://otel-collector:4317",
 		"://otel-collector:4317",
 	} {
 		t.Run(endpoint, func(t *testing.T) {
@@ -388,6 +387,41 @@ func TestNewTelemetry_UnsupportedEndpointSchemeRefusedWhenEnabled(t *testing.T) 
 				"the error must name the scheme only, never the endpoint")
 			assert.NotContains(t, err.Error(), "secret",
 				"the error must never echo endpoint userinfo")
+		})
+	}
+}
+
+// A gRPC resolver target (dns:///, unix://, passthrough:///, unix-abstract:)
+// is a valid exporter endpoint: it reaches grpc.NewClient verbatim and keeps
+// the plaintext default a bare host:port gets, exactly as before the scheme
+// check existed.
+func TestNewTelemetry_GRPCResolverSchemesKeepTheirTarget(t *testing.T) {
+	t.Parallel()
+
+	for _, endpoint := range []string{
+		"dns:///otel-collector:4317",
+		"DNS:///otel-collector:4317",
+		"dns://10.0.0.10/otel-collector:4317",
+		"unix:///var/run/otel.sock",
+		"unix-abstract://otel-collector",
+		"passthrough:///otel-collector:4317",
+	} {
+		t.Run(endpoint, func(t *testing.T) {
+			t.Parallel()
+
+			tl, err := NewTelemetry(TelemetryConfig{
+				LibraryName:               "test-lib",
+				EnableTelemetry:           true,
+				DeploymentEnv:             "local",
+				CollectorExporterEndpoint: endpoint,
+				Logger:                    log.NewNop(),
+			})
+			require.NoError(t, err)
+			require.NotNil(t, tl)
+			assert.Equal(t, endpoint, tl.CollectorExporterEndpoint, "a resolver target is passed to gRPC verbatim")
+			assert.True(t, tl.InsecureExporter, "a resolver target keeps the bare-address plaintext default")
+			// Exporter construction is lazy; nothing dials the collector here.
+			_ = tl.ShutdownTelemetryWithContext(context.Background())
 		})
 	}
 }
