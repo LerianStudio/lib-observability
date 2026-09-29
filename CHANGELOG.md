@@ -310,11 +310,17 @@ Features:
   and string, byte-string, error, `Stringer`, object, array and reflected
   field values, on the local sink (stderr or `Output`) and the OTLP bridge
   alike, whether the entry comes through `Log`, the zap-typed helpers, `With`
-  or `Raw()`. Level gating and sampling are unchanged. While it is on, an
-  error field is emitted as its message only (no `errorVerbose`), and a
-  structured field that held a document becomes a string of its JSON with the
-  document replaced; one that held none keeps its shape. Off, output is
-  byte-identical to before. `log.GoLogger` does not scrub content.
+  or `Raw()`. Level gating and sampling still apply; the production sampler
+  keys on the scrubbed message, so messages that differ only by a document
+  share one sampling bucket. While it is on, an error field is emitted as its
+  message only (no `errorVerbose`), and a structured field is judged by both
+  sinks' renderings: the local JSON and the bridge's `%+v`, which also prints
+  unexported and `json:"-"` struct fields, plus the `<key>Error` text zap
+  writes for a failing marshaler or a panicking `Stringer`. One that held a
+  document becomes a string of its JSON with the document replaced; one that
+  held none keeps its shape. A context field stays the bridge's emit context.
+  Off, output is byte-identical to before. `log.GoLogger` does not scrub
+  content.
 
 - **`tracing.WithDocumentScrubbing()`** (opt-in `TelemetryOption` for
   `NewTelemetryWithOptions`) wraps the OTLP span exporter so every exported

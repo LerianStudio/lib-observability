@@ -72,10 +72,15 @@ type Config struct {
 	// and reflected fields, whether logged through Log, the zap-typed
 	// helpers, With or Raw(); numeric fields are left alone. An error field is
 	// rendered to its message, so errorVerbose is not emitted while this is
-	// on. A structured field whose rendering holds a document becomes a string
-	// of its JSON with the document replaced; one that holds none keeps its
-	// shape. False (the default) leaves every entry byte-identical to a logger
-	// without the knob.
+	// on. A structured field is judged by both sinks' renderings (the local
+	// JSON, and the bridge's %+v, which also prints unexported and json:"-"
+	// struct fields), failure text zap adds under "<key>Error" included; one
+	// that holds a document becomes a string of its JSON with the document
+	// replaced, one that holds none keeps its shape. A context field stays the
+	// bridge's emit context. The production sampler keys on the scrubbed
+	// message, so messages that differ only by a document share one sampling
+	// bucket. False (the default) leaves every entry byte-identical to a
+	// logger without the knob.
 	//
 	// This is defence in depth, not a licence to format documents into log
 	// lines or errors: fix the origin first. See redaction.ScrubDocuments for

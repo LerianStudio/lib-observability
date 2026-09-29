@@ -17,6 +17,8 @@ import (
 	otellog "go.opentelemetry.io/otel/log"
 	"go.opentelemetry.io/otel/log/global"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
+	oteltrace "go.opentelemetry.io/otel/trace"
+	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
 
@@ -26,9 +28,10 @@ import (
 
 // recordingExporter keeps the body of every record the SDK exports.
 type recordingExporter struct {
-	mu     sync.Mutex
-	bodies []string
-	attrs  []string
+	mu       sync.Mutex
+	bodies   []string
+	attrs    []string
+	traceIDs []string
 }
 
 func (e *recordingExporter) Export(_ context.Context, records []sdklog.Record) error {
@@ -37,6 +40,7 @@ func (e *recordingExporter) Export(_ context.Context, records []sdklog.Record) e
 
 	for _, r := range records {
 		e.bodies = append(e.bodies, r.Body().AsString())
+		e.traceIDs = append(e.traceIDs, r.TraceID().String())
 
 		r.WalkAttributes(func(kv attribute.KeyValue) bool {
 			e.attrs = append(e.attrs, string(kv.Key)+"="+kv.Value.Emit())
@@ -56,6 +60,13 @@ func (e *recordingExporter) seen() []string {
 	defer e.mu.Unlock()
 
 	return append([]string(nil), e.bodies...)
+}
+
+func (e *recordingExporter) seenTraceIDs() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	return append([]string(nil), e.traceIDs...)
 }
 
 func (e *recordingExporter) seenAttrs() []string {
@@ -148,4 +159,66 @@ func TestScrubDocumentsReachesTheOTelBridge(t *testing.T) {
 	assert.NotContains(t, attrs, "529.982.247-25")
 	assert.NotContains(t, attrs, "12.345.678/0001-95")
 	assert.NotContains(t, buf.String(), "52998224725")
+}
+
+// hiddenDocHolder carries a document where encoding/json does not look (an
+// unexported field and a json:"-" one) but fmt's %+v does. The OTLP bridge
+// renders a reflected struct with %+v, so the scrub must judge that rendering
+// as well as the JSON one.
+type hiddenDocHolder struct {
+	Name   string
+	Tagged string `json:"-"`
+	secret string
+}
+
+type scrubCtxKey struct{}
+
+// A reflected value must be scrubbed on the OTLP bridge as the bridge renders
+// it, not only as the local JSON sink does, and a context field must stay the
+// bridge's emit context even when its rendering carries a document.
+func TestScrubDocumentsCoversTheBridgeRendering(t *testing.T) {
+	prev := global.GetLoggerProvider()
+	t.Cleanup(func() { global.SetLoggerProvider(prev) })
+
+	exporter := &recordingExporter{}
+	provider := sdklog.NewLoggerProvider(sdklog.WithProcessor(sdklog.NewSimpleProcessor(exporter)))
+	global.SetLoggerProvider(provider)
+
+	var buf bytes.Buffer
+
+	logger, err := New(Config{
+		Environment: EnvironmentProduction, Level: "info", OTelLibraryName: "t", Output: &buf,
+		ScrubDocuments: true, DisableSampling: true,
+	})
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	unexported := hiddenDocHolder{Name: "x", secret: "529.982.247-25"}
+	tagged := hiddenDocHolder{Name: "x", Tagged: "52998224725"}
+
+	logger.Log(ctx, logpkg.LevelInfo, "unexported", logpkg.Any("customer", unexported))
+	logger.Log(ctx, logpkg.LevelInfo, "tagged", logpkg.Any("tagged", tagged))
+	logger.Log(ctx, logpkg.LevelInfo, "pointer", logpkg.Any("ptr", &tagged))
+	logger.Log(ctx, logpkg.LevelInfo, "slice", logpkg.Any("list", []*hiddenDocHolder{&unexported}))
+	logger.Log(ctx, logpkg.LevelInfo, "map", logpkg.Any("byName", map[string]hiddenDocHolder{"a": tagged}))
+
+	traceID := oteltrace.TraceID{0x4b, 0xf9, 0x2f, 0x35, 0x77, 0xb3, 0x4d, 0xa6, 0xa3, 0xce, 0x92, 0x9d, 0x0e, 0x0e, 0x47, 0x36}
+	spanCtx := oteltrace.ContextWithSpanContext(ctx, oteltrace.NewSpanContext(oteltrace.SpanContextConfig{
+		TraceID: traceID, SpanID: oteltrace.SpanID{1, 2, 3, 4, 5, 6, 7, 8}, TraceFlags: oteltrace.FlagsSampled,
+	}))
+	docCtx := context.WithValue(spanCtx, scrubCtxKey{}, "12.345.678/0001-95")
+	logger.Info("with context", zap.Any("ctx", docCtx))
+
+	require.NoError(t, provider.ForceFlush(ctx))
+
+	attrs := strings.Join(exporter.seenAttrs(), " ")
+	for _, doc := range []string{"529.982.247-25", "52998224725", "12.345.678/0001-95"} {
+		assert.NotContains(t, attrs, doc, "the bridge exported a document")
+		assert.NotContains(t, buf.String(), doc, "the local sink wrote a document")
+	}
+
+	traceIDs := exporter.seenTraceIDs()
+	require.NotEmpty(t, traceIDs)
+	assert.Equal(t, traceID.String(), traceIDs[len(traceIDs)-1],
+		"a context field must remain the bridge's emit context")
 }

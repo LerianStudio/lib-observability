@@ -15,7 +15,9 @@
 // Config.ScrubDocuments (off by default) replaces every CPF/CNPJ-shaped span in
 // entry messages and string-rendered field values with
 // redaction.DocumentPlaceholder, on the local sink and the OTLP bridge alike,
-// whether the entry comes through Log, the zap-typed helpers, With or Raw(). It
+// whether the entry comes through Log, the zap-typed helpers, With or Raw(). A
+// structured field is judged as each sink renders it: the local JSON, and the
+// bridge's %+v, which also prints unexported and json:"-" struct fields. It
 // is defence in depth, not a licence to format documents into log lines. The
 // stdlib log.GoLogger fallback does not scrub content; call
 // redaction.ScrubDocuments yourself on text you hand it.

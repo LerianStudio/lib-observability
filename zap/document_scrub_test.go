@@ -78,6 +78,18 @@ func (o docObject) MarshalLogObject(enc zapcore.ObjectEncoder) error {
 	return nil
 }
 
+type failingObject struct{ v string }
+
+func (o failingObject) MarshalLogObject(enc zapcore.ObjectEncoder) error {
+	enc.AddString("partial", "ok")
+
+	return errors.New("marshal " + o.v)
+}
+
+type docPanickingStringer struct{}
+
+func (docPanickingStringer) String() string { panic("render " + scrubTestCPF) }
+
 type panickingStringer struct{}
 
 func (panickingStringer) String() string { panic("boom") }
@@ -138,6 +150,26 @@ func TestScrubDocuments_RedactsEveryLogSurface(t *testing.T) {
 			})
 		}
 	}
+}
+
+// The text zap writes for a failure (a marshaler's error, a Stringer's panic)
+// goes to the sinks under "<key>Error"; it is scrubbed like any other value,
+// and the failure is still reported.
+func TestScrubDocuments_RedactsFailureText(t *testing.T) {
+	var out syncBuffer
+
+	logger := newScrubLogger(t, &out, true, "json")
+
+	assert.NotPanics(t, func() {
+		logger.Info("m",
+			zap.Object("obj", failingObject{v: scrubTestCPF}),
+			zap.Stringer("st", docPanickingStringer{}))
+	})
+
+	got := out.String()
+	assert.NotContains(t, got, scrubTestCPF)
+	assert.Contains(t, got, `"objError":"marshal `+redaction.DocumentPlaceholder+`"`)
+	assert.Contains(t, got, `"stError":"PANIC=render `+redaction.DocumentPlaceholder+`"`)
 }
 
 func TestScrubDocuments_DisabledOutputIsByteIdentical(t *testing.T) {
