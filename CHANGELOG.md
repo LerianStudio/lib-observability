@@ -293,10 +293,17 @@ Features:
   whole document misspelled with `-` or `/`. It matches by shape, validates no
   check digit (a mistyped or test document is still redacted), runs in linear
   time and allocates nothing when the text carries no document. Timestamps,
-  addresses, OIDs, UUIDs, trace ids and hex digests survive; the accepted false
-  positives and open residues are listed in the package documentation. Use it
-  for audit and free-text fields; it is defence in depth, not a licence to
-  format identifiers into errors.
+  IPv4 addresses (including `192.168.100.10`), versions, OIDs, UUIDs, trace ids
+  and hex digests survive: a spelling needs a `-` or `/` separator unless it is
+  one unseparated group, and a digit stretch glued to a letter is part of an
+  identifier. The accepted false positives and open residues (a dots-only
+  spelling such as `529.982.247.25`, a bare or misspelled document glued to
+  letters) are listed in the package documentation. Use it for audit and
+  free-text fields; it is defence in depth, not a licence to format identifiers
+  into errors. The default sensitive field names are unchanged: `cpf` and
+  `cnpj` are not added, since name masking would also hide institution
+  identifiers such as a CNPJ root; pass them through `IsSensitiveField`'s
+  `extra` names to mask fields under those names.
 
 - **`zap.Config.ScrubDocuments`** (opt-in, default false) runs every log entry
   through `redaction.ScrubDocuments` before either sink sees it: the message
@@ -341,13 +348,6 @@ Features:
   errors, it does not recover panics itself.
 
 BREAKING BEHAVIOR (not yet released):
-
-- **`cpf` and `cnpj` are default sensitive field names**: `IsSensitiveField`
-  now reports a field whose name carries `cpf` or `cnpj` as a whole token
-  (`cpf`, `holderCpf`, `payer_cnpj`, `cpfs`) as sensitive, so log fields and
-  span attributes under those names are masked by default. They match as exact
-  tokens only (`cpfcheck` is not sensitive). A dashboard or test that read a
-  document under one of those names in clear now sees it masked.
 
 - **`http.route` on pre-routing refusals**: a request that never matches a
   registered route (Fiber's catch-all 404, and any middleware that rejects

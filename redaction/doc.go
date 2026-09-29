@@ -44,7 +44,9 @@
 // of that identifier, and without this guard roughly 2% of 32-character trace
 // ids would lose a slice. Separated shapes need no such guard, because their
 // separators already spell a document, so CNPJ12.345.678/0001-95 is still
-// redacted.
+// redacted. They do need at least one `-` or `/` among those separators, for
+// the reason the misspelled reading below states: a dots-only 3.3.3.2 run is an
+// IPv4 address (192.168.100.10) or a version (1.234.567.890.12), not a CPF.
 //
 // # Misspelled documents
 //
@@ -52,12 +54,17 @@
 // (529982247-25, 529.982.24-725, 12345678/0001-95, 12.345.678/000195) is none of
 // the six shapes. A third reading catches it: a run is a document when its
 // digits total exactly 11 or 14, the whole run is consumed (never a window
-// inside it), and the run carries at least one `-` or `/`. The last clause is a
-// property of the domain: every document format puts `-` before the check digits
-// and `/` before the CNPJ branch. A dots-only run is therefore not a document
-// spelling, and it is exactly where operational values live: 56.123456789 (the
-// fraction of an RFC 3339 timestamp), 10.100.100.100 (an address) and
-// 1.3.6.1.4.1.311.60.2.1.3 (an OID) all survive.
+// inside it), the run carries at least one `-` or `/`, and the digits from the
+// first to the last do not touch a letter on either side. The separator clause
+// is a property of the domain: every document format puts `-` before the check
+// digits and `/` before the CNPJ branch. A dots-only run is therefore not a
+// document spelling, and it is exactly where operational values live:
+// 56.123456789 (the fraction of an RFC 3339 timestamp), 10.100.100.100 and
+// 192.168.100.10 (addresses) and 1.3.6.1.4.1.311.60.2.1.3 (an OID) all survive.
+// The letter clause is the unseparated shapes' guard applied to the ends of the
+// run: 499500-0758-4071 between the letters of 0c499500-0758-4071-a522-... is
+// the digit-and-dash stretch of a UUID, and without the guard about 2.5% of
+// random UUIDs would lose a slice.
 //
 // The misspelled reading is not extended to the alphanumeric class: [0-9A-Z-] is
 // the alphabet correlation ids are built from, and a character-total rule there
@@ -95,20 +102,25 @@
 //     distinguishes the two. A redacted digest costs one correlation; an emitted
 //     CNPJ is a data-protection incident.
 //
-// UUIDs essentially never match: a UUID is hex groups of {8,4,4,4,12}, and only
-// a UUID whose leading groups happen to be all digits and total 11 or 14 across
-// a `-` collides with the misspelled reading.
+// UUIDs never match. A UUID is hex groups of {8,4,4,4,12}: no run of its digits
+// fits a separated shape (the inner groups are whole 4-digit segments), an
+// unseparated shape (a partial segment touches a letter, a whole one is 8 or 12
+// digits), or the misspelled reading (a run that does not touch a letter holds
+// 12, 16 or 20 digits, never 11 or 14).
 //
 // # Accepted residues
 //
 // These carry a document and are not redacted:
 //
-//   - a dots-only misspelling such as 5.29982247.25: closing it means telling a
-//     dotted run apart from decimals, addresses and OIDs by group count and
-//     width, a pile of exceptions that would destroy an OID the first time one of
-//     them was stated slightly wrong;
-//   - an unseparated document glued to letters on either side, such as
-//     cpf52998224725: it reads exactly like a digit run inside an identifier.
+//   - a dots-only spelling, canonical widths (529.982.247.25) or not
+//     (5.29982247.25): closing it means telling a dotted run apart from
+//     decimals, addresses, versions and OIDs by group count and width, a pile of
+//     exceptions that would destroy an address the first time one of them was
+//     stated slightly wrong;
+//   - an unseparated or misspelled document glued to letters on either side,
+//     such as cpf52998224725 or CPF529982247-25: it reads exactly like the digit
+//     stretch of an identifier. A canonically formatted document glued to a
+//     label (cpf529.982.247-25) is still redacted.
 //
 // # Cost
 //

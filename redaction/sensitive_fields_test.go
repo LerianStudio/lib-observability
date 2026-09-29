@@ -56,14 +56,17 @@ func TestIsSensitiveField(t *testing.T) {
 		{name: "dotted short token", field: "user.pin", want: true},
 		{name: "dashed short token", field: "card-pan", want: true},
 		{name: "safe field", field: "publicIdentifier", want: false},
-		// Brazilian personal and company tax identifiers.
-		{name: "cpf exact", field: "cpf", want: true},
-		{name: "cnpj exact", field: "CNPJ", want: true},
-		{name: "cpf camel case token", field: "holderCpf", want: true},
-		{name: "cnpj snake case token", field: "payer_cnpj", want: true},
-		{name: "cpf plural", field: "cpfs", want: true},
-		{name: "cpf is an exact token, not a substring", field: "cpfcheck", want: false},
-		{name: "cnpj is an exact token, not a substring", field: "cnpjota", want: false},
+		// Brazilian personal and company tax identifiers are not default names:
+		// masking them by name would also mask institution identifiers such as a
+		// CNPJ root, which are not personal data. A consumer opts in via extra.
+		{name: "cpf is not a default name", field: "cpf", want: false},
+		{name: "cnpj is not a default name", field: "CNPJ", want: false},
+		{name: "cnpj root is not a default name", field: "target_cnpj_base", want: false},
+		{name: "cpf opted in", field: "cpf", extra: []string{"cpf", "cnpj"}, want: true},
+		{name: "cpf camel case token opted in", field: "holderCpf", extra: []string{"cpf", "cnpj"}, want: true},
+		{name: "cnpj snake case token opted in", field: "payer_cnpj", extra: []string{"cpf", "cnpj"}, want: true},
+		{name: "cpf plural opted in", field: "cpfs", extra: []string{"cpf", "cnpj"}, want: true},
+		{name: "opted-in cpf is a token, not a substring", field: "cpfcheck", extra: []string{"cpf", "cnpj"}, want: false},
 	}
 
 	for _, tt := range cases {

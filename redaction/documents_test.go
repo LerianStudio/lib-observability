@@ -3,10 +3,13 @@
 package redaction
 
 import (
+	"encoding/binary"
+	"math/rand/v2"
 	"strings"
 	"sync"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -44,7 +47,6 @@ func TestScrubDocuments_Redacts(t *testing.T) {
 		{name: "surrounding utf-8", in: "documento «52998224725» inválido", want: "documento «" + ph + "» inválido"},
 		{name: "formatted cnpj glued to a label", in: "CNPJ12.345.678/0001-95", want: "CNPJ" + ph},
 		{name: "formatted cpf glued to a label", in: "cpf529.982.247-25", want: "cpf" + ph},
-		{name: "misspelled cpf glued to a label", in: "CPF529982247-25", want: "CPF" + ph},
 		{
 			name: "partial overlap of the two readings is absorbed",
 			in:   "529.982.247-25.ABC.123/4567-89",
@@ -81,38 +83,80 @@ func TestScrubDocuments_LeavesOperationalValues(t *testing.T) {
 
 	for _, in := range []string{
 		"",
-		"f47ac10b-58cc-4372-a567-0e02b2c3d479",                          // UUIDv4
-		"01890a5d-ac96-774b-bcce-b302099a8057",                          // UUIDv7
-		"1756339200123456789",                                           // epoch nanoseconds
-		"2026-08-27T12:34:56.123456789Z",                                // RFC3339Nano
-		"45.123456789s",                                                 // nanosecond duration
-		"10.100.100.100",                                                // RFC1918 address
-		"192.168.100.100:4317",                                          // address and port
-		"1.3.6.1.4.1.311.60.2.1.3",                                      // OID
-		"123456789012",                                                  // 12 digits
-		"1234567890123",                                                 // 13 digits
-		"123456789012345",                                               // 15 digits
-		"marshalACCS006",                                                // mixed-case identifier
-		"abcdefghij1234",                                                // 14-character lowercase token
-		"00038166",                                                      // ISPB
-		"00038166202609290000123",                                       // NUOp, 23 digits
-		"E00038166202609291200kR7mQ2xYz9A",                              // EndToEndID
-		"E00038166202609291200KR7MQ2XYZ9A",                              // EndToEndID, uppercase suffix
-		"4bf92f3577b34da6a3ce929d0e0e4736",                              // trace id
+		"f47ac10b-58cc-4372-a567-0e02b2c3d479", // UUIDv4
+		"01890a5d-ac96-774b-bcce-b302099a8057", // UUIDv7
+		"1756339200123456789",                  // epoch nanoseconds
+		"2026-08-27T12:34:56.123456789Z",       // RFC3339Nano
+		"45.123456789s",                        // nanosecond duration
+		"10.100.100.100",                       // RFC1918 address
+		"192.168.100.100:4317",                 // address and port
+		"1.3.6.1.4.1.311.60.2.1.3",             // OID
+		"123456789012",                         // 12 digits
+		"1234567890123",                        // 13 digits
+		"123456789012345",                      // 15 digits
+		"marshalACCS006",                       // mixed-case identifier
+		"abcdefghij1234",                       // 14-character lowercase token
+		"00038166",                             // ISPB
+		"00038166202609290000123",              // NUOp, 23 digits
+		"E00038166202609291200kR7mQ2xYz9A",     // EndToEndID
+		"E00038166202609291200KR7MQ2XYZ9A",     // EndToEndID, uppercase suffix
+		"4bf92f3577b34da6a3ce929d0e0e4736",     // trace id
 		"trace 0af7651916cd43dd8448eb211c80319c span b7ad6b7169203331", // trace and span ids
-		"sha256:9f86d081884c7d659a2feaa0c55ad0f52998224725b0f00a08",   // hex digest with an 11-digit run
-		"deadbeef12345678000195cafe",                                    // hex digest with a 14-digit run
-		"cpf52998224725",                                                // bare document glued to letters: identifier
-		"AbCDEFGHIJKL1234xy",                                            // mixed-case token, uppercase window
-		"5.29982247.25",                                                 // documented residue: dots-only misspelling
-		"R$ 1.234,56 em 3 parcelas",                                     // money text
-		"v1.26.3",                                                       // version
+		"sha256:9f86d081884c7d659a2feaa0c55ad0f52998224725b0f00a08",    // hex digest with an 11-digit run
+		"deadbeef12345678000195cafe",                                   // hex digest with a 14-digit run
+		"cpf52998224725",                                               // bare document glued to letters: identifier
+		"AbCDEFGHIJKL1234xy",                                           // mixed-case token, uppercase window
+		"5.29982247.25",                                                // documented residue: dots-only misspelling
+		"529.982.247.25",                                               // documented residue: dots-only spelling
+		"CPF529982247-25",                                              // documented residue: misspelling glued to letters
+		"192.168.100.10",                                               // address with 3.3.3.2 octets
+		"172.217.160.14",                                               // address with 3.3.3.2 octets
+		"remote_addr=192.168.100.10:443",                               // address, port and label
+		"peer 172.100.200.10",                                          // peer address
+		"v1.234.567.890.12",                                            // dotted version
+		"0c499500-0758-4071-a522-dd8dd22491f6",                         // UUID whose digit run starts mid-group
+		"21af0314-8181-412b-9c72-892bb34c92c5",                         // UUID whose digit run starts mid-group
+		"dfe1d73d-2724-4465-800e-4c6c7929bf3c",                         // UUID whose digit run ends mid-group
+		"R$ 1.234,56 em 3 parcelas",                                    // money text
+		"v1.26.3",                                                      // version
 	} {
 		t.Run(in, func(t *testing.T) {
 			t.Parallel()
 
 			assert.Equal(t, in, ScrubDocuments(in))
 		})
+	}
+}
+
+// TestScrubDocuments_LeavesGeneratedUUIDs runs generated UUIDs through the
+// scrubber: a digit-and-dash stretch of a UUID bounded by hex letters must never
+// read as a misspelled document. The generator is seeded, so a failure
+// reproduces.
+func TestScrubDocuments_LeavesGeneratedUUIDs(t *testing.T) {
+	t.Parallel()
+
+	rng := rand.New(rand.NewPCG(20260929, 138))
+
+	for i := range 20_000 {
+		var raw uuid.UUID
+
+		for offset := 0; offset < len(raw); offset += 8 {
+			binary.LittleEndian.PutUint64(raw[offset:], rng.Uint64())
+		}
+
+		version := byte(0x40)
+		if i%2 == 1 {
+			version = 0x70
+		}
+
+		raw[6] = raw[6]&0x0f | version
+		raw[8] = raw[8]&0x3f | 0x80
+
+		for _, id := range []string{raw.String(), strings.ToUpper(raw.String())} {
+			if got := ScrubDocuments(id); got != id {
+				t.Fatalf("UUID %s was rewritten to %s", id, got)
+			}
+		}
 	}
 }
 

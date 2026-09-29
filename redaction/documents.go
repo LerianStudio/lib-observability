@@ -235,7 +235,8 @@ func (r *reading) nextGroup(s string, pos, end int) (group, int, bool) {
 // A single-group shape is refused when the group is glued to a letter: an
 // unseparated run of digits inside a hex digest, a trace id or a base64 token is
 // part of that identifier. A multi-group shape needs no such guard, because its
-// separators already spell a document.
+// separators already spell a document, but only when at least one of them is a
+// document separator: a dots-only 3.3.3.2 run is an IPv4 address or a version.
 func (r *reading) shapeAt(s string, groups []group) (span, int) {
 	for _, shape := range r.shapes {
 		if !shapeFits(groups, shape) {
@@ -245,6 +246,10 @@ func (r *reading) shapeAt(s string, groups []group) (span, int) {
 		matched := groups[:len(shape)]
 
 		if len(matched) == 1 && matched[0].glued {
+			continue
+		}
+
+		if len(matched) > 1 && !hasDocumentSeparator(s[matched[0].start:matched[len(matched)-1].end]) {
 			continue
 		}
 
@@ -304,12 +309,16 @@ func isAlphanumericCNPJ(s string, groups []group) bool {
 
 // misspelledBody returns the first-digit-to-last-digit range of the run
 // s[start:end] when the whole run holds exactly one document's worth of digits
-// (11 or 14) in at least two groups, spelled with at least one `-` or `/`.
+// (11 or 14) in at least two groups, spelled with at least one `-` or `/`, and
+// neither end of that range touches a letter.
 //
 // The match is over the whole run, never a window inside it: a window would be
 // "any 11 digits anywhere" again, and a document embedded in a longer run is
 // the shape readings' job. The range is bounded by the first and last group, so
-// a leading or trailing separator stays in the output.
+// a leading or trailing separator stays in the output. A range glued to a
+// letter is the digit-and-dash stretch of a hex identifier (a UUID such as
+// 0c499500-0758-4071-a522-... reads 499500-0758-4071 between two letters), the
+// same reason the unseparated shapes refuse a glued group.
 func misspelledBody(s string, start, end int) (span, bool) {
 	var first, last group
 
@@ -336,7 +345,12 @@ func misspelledBody(s string, start, end int) (span, bool) {
 	}
 
 	body := span{start: first.start, end: last.end}
-	if !strings.ContainsAny(s[body.start:body.end], "-/") {
+	if !hasDocumentSeparator(s[body.start:body.end]) {
+		return span{}, false
+	}
+
+	if (body.start > 0 && numericReading.glues(s[body.start-1])) ||
+		(body.end < len(s) && numericReading.glues(s[body.end])) {
 		return span{}, false
 	}
 
@@ -386,6 +400,11 @@ func mergeSpans(numeric, alphanumeric []span) []span {
 }
 
 func isSeparator(b byte) bool { return b == '.' || b == '-' || b == '/' }
+
+// hasDocumentSeparator reports whether s carries `-` or `/`: every document
+// format puts `-` before the check digits and `/` before the CNPJ branch, so a
+// dots-only spelling is an address, a version, a decimal or an OID instead.
+func hasDocumentSeparator(s string) bool { return strings.ContainsAny(s, "-/") }
 
 func isDigit(b byte) bool { return b >= '0' && b <= '9' }
 
