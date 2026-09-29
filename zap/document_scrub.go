@@ -64,14 +64,19 @@ func (c documentScrubCore) Write(ent zapcore.Entry, fields []zapcore.Field) erro
 	return nil
 }
 
-// scrubDocumentFields returns fields with every document-bearing value
-// scrubbed. The caller's slice is never modified: it is returned as is when
+// scrubDocumentFields returns fields with every document-bearing key and
+// value scrubbed. The caller's slice is never modified: it is returned as is when
 // nothing matched, and copied on the first change otherwise.
 func scrubDocumentFields(fields []zapcore.Field) []zapcore.Field {
 	var out []zapcore.Field
 
 	for i := range fields {
 		scrubbed, changed := scrubDocumentField(fields[i])
+
+		if key := redaction.ScrubDocuments(scrubbed.Key); key != scrubbed.Key {
+			scrubbed.Key, changed = key, true
+		}
+
 		if !changed {
 			continue
 		}
@@ -147,7 +152,7 @@ func scrubDocumentField(f zapcore.Field) (zapcore.Field, bool) {
 }
 
 // scrubRenderedField judges f by everything a sink renders from it: the
-// entries its own AddTo produces (so a zapcore.ObjectMarshaler is read through
+// entries (keys and values) its own AddTo produces (so a zapcore.ObjectMarshaler is read through
 // MarshalLogObject, and the "<key>Error" text zap adds for a failing marshaler
 // or a panicking Stringer is included), each read both as the local sink's
 // JSON and as the OTLP bridge's rendering, with every attribute value in it
@@ -171,8 +176,8 @@ func scrubRenderedField(f, original zapcore.Field) (zapcore.Field, bool) {
 
 	found := false
 
-	for _, value := range entries {
-		if valueHoldsDocument(value) {
+	for key, value := range entries {
+		if redaction.ScrubDocuments(key) != key || valueHoldsDocument(value) {
 			found = true
 
 			break
@@ -186,7 +191,10 @@ func scrubRenderedField(f, original zapcore.Field) (zapcore.Field, bool) {
 	scrubbed := make(scrubbedEntries, 0, len(entries))
 
 	for _, key := range slices.Sorted(maps.Keys(entries)) {
-		scrubbed = append(scrubbed, scrubbedEntry{key: key, value: scrubbedRendering(entries[key])})
+		scrubbed = append(scrubbed, scrubbedEntry{
+			key:   redaction.ScrubDocuments(key),
+			value: scrubbedRendering(entries[key]),
+		})
 	}
 
 	return zap.Inline(scrubbed), true

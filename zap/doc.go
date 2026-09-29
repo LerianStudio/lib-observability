@@ -13,7 +13,7 @@
 // under load, wrong for a diagnostic log somebody reads afterwards.
 //
 // Config.ScrubDocuments (off by default) replaces every CPF/CNPJ-shaped span in
-// entry messages and string-rendered field values with
+// entry messages, field keys and string-rendered field values with
 // redaction.DocumentPlaceholder, on the local sink and the OTLP bridge alike,
 // whether the entry comes through Log, the zap-typed helpers, With or Raw(). A
 // structured field is judged as each sink renders it: the local JSON, and the

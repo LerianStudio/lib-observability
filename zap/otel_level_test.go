@@ -424,3 +424,56 @@ func TestScrubDocumentsFailsClosedPastTheWalkDepth(t *testing.T) {
 		})
 	}
 }
+
+// docKeyObject writes a document as a key rather than as a value.
+type docKeyObject struct{}
+
+func (docKeyObject) MarshalLogObject(enc zapcore.ObjectEncoder) error {
+	enc.AddString("529.982.247-25", "v")
+
+	return nil
+}
+
+// A document written as a key, of the field or of an entry an inline object
+// adds, must be scrubbed like one written as a value.
+func TestScrubDocumentsCoversKeys(t *testing.T) {
+	prev := global.GetLoggerProvider()
+	t.Cleanup(func() { global.SetLoggerProvider(prev) })
+
+	exporter := &recordingExporter{}
+	provider := sdklog.NewLoggerProvider(sdklog.WithProcessor(sdklog.NewSimpleProcessor(exporter)))
+	global.SetLoggerProvider(provider)
+
+	var buf bytes.Buffer
+
+	logger, err := New(Config{
+		Environment: EnvironmentProduction, Level: "info", OTelLibraryName: "t", Output: &buf,
+		ScrubDocuments: true, DisableSampling: true,
+	})
+	require.NoError(t, err)
+
+	cases := map[string]zap.Field{
+		"inline object key": zap.Inline(docKeyObject{}),
+		"nested object key": zap.Object("obj", docKeyObject{}),
+		"string field key":  zap.String("529.982.247-25", "v"),
+		"reflected key":     zap.Any("529.982.247-25", docHolder{Note: "ok"}),
+	}
+
+	for name, field := range cases {
+		t.Run(name, func(t *testing.T) {
+			before := len(exporter.seenRawAttrs())
+			buf.Reset()
+
+			logger.Info(name, field)
+			require.NoError(t, provider.ForceFlush(context.Background()))
+
+			raw := exporter.seenRawAttrs()
+			require.Greater(t, len(raw), before, "the entry must still reach the bridge")
+
+			exported := strings.Join(raw[before:], " ")
+			assert.NotContains(t, exported, "529.982.247-25", "the bridge exported a document")
+			assert.NotContains(t, buf.String(), "529.982.247-25", "the local sink wrote a document")
+			assert.Contains(t, exported, "[REDACTED_DOCUMENT]")
+		})
+	}
+}
