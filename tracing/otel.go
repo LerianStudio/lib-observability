@@ -66,6 +66,11 @@ var (
 	// ErrInvalidSampleRatio is returned when TelemetryConfig.SampleRatio is
 	// outside the accepted range: 0 (unset) or (0, 1].
 	ErrInvalidSampleRatio = errors.New("telemetry sample ratio must be 0 (unset) or within (0, 1]")
+	// ErrUnsupportedEndpointScheme is returned when telemetry is enabled and
+	// TelemetryConfig.CollectorExporterEndpoint carries a scheme other than
+	// http:// or https:// (matched case-insensitively). The wrapped message names
+	// the scheme only, never the endpoint, which may carry userinfo.
+	ErrUnsupportedEndpointScheme = errors.New("collector exporter endpoint has an unsupported scheme; use http:// or https://")
 )
 
 // TelemetryConfig configures tracing, metrics, logging, and propagation behavior.
@@ -265,8 +270,9 @@ func newTelemetry(cfg TelemetryConfig, options telemetryOptions) (*Telemetry, er
 		cfg.Redactor = NewDefaultRedactor()
 	}
 
-	normalizeEndpoint(&cfg)
-	normalizeEndpointEnvVars(cfg.Logger, cfg.InsecureExporter)
+	if err := normalizeEndpoints(&cfg); err != nil {
+		return nil, err
+	}
 
 	if cfg.EnableTelemetry && strings.TrimSpace(cfg.CollectorExporterEndpoint) == "" {
 		return handleEmptyEndpoint(cfg)
@@ -311,27 +317,75 @@ func validateSampleRatio(ratio float64) error {
 	return fmt.Errorf("%w: got %v", ErrInvalidSampleRatio, ratio)
 }
 
-// normalizeEndpoint strips URL scheme from the collector endpoint and infers security mode.
-// gRPC WithEndpoint() expects host:port, not a full URL.
-// Consumers commonly pass OTEL_EXPORTER_OTLP_ENDPOINT as "http://host:4317".
-func normalizeEndpoint(cfg *TelemetryConfig) {
-	ep := strings.TrimSpace(cfg.CollectorExporterEndpoint)
-	if ep == "" {
-		return
+// normalizeEndpoints normalizes the configured collector endpoint and the
+// OTEL_EXPORTER_OTLP_* environment variables. An unsupported endpoint scheme is
+// an error only when telemetry is enabled; a disabled pipeline never dials the
+// endpoint, so it is logged as a warning and ignored.
+func normalizeEndpoints(cfg *TelemetryConfig) error {
+	if err := normalizeEndpoint(cfg); err != nil {
+		if cfg.EnableTelemetry {
+			return err
+		}
+
+		cfg.Logger.Log(context.Background(), log.LevelWarn,
+			"collector exporter endpoint has an unsupported scheme; ignored because telemetry is disabled",
+			log.Err(err))
 	}
 
-	switch {
-	case strings.HasPrefix(ep, "http://"):
-		cfg.CollectorExporterEndpoint = strings.TrimPrefix(ep, "http://")
-		cfg.InsecureExporter = true
-	case strings.HasPrefix(ep, "https://"):
-		cfg.CollectorExporterEndpoint = strings.TrimPrefix(ep, "https://")
-	default:
-		// No scheme — assume insecure (common in k8s internal comms).
+	normalizeEndpointEnvVars(cfg.Logger, cfg.InsecureExporter)
+
+	return nil
+}
+
+// normalizeEndpoint strips the URL scheme from the collector endpoint and infers
+// the security mode. gRPC WithEndpoint() expects host:port, not a full URL, and
+// consumers commonly pass OTEL_EXPORTER_OTLP_ENDPOINT as "http://host:4317".
+//
+// The scheme is matched case-insensitively (URL schemes are case-insensitive per
+// RFC 3986 §3.1):
+//   - http://  is stripped and forces InsecureExporter.
+//   - https:// is stripped and leaves InsecureExporter as configured.
+//   - no scheme keeps the bare host:port and infers insecure (k8s internal comms).
+//   - any other scheme returns ErrUnsupportedEndpointScheme and leaves cfg as it
+//     was, so it never becomes a plaintext gRPC target with the scheme inside it.
+func normalizeEndpoint(cfg *TelemetryConfig) error {
+	ep := strings.TrimSpace(cfg.CollectorExporterEndpoint)
+	if ep == "" {
+		return nil
+	}
+
+	scheme, rest, hasScheme := splitEndpointScheme(ep)
+	if !hasScheme {
 		// Persist the trimmed value back so leading/trailing whitespace is dropped.
 		cfg.CollectorExporterEndpoint = ep
 		cfg.InsecureExporter = true
+
+		return nil
 	}
+
+	switch scheme {
+	case "http":
+		cfg.CollectorExporterEndpoint = rest
+		cfg.InsecureExporter = true
+	case "https":
+		cfg.CollectorExporterEndpoint = rest
+	default:
+		// Name the scheme only: the endpoint may carry userinfo.
+		return fmt.Errorf("%w: %q", ErrUnsupportedEndpointScheme, scheme)
+	}
+
+	return nil
+}
+
+// splitEndpointScheme splits "scheme://rest" into the lowercased scheme and the
+// remainder. hasScheme is false when the value carries no "://" separator.
+func splitEndpointScheme(endpoint string) (scheme, rest string, hasScheme bool) {
+	scheme, rest, hasScheme = strings.Cut(endpoint, "://")
+	if !hasScheme {
+		return "", endpoint, false
+	}
+
+	return strings.ToLower(scheme), rest, true
 }
 
 // normalizeEndpointEnvVars ensures OTEL exporter endpoint environment variables
@@ -340,7 +394,8 @@ func normalizeEndpoint(cfg *TelemetryConfig) {
 // "parse url" errors from the SDK's internal logger. The scheme follows
 // InsecureExporter — "https://" for a secure exporter, "http://" for an
 // insecure one — so the environment the SDK reads agrees with the connection
-// the library makes.
+// the library makes. A value that already carries a scheme, in any letter case,
+// is left untouched; only bare values are prefixed.
 //
 // It mutates the calling process's environment via os.Setenv: anything that
 // re-reads these variables later sees the normalized value.
@@ -356,7 +411,11 @@ func normalizeEndpointEnvVars(logger log.Universal, insecure bool) {
 		"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
 	} {
 		v := strings.TrimSpace(os.Getenv(key))
-		if v == "" || strings.HasPrefix(v, "http://") || strings.HasPrefix(v, "https://") {
+		if v == "" {
+			continue
+		}
+
+		if _, _, hasScheme := splitEndpointScheme(v); hasScheme {
 			continue
 		}
 

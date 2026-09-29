@@ -316,6 +316,31 @@ func TestNewTelemetry_EndpointNormalization(t *testing.T) {
 			wantEndpoint: "otel-collector:4317/",
 			wantInsecure: true,
 		},
+		{
+			name:         "uppercase https scheme stripped and stays secure",
+			endpoint:     "HTTPS://otel-collector:4317",
+			wantEndpoint: "otel-collector:4317",
+			wantInsecure: false,
+		},
+		{
+			name:         "mixed-case https scheme stripped and stays secure",
+			endpoint:     "Https://otel-collector:4317",
+			wantEndpoint: "otel-collector:4317",
+			wantInsecure: false,
+		},
+		{
+			name:         "uppercase http scheme stripped and insecure inferred",
+			endpoint:     "HTTP://otel-collector:4317",
+			wantEndpoint: "otel-collector:4317",
+			wantInsecure: true,
+		},
+		{
+			name:             "uppercase https with explicit insecure override preserved",
+			endpoint:         "HTTPS://otel-collector:4317",
+			insecureOverride: true,
+			wantEndpoint:     "otel-collector:4317",
+			wantInsecure:     true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -337,6 +362,71 @@ func TestNewTelemetry_EndpointNormalization(t *testing.T) {
 				"InsecureExporter should be inferred from scheme")
 		})
 	}
+}
+
+func TestNewTelemetry_UnsupportedEndpointSchemeRefusedWhenEnabled(t *testing.T) {
+	t.Parallel()
+
+	for _, endpoint := range []string{
+		"grpc://user:secret@otel-collector:4317",
+		"dns:///otel-collector:4317",
+		"unix:///var/run/otel.sock",
+		"://otel-collector:4317",
+	} {
+		t.Run(endpoint, func(t *testing.T) {
+			t.Parallel()
+
+			tl, err := NewTelemetry(TelemetryConfig{
+				LibraryName:               "test-lib",
+				EnableTelemetry:           true,
+				CollectorExporterEndpoint: endpoint,
+				Logger:                    log.NewNop(),
+			})
+			require.ErrorIs(t, err, ErrUnsupportedEndpointScheme)
+			assert.Nil(t, tl)
+			assert.NotContains(t, err.Error(), "otel-collector",
+				"the error must name the scheme only, never the endpoint")
+			assert.NotContains(t, err.Error(), "secret",
+				"the error must never echo endpoint userinfo")
+		})
+	}
+}
+
+func TestNewTelemetry_UnsupportedEndpointSchemeToleratedWhenDisabled(t *testing.T) {
+	t.Parallel()
+
+	tl, err := NewTelemetry(TelemetryConfig{
+		LibraryName:               "test-lib",
+		EnableTelemetry:           false,
+		CollectorExporterEndpoint: "grpc://otel-collector:4317",
+		Logger:                    log.NewNop(),
+	})
+	require.NoError(t, err)
+	require.NotNil(t, tl)
+}
+
+func TestNewTelemetry_UppercaseHTTPSPassesProductionInsecureGate(t *testing.T) {
+	unsetEnvVar(t, "ALLOW_INSECURE_OTEL")
+	t.Setenv("ENV_NAME", "")
+	t.Setenv("ENV", "")
+	t.Setenv("GO_ENV", "")
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "")
+	t.Setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "")
+
+	tl, err := NewTelemetry(TelemetryConfig{
+		LibraryName:               "test-lib",
+		EnableTelemetry:           true,
+		DeploymentEnv:             "production",
+		CollectorExporterEndpoint: "HTTPS://otel-collector:4317",
+		Logger:                    log.NewNop(),
+	})
+	require.NoError(t, err, "an uppercase https:// endpoint is secure and must not trip the insecure-exporter gate")
+	require.NotNil(t, tl)
+	assert.Equal(t, "otel-collector:4317", tl.CollectorExporterEndpoint)
+	assert.False(t, tl.InsecureExporter)
+	// Exporter construction is lazy; nothing dials the collector here.
+	_ = tl.ShutdownTelemetryWithContext(context.Background())
 }
 
 // ===========================================================================

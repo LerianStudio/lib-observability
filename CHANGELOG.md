@@ -374,6 +374,17 @@ Fixes:
   provider already drains the exporter it owns, so `ShutdownTelemetry`/
   `ShutdownTelemetryWithContext` no longer shut the same exporter down a second
   time and a normal process exit returns no error. (@fredcamaral)
+- The collector endpoint scheme is now matched case-insensitively.
+  `HTTPS://collector:4317` used to fall through as a bare address: the exporter
+  dialed plaintext with the scheme left inside the gRPC target, and in
+  production the insecure-exporter gate refused the boot for the wrong reason.
+  It is now stripped and dialed over TLS, exactly like `https://`; `HTTP://`
+  behaves like `http://`. `OTEL_EXPORTER_OTLP_*` values that already carry a
+  scheme in any letter case are no longer double-prefixed (`https://HTTPS://…`).
+  An endpoint with any other scheme (`grpc://`, `dns:///`, `unix://`, …) now
+  fails `NewTelemetry` with the new `ErrUnsupportedEndpointScheme` when telemetry
+  is enabled; the error names the scheme only, never the endpoint. With
+  telemetry disabled it is logged as a warning and ignored.
 
 Known limitations (documented, not addressed by this release):
 
