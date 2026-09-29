@@ -803,6 +803,56 @@ func (tl *TelemetryConfig) newLoggerProvider(rsc *sdkresource.Resource, exp sdkl
 	return sdklog.NewLoggerProvider(sdklog.WithResource(rsc), sdklog.WithProcessor(bp))
 }
 
+// dbClientDurationBuckets are the explicit bucket boundaries, IN SECONDS, for
+// histograms produced by instrumentation libraries that do not expose a bucket
+// option of their own. They mirror the boundaries this package already applies
+// to the histograms it creates directly (httpServerDurationBuckets,
+// rpcDurationBuckets, messagingDurationBuckets), so every duration signal the
+// library emits shares one scale.
+var dbClientDurationBuckets = []float64{
+	0.005, 0.01, 0.025, 0.05, 0.075,
+	0.1, 0.25, 0.5, 0.75,
+	1, 2.5, 5, 7.5, 10,
+}
+
+// secondsHistogramView fixes the bucket boundaries of db.client.operation.duration.
+//
+// WHY IT EXISTS: otelsql emits this histogram in SECONDS (semconv `unit: "s"`),
+// but exposes no option to set bucket boundaries — only WithMeterProvider. With
+// no View, the SDK falls back to its default boundaries
+// {5, 10, 25, 50, 75, 100, 250, 500, 750, 1000, 2500, 5000, 7500, 10000}, which
+// are meant for MILLISECONDS. Applied to a value in seconds the smallest bucket
+// becomes 5 s, so every query lands in the first bucket and the histogram loses
+// all resolution.
+//
+// MEASURED IN PRODUCTION 2026-09-29 (aws-production, 7 days): real mean latency
+// per service was 0.14 ms - 3.5 ms, yet
+//
+//	histogram_quantile(0.95, sum by (le, service_name) (rate(db_client_operation_duration_seconds_bucket[10m])))
+//
+// returned exactly 4.75 for ledger, billing-worker, plugin-br-bank-transfer and
+// streaming-hub alike — the interpolation inside that first bucket, not a
+// latency. Real p95/p99 alerting on database latency is impossible until these
+// boundaries are in seconds; the value is pinned at 4.75 no matter what the
+// database does.
+//
+// A View is the SDK-level mechanism for exactly this case: the instrument is
+// created by a third-party library, so the boundaries cannot be passed at
+// creation time.
+func secondsHistogramView() sdkmetric.View {
+	return sdkmetric.NewView(
+		sdkmetric.Instrument{
+			Name: "db.client.operation.duration",
+			Kind: sdkmetric.InstrumentKindHistogram,
+		},
+		sdkmetric.Stream{
+			Aggregation: sdkmetric.AggregationExplicitBucketHistogram{
+				Boundaries: dbClientDurationBuckets,
+			},
+		},
+	)
+}
+
 func (tl *TelemetryConfig) newMeterProvider(
 	res *sdkresource.Resource,
 	exp sdkmetric.Exporter,
@@ -811,6 +861,7 @@ func (tl *TelemetryConfig) newMeterProvider(
 	opts := []sdkmetric.Option{
 		sdkmetric.WithResource(res),
 		sdkmetric.WithReader(sdkmetric.NewPeriodicReader(exp)),
+		sdkmetric.WithView(secondsHistogramView()),
 	}
 
 	// Zero keeps the SDK default (2000). Past the limit the SDK collapses
