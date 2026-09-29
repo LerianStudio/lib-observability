@@ -287,6 +287,17 @@ Improvements:
 
 Features:
 
+- **`redaction.ScrubDocuments`** replaces every CPF/CNPJ-shaped span of free
+  text with `redaction.DocumentPlaceholder` (`[REDACTED_DOCUMENT]`): bare and
+  formatted CPF and CNPJ, the alphanumeric CNPJ (IN RFB 2.229/2024), and a
+  whole document misspelled with `-` or `/`. It matches by shape, validates no
+  check digit (a mistyped or test document is still redacted), runs in linear
+  time and allocates nothing when the text carries no document. Timestamps,
+  addresses, OIDs, UUIDs, trace ids and hex digests survive; the accepted false
+  positives and open residues are listed in the package documentation. Use it
+  for audit and free-text fields; it is defence in depth, not a licence to
+  format identifiers into errors.
+
 - Add symmetric opt-in `lerian.http.server.responses_4xx.by_tenant` and
   `lerian.http.server.responses_5xx.by_tenant` counters for authenticated tenant
   and normalized route, without exact status-code cardinality. Tenant metrics
@@ -309,6 +320,13 @@ Features:
   errors, it does not recover panics itself.
 
 BREAKING BEHAVIOR (not yet released):
+
+- **`cpf` and `cnpj` are default sensitive field names**: `IsSensitiveField`
+  now reports a field whose name carries `cpf` or `cnpj` as a whole token
+  (`cpf`, `holderCpf`, `payer_cnpj`, `cpfs`) as sensitive, so log fields and
+  span attributes under those names are masked by default. They match as exact
+  tokens only (`cpfcheck` is not sensitive). A dashboard or test that read a
+  document under one of those names in clear now sees it masked.
 
 - **`http.route` on pre-routing refusals**: a request that never matches a
   registered route (Fiber's catch-all 404, and any middleware that rejects

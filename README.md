@@ -46,6 +46,8 @@ Shared OTEL attribute prefixes, metric names (including the `gen_ai.*` generativ
 
 A configurable `Redactor` with rule-based field processing supporting mask, hash (SHA-256), and drop actions. Applies automatically to span attributes via the `RedactingAttrBagSpanProcessor` and to struct-to-attribute conversion. Includes `ObfuscateStruct` for generic struct field obfuscation and integration with the sensitive field detection layer.
 
+Field-name detection (`redaction.IsSensitiveField`) masks a value by its key, and the default list includes the Brazilian tax identifiers `cpf` and `cnpj` as exact tokens. For free text, where a document can appear under any key or none, `redaction.ScrubDocuments(s)` replaces every CPF/CNPJ-shaped span (bare, formatted, misspelled with `-` or `/`, and the alphanumeric CNPJ) with `redaction.DocumentPlaceholder` (`[REDACTED_DOCUMENT]`). It matches by shape without validating check digits, so a mistyped or test document is still redacted; it is linear, safe for concurrent use and allocation-free when nothing matches. Timestamps, addresses, OIDs, UUIDs, trace ids and hex digests survive; the accepted false positives (14-digit timestamps, 11- or 14-digit amounts and phone numbers, some 14-character uppercase hex digests) and the residues left open are documented in the package doc. It is defence in depth for audit fields, error text and log or span messages, not a substitute for keeping identifiers out of that text at the origin.
+
 ## Design principles
 
 - **Explicit initialization** — no implicit global state; `NewTelemetry` + `ApplyGlobals` is opt-in

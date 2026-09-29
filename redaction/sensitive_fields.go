@@ -89,6 +89,9 @@ var defaultSensitiveFields = []string{
 	"city",
 	"zip",
 	"postal_code",
+	// Brazilian personal (CPF) and company (CNPJ) tax identifiers
+	"cpf",
+	"cnpj",
 }
 
 var (
@@ -148,6 +151,8 @@ var shortSensitiveTokens = map[string]bool{
 	"jwt":  true,
 	"zip":  true,
 	"city": true,
+	"cpf":  true,
+	"cnpj": true,
 }
 
 // sensitiveFieldTokens is every token that appears in defaultSensitiveFields:

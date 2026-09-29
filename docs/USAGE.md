@@ -468,6 +468,7 @@ _ = c.WithAttributes(attribute.String("tenant.id", tenantID)).AddOne(ctx)
 ## 9. Regras invioláveis (cardinalidade / PII)
 - Unidade sempre segundos. Nunca ms na app.
 - NUNCA como label: query text, SQL, params, routing key, message id, url.path com id, uuid, cpf/cnpj, pix key, email, payload.
+- CPF/CNPJ em texto livre (campo de auditoria, mensagem de erro montada pelo serviço): passe por `redaction.ScrubDocuments(s)`, que troca todo trecho com forma de CPF/CNPJ (numérico, formatado, mal formatado com `-` ou `/`, CNPJ alfanumérico) por `[REDACTED_DOCUMENT]`. Campos de log/atributos chamados `cpf`/`cnpj` já são mascarados pelo nome. É defesa em profundidade, não licença para formatar documento em erro: o certo continua sendo não colocar o documento no texto.
 - `tenant.id`: nunca em métricas HTTP; automático em gRPC server; manual em negócio.
 - Ao adotar um wrapper de infra, REMOVER o span manual equivalente (senão duplica custo).
 

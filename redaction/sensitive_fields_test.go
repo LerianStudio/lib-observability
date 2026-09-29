@@ -56,6 +56,14 @@ func TestIsSensitiveField(t *testing.T) {
 		{name: "dotted short token", field: "user.pin", want: true},
 		{name: "dashed short token", field: "card-pan", want: true},
 		{name: "safe field", field: "publicIdentifier", want: false},
+		// Brazilian personal and company tax identifiers.
+		{name: "cpf exact", field: "cpf", want: true},
+		{name: "cnpj exact", field: "CNPJ", want: true},
+		{name: "cpf camel case token", field: "holderCpf", want: true},
+		{name: "cnpj snake case token", field: "payer_cnpj", want: true},
+		{name: "cpf plural", field: "cpfs", want: true},
+		{name: "cpf is an exact token, not a substring", field: "cpfcheck", want: false},
+		{name: "cnpj is an exact token, not a substring", field: "cnpjota", want: false},
 	}
 
 	for _, tt := range cases {
