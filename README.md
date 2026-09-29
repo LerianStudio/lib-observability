@@ -48,12 +48,14 @@ A configurable `Redactor` with rule-based field processing supporting mask, hash
 
 Field-name detection (`redaction.IsSensitiveField`) masks a value by its key, and the default list includes the Brazilian tax identifiers `cpf` and `cnpj` as exact tokens. For free text, where a document can appear under any key or none, `redaction.ScrubDocuments(s)` replaces every CPF/CNPJ-shaped span (bare, formatted, misspelled with `-` or `/`, and the alphanumeric CNPJ) with `redaction.DocumentPlaceholder` (`[REDACTED_DOCUMENT]`). It matches by shape without validating check digits, so a mistyped or test document is still redacted; it is linear, safe for concurrent use and allocation-free when nothing matches. Timestamps, addresses, OIDs, UUIDs, trace ids and hex digests survive; the accepted false positives (14-digit timestamps, 11- or 14-digit amounts and phone numbers, some 14-character uppercase hex digests) and the residues left open are documented in the package doc. It is defence in depth for audit fields, error text and log or span messages, not a substitute for keeping identifiers out of that text at the origin.
 
+The scrub is wired into telemetry on two opt-in knobs, both off by default. `zap.Config.ScrubDocuments` scrubs every log entry's message and field values on the local sink and the OTLP log bridge. `tracing.NewTelemetryWithOptions(cfg, tracing.WithDocumentScrubbing())` wraps the OTLP span exporter so every exported span's name, status description, string attributes, events (the `exception` event's message included) and link attributes are scrubbed, whichever code recorded them: `HandleSpanError`, panic and assertion instrumentation, or a caller's own `RecordError`. A span or log entry without documents is exported unchanged.
+
 ## Design principles
 
 - **Explicit initialization** — no implicit global state; `NewTelemetry` + `ApplyGlobals` is opt-in
 - **Nil-safe and no-op by default** — every factory and logger has a null-object variant for safe degradation
 - **Errors over panics** — metric/builder operations return errors; assertions return errors instead of panicking
-- **Redaction-first** — sensitive fields are masked in spans, logs, and attributes by default
+- **Redaction-first** — sensitive fields are masked in spans, logs, and attributes by default; CPF/CNPJ content scrubbing of free text is one opt-in knob per signal (`zap.Config.ScrubDocuments`, `tracing.WithDocumentScrubbing()`)
 - **Interface-driven** — `Logger`, `MetricsFactory`, `ErrorReporter`, and `DLQMetrics` are all interface-bound for testability
 
 ## Instrumentation scope and build identity

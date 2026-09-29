@@ -74,7 +74,10 @@ if raw, ok := os.LookupEnv("OTEL_TRACES_SAMPLER_ARG"); ok {
 //   var version, revision string
 //   go build -ldflags "-X main.version=1.4.2 -X main.revision=$(git rev-parse HEAD)"
 
-tel, err := tracing.NewTelemetry(tracing.TelemetryConfig{
+// NewTelemetryWithOptions aceita os mesmos campos; as opções são opt-in.
+// WithDocumentScrubbing troca CPF/CNPJ por [REDACTED_DOCUMENT] em todo span
+// exportado (nome, status, atributos string, eventos, links).
+tel, err := tracing.NewTelemetryWithOptions(tracing.TelemetryConfig{
     LibraryName:               os.Getenv("OTEL_LIBRARY_NAME"),         // scope das SUAS métricas/spans de negócio
     ServiceName:               os.Getenv("OTEL_RESOURCE_SERVICE_NAME"),
     ServiceVersion:            version,  // -> service.version
@@ -85,7 +88,7 @@ tel, err := tracing.NewTelemetry(tracing.TelemetryConfig{
     EnableRuntimeMetrics:      true, // liga go.* (goroutines/heap/gc). opt-in.
     SampleRatio:               sampleRatio, // 0 = amostra tudo (default do SDK). opt-in.
     InsecureExporter:          insecure,
-})
+}, tracing.WithDocumentScrubbing()) // opt-in: defesa em profundidade p/ CPF/CNPJ
 if err != nil {
     // NewTelemetry pode retornar handle nil em falha — trate e SAIA aqui,
     // NÃO siga para o defer (deferir shutdown de um tel nil causa panic).
@@ -106,6 +109,7 @@ defer tel.ShutdownTelemetryWithContext(ctx) // flush/close no shutdown (ou tel.S
 - Endpoint, service name, env etc. vêm SEMPRE de env (Helm). O `.env.example` do serviço documenta os valores por ambiente. O código só lê `os.Getenv(...)`.
 - `NewTelemetry` **não** registra os providers globais no caminho de sucesso: `tel.ApplyGlobals()` é obrigatório logo depois (o exemplo acima chama). Só o fallback sem endpoint (`ErrEmptyEndpoint`) aplica os providers no-op sozinho.
 - **Segurança do exporter:** em ambiente `production`/`prd`, `InsecureExporter: true` faz o `NewTelemetry` **retornar erro** (o serviço não sobe) a menos que a env `ALLOW_INSECURE_OTEL="<justificativa>"` esteja definida. Em produção o `OTEL_EXPORTER_OTLP_ENDPOINT` deve ser `https://...` e `InsecureExporter` false. Insecure só em `development`/`local` (cluster interno sem TLS). Como isso vem de env, é o Helm de cada ambiente que decide — o código não fixa nada. Com `InsecureExporter: false` os exporters passam credenciais TLS explicitamente (piso TLS 1.2), então um `OTEL_EXPORTER_OTLP_ENDPOINT` sem esquema não derruba mais a conexão para texto puro — a própria env é normalizada no processo com o esquema correspondente (`https://` quando seguro, `http://` quando insecure). O esquema do endpoint é comparado sem distinguir maiúsculas (`HTTPS://` vale como `https://`); qualquer outro esquema (`grpc://`, `dns:///`, `unix://`) faz o `NewTelemetry` retornar `ErrUnsupportedEndpointScheme` quando a telemetria está ligada, em vez de virar silenciosamente um destino em texto puro.
+- **`tracing.WithDocumentScrubbing()`** (opt-in, desligado por padrão) → embrulha o exporter de spans: todo span exportado passa por `redaction.ScrubDocuments` no nome, na descrição do status, nos atributos string (inclusive slices e mapas), nos eventos (a `exception.message` do `HandleSpanError`, do panic e do assert incluída) e nos atributos de link. Roda na exportação, então pega texto de qualquer origem, inclusive o `RecordError` do próprio serviço. Span sem documento sai inalterado; atributo numérico não é inspecionado. Na telemetria no-op a opção é ignorada. Par do lado de log: `zap.Config.ScrubDocuments` (§1a).
 - `EnableTelemetry: false` (env `ENABLE_TELEMETRY=false`) → telemetria no-op segura (nada quebra, nada emite). Padrão em dev/teste.
 - `EnableRuntimeMetrics: true` → emite `go.*` automaticamente (sem mais código).
 - `SampleRatio` → amostragem de cabeça (head sampling). `0` = **unset**, mantém o default do SDK (`ParentBased(AlwaysSample)`: todo trace é gravado) — o comportamento de sempre. Um valor em `(0, 1]` instala `ParentBased(TraceIDRatioBased(ratio))`: `0.05` grava ~5% dos traces RAIZ, e um request que chega com pai já amostrado continua sendo gravado (trace nunca corta no meio). Qualquer outro valor (negativo, > 1, NaN) faz `NewTelemetry` retornar `ErrInvalidSampleRatio` **antes** de construir qualquer provider — o serviço não sobe com config errada. Vem de env (Helm), como o resto.
@@ -470,7 +474,7 @@ _ = c.WithAttributes(attribute.String("tenant.id", tenantID)).AddOne(ctx)
 ## 9. Regras invioláveis (cardinalidade / PII)
 - Unidade sempre segundos. Nunca ms na app.
 - NUNCA como label: query text, SQL, params, routing key, message id, url.path com id, uuid, cpf/cnpj, pix key, email, payload.
-- CPF/CNPJ em texto livre (campo de auditoria, mensagem de erro montada pelo serviço): passe por `redaction.ScrubDocuments(s)`, que troca todo trecho com forma de CPF/CNPJ (numérico, formatado, mal formatado com `-` ou `/`, CNPJ alfanumérico) por `[REDACTED_DOCUMENT]`. Campos de log/atributos chamados `cpf`/`cnpj` já são mascarados pelo nome. É defesa em profundidade, não licença para formatar documento em erro: o certo continua sendo não colocar o documento no texto.
+- CPF/CNPJ em texto livre (campo de auditoria, mensagem de erro montada pelo serviço): passe por `redaction.ScrubDocuments(s)`, que troca todo trecho com forma de CPF/CNPJ (numérico, formatado, mal formatado com `-` ou `/`, CNPJ alfanumérico) por `[REDACTED_DOCUMENT]`. Campos de log/atributos chamados `cpf`/`cnpj` já são mascarados pelo nome. Para a telemetria, ligue os dois botões opt-in: `zap.Config.ScrubDocuments` (mensagem e campos de log, no sink local e no bridge OTLP) e `tracing.WithDocumentScrubbing()` (nome, status, atributos e eventos de todo span exportado). É defesa em profundidade, não licença para formatar documento em erro: o certo continua sendo não colocar o documento no texto.
 - `tenant.id`: nunca em métricas HTTP; automático em gRPC server; manual em negócio.
 - Ao adotar um wrapper de infra, REMOVER o span manual equivalente (senão duplica custo).
 

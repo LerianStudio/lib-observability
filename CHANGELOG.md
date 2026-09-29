@@ -309,6 +309,16 @@ Features:
   document replaced; one that held none keeps its shape. Off, output is
   byte-identical to before. `log.GoLogger` does not scrub content.
 
+- **`tracing.WithDocumentScrubbing()`** (opt-in `TelemetryOption` for
+  `NewTelemetryWithOptions`) wraps the OTLP span exporter so every exported
+  span's name, status description, string attributes (slices and maps
+  included), event names and attributes (the `exception` event's message
+  included) and link attributes pass through `redaction.ScrubDocuments`. It
+  runs at export, so it covers `HandleSpanError`, panic and assertion
+  instrumentation and a caller's own `RecordError` alike; a span without
+  documents is exported unchanged, and the provider still shuts the real
+  exporter down exactly once. Ignored on noop telemetry.
+
 - Add symmetric opt-in `lerian.http.server.responses_4xx.by_tenant` and
   `lerian.http.server.responses_5xx.by_tenant` counters for authenticated tenant
   and normalized route, without exact status-code cardinality. Tenant metrics

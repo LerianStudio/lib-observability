@@ -198,6 +198,7 @@ type TelemetryOption interface {
 
 type telemetryOptions struct {
 	metricCardinalityLimit int
+	scrubDocuments         bool
 }
 
 type telemetryOptionFunc func(*telemetryOptions)
@@ -515,6 +516,12 @@ func buildTelemetry(
 		shutdownAll(ctx, []shutdownable{tExp, mExp, lExp})
 
 		return nil, fmt.Errorf("can't initialize resource: %w", err)
+	}
+
+	if options.scrubDocuments {
+		// The wrapper delegates Shutdown, so the provider still drains the
+		// real exporter exactly once.
+		tExp = newDocumentScrubbingExporter(tExp)
 	}
 
 	mp := cfg.newMeterProvider(r, mExp, options.metricCardinalityLimit)

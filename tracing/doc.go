@@ -34,4 +34,13 @@
 // come from the binary, not the environment: a service sets them at link time
 // (-ldflags "-X main.version=... -X main.revision=...") and passes them to
 // NewTelemetry explicitly.
+//
+// # Document scrubbing
+//
+// NewTelemetryWithOptions(cfg, WithDocumentScrubbing()) runs every exported
+// span through redaction.ScrubDocuments: name, status description, string
+// attributes, event names and attributes (exception.message included) and link
+// attributes. It is off by default, runs at export so it catches text from any
+// source, and is defence in depth, not a licence to format CPF or CNPJ into
+// span text.
 package tracing
