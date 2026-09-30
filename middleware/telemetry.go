@@ -43,13 +43,17 @@ const authenticatedTenantHTTPServerRequestsMetric = "lerian.http.server.requests
 // authenticatedTenantHTTPServerResponses5xxMetric is an opt-in per-tenant
 // counter for requests resulting in HTTP 5xx responses. Keeping failures in a
 // separate instrument preserves route-level error rates without multiplying the
-// request counter by status values.
+// request counter by status values: the exact status code rides on this
+// instrument and on its 4xx sibling, never on the request counter.
 const authenticatedTenantHTTPServerResponses5xxMetric = "lerian.http.server.responses_5xx.by_tenant"
 
 // authenticatedTenantHTTPServerResponses4xxMetric is an opt-in per-tenant
-// counter for requests resulting in HTTP 4xx responses. It deliberately carries
-// only tenant and route; exact status-code diagnosis remains a trace-level
-// question so the metric cannot multiply by every possible 4xx code.
+// counter for requests resulting in HTTP 4xx responses. It carries tenant,
+// route and the exact status code: 4xx sets are sparse in practice (a tenant
+// only produces a series on the routes it actually fails, with the codes it
+// actually receives), so the code dimension costs tens of sets rather than the
+// cartesian product. See the error-counter note on
+// recordAuthenticatedTenantHTTPMetrics for the measured numbers.
 const authenticatedTenantHTTPServerResponses4xxMetric = "lerian.http.server.responses_4xx.by_tenant"
 
 // authenticatedTenantHTTPServerLatencyMetric is an opt-in per-tenant latency
@@ -734,12 +738,27 @@ func recordHTTPServerDuration(
 // the request context. Transport-controlled identity sources (headers, baggage,
 // gRPC metadata, AttrBag, span attributes) are intentionally ignored.
 //
-// The request, 4xx-response, and 5xx-error counters carry only tenant and route.
-// Separate instruments keep each at 1,500 attribute sets in the documented
-// 50-tenant, 30-route scenario; adding status to one counter would create 9,000 sets and
-// overflow the OTel SDK's default 2,000-set limit. The latency histogram carries
-// only tenant and a bounded status class. Method, exact per-route status, and
-// per-route latency remain trace-level questions.
+// The request counter carries only tenant and route, because almost every
+// request it counts is a success and a status dimension there would multiply
+// the highest-volume instrument for nothing. The 4xx and 5xx counters carry
+// tenant, route AND the exact status code, which is what turns "this tenant saw
+// 931 client errors" into the actionable "931 of them were 400 on one route" -
+// a 409 retry storm and a malformed payload are different incidents and the
+// on-call needs them apart.
+//
+// THE CARTESIAN PRODUCT IS NOT WHAT GETS RECORDED. A set only exists once a
+// tenant actually fails on a route with a code, and real traffic is sparse:
+// measured 2026-09-30 across the SaaS fleet, 4xx_by_tenant held 9 sets from 3
+// tenants (6 routes, 2 routes, 1 route), against 86 sets on the request counter.
+// Adding the code multiplies only what is already sparse - the ledger's 44
+// observed route+code pairs across 6 tenants bound the worst case at 264 sets,
+// and doubling the tenant count twice still lands under half the OTel SDK's
+// 2,000-set default. Tenants here are customers, so that count grows in years.
+//
+// The latency histogram still carries only tenant and a bounded status class:
+// each label there multiplies by bucket_count+2, so it is the one instrument
+// where the exact code would be expensive. Method and per-route latency remain
+// trace-level questions.
 func recordAuthenticatedTenantHTTPMetrics(
 	c fiber.Ctx,
 	instruments httpServerInstruments,
@@ -775,12 +794,20 @@ func recordAuthenticatedTenantHTTPMetrics(
 		instruments.tenantRequests.Add(ctx, 1, metric.WithAttributes(routeAttrs...))
 	}
 
+	// The error counters get the exact code; the request counter above does not.
+	// errorAttrs is built once and shared because at most one of the two
+	// branches below fires for a given response.
+	errorAttrs := append(
+		append([]attribute.KeyValue{}, routeAttrs...),
+		attribute.Int("http.response.status_code", statusCode),
+	)
+
 	if instruments.tenant5xx != nil && isHTTPServerError(statusCode) {
-		instruments.tenant5xx.Add(ctx, 1, metric.WithAttributes(routeAttrs...))
+		instruments.tenant5xx.Add(ctx, 1, metric.WithAttributes(errorAttrs...))
 	}
 
 	if instruments.tenant4xx != nil && isHTTPClientError(statusCode) {
-		instruments.tenant4xx.Add(ctx, 1, metric.WithAttributes(routeAttrs...))
+		instruments.tenant4xx.Add(ctx, 1, metric.WithAttributes(errorAttrs...))
 	}
 
 	if instruments.tenantLatency != nil {
