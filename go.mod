@@ -3,7 +3,7 @@ module github.com/LerianStudio/lib-observability/v4
 go 1.26.3
 
 require (
-	github.com/XSAM/otelsql v0.43.0
+	github.com/XSAM/otelsql v0.44.0
 	github.com/gofiber/fiber/v3 v3.5.0
 	github.com/google/uuid v1.6.0
 	github.com/redis/go-redis/extra/redisotel/v9 v9.22.0
@@ -28,7 +28,7 @@ require (
 	go.uber.org/mock v0.6.0
 	go.uber.org/zap v1.28.0
 	go.uber.org/zap/exp v0.3.0
-	google.golang.org/grpc v1.83.2
+	google.golang.org/grpc v1.84.0
 )
 
 require (
