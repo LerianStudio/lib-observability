@@ -86,6 +86,20 @@ type Config struct {
 	// lines or errors: fix the origin first. See redaction.ScrubDocuments for
 	// the matching rule and its accepted false positives.
 	ScrubDocuments bool
+	// ScrubDocumentsExemptKeys lists field keys whose own value ScrubDocuments
+	// leaves as logged: protocol identifiers whose shape is also a CPF's or a
+	// CNPJ's (a NumCtrlIF, a NumCtrlPart). A key matches when it equals an
+	// entry whole, ignoring case (strings.EqualFold); there is no prefix, word
+	// or snake/camel-case matching. Empty entries are dropped, and the list is
+	// copied by New, so later edits to the caller's slice have no effect.
+	//
+	// Only a string, byte-string, binary or Stringer field is exempted. The
+	// entry message, error fields, object, array, inline and reflected fields,
+	// OpenTelemetry attribute values and context fields are scrubbed under any
+	// key, and the key itself is still scrubbed. Name-based masking of
+	// sensitive fields (redaction.IsSensitiveField) runs first and is never
+	// undone. Ignored while ScrubDocuments is false; nil keeps the full scrub.
+	ScrubDocumentsExemptKeys []string
 }
 
 func (c Config) validate() error {
@@ -133,6 +147,8 @@ func New(cfg Config) (*Logger, error) {
 		baseConfig.Sampling = nil
 	}
 
+	exempt := documentScrubExemptKeys(cfg.ScrubDocumentsExemptKeys)
+
 	coreOptions := []zap.Option{
 		zap.AddCallerSkip(callerSkipFrames),
 		zap.WrapCore(func(core zapcore.Core) zapcore.Core {
@@ -142,7 +158,11 @@ func New(cfg Config) (*Logger, error) {
 
 			tee := zapcore.NewTee(core, levelGate{Core: otelzap.NewCore(cfg.OTelLibraryName), level: level})
 			if cfg.ScrubDocuments {
-				return documentScrubCore{Core: tee, errorOutput: zapcore.Lock(os.Stderr)}
+				return documentScrubCore{
+					Core:        tee,
+					errorOutput: zapcore.Lock(os.Stderr),
+					exempt:      exempt,
+				}
 			}
 
 			return tee

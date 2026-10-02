@@ -327,6 +327,16 @@ Features:
   Off, output is byte-identical to before. `log.GoLogger` does not scrub
   content.
 
+- **`zap.Config.ScrubDocumentsExemptKeys`** (opt-in, default nil) lists field
+  keys whose value `ScrubDocuments` leaves as logged, for protocol identifiers
+  whose shape is also a CPF's or a CNPJ's (`NumCtrlIF`, `NumCtrlPart`). A key
+  matches when it equals a listed one whole, ignoring case; empty entries are
+  dropped and the list is copied by `New`. Only string, byte-string, binary
+  and `Stringer` fields are exempted: the message, error fields, object,
+  array, inline and reflected fields, attribute values, context fields and the
+  key itself stay scrubbed, and name-based masking of sensitive fields still
+  wins. Ignored while `ScrubDocuments` is off; unset, output is unchanged.
+
 - **`tracing.WithDocumentScrubbing()`** (opt-in `TelemetryOption` for
   `NewTelemetryWithOptions`) wraps the OTLP span exporter so every exported
   span's name, status description, string attributes (slices and maps

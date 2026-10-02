@@ -23,4 +23,11 @@
 // is defence in depth, not a licence to format documents into log lines. The
 // stdlib log.GoLogger fallback does not scrub content; call
 // redaction.ScrubDocuments yourself on text you hand it.
+//
+// Config.ScrubDocumentsExemptKeys lets a consumer keep protocol identifiers
+// whose shape is also a CPF's or a CNPJ's (a NumCtrlIF, a NumCtrlPart) under
+// the keys it lists: a string, byte-string, binary or Stringer field whose key
+// equals a listed one, ignoring case, keeps its value. The message, error
+// fields, structured fields and the key itself stay scrubbed, and name-based
+// masking of sensitive fields is never undone.
 package zap

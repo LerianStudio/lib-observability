@@ -29,17 +29,25 @@ import (
 // Check directly would hand the wrapped cores to the caller's CheckedEntry,
 // and their Write would then receive the raw fields.
 //
-// The type holds no mutable state; values are copied, never shared.
+// The type holds no mutable state; values are copied, never shared, and the
+// exempt list is built once by New and only read afterwards.
 type documentScrubCore struct {
 	zapcore.Core
 	// errorOutput receives write failures of the wrapped cores, as the
 	// logger's own ErrorOutput would: the inner CheckedEntry reports them
 	// itself, since CheckedEntry.Write returns no error to hand back.
 	errorOutput zapcore.WriteSyncer
+	// exempt lists the keys whose plain-text values are left as logged
+	// (Config.ScrubDocumentsExemptKeys).
+	exempt []string
 }
 
 func (c documentScrubCore) With(fields []zapcore.Field) zapcore.Core {
-	return documentScrubCore{Core: c.Core.With(scrubDocumentFields(fields)), errorOutput: c.errorOutput}
+	return documentScrubCore{
+		Core:        c.Core.With(scrubDocumentFields(fields, c.exempt)),
+		errorOutput: c.errorOutput,
+		exempt:      c.exempt,
+	}
 }
 
 func (c documentScrubCore) Check(ent zapcore.Entry, ce *zapcore.CheckedEntry) *zapcore.CheckedEntry {
@@ -59,19 +67,23 @@ func (c documentScrubCore) Write(ent zapcore.Entry, fields []zapcore.Field) erro
 	}
 
 	inner.ErrorOutput = c.errorOutput
-	inner.Write(scrubDocumentFields(fields)...)
+	inner.Write(scrubDocumentFields(fields, c.exempt)...)
 
 	return nil
 }
 
 // scrubDocumentFields returns fields with every document-bearing key and
-// value scrubbed. The caller's slice is never modified: it is returned as is when
-// nothing matched, and copied on the first change otherwise.
-func scrubDocumentFields(fields []zapcore.Field) []zapcore.Field {
+// value scrubbed, except the values isExemptField leaves as logged. The
+// caller's slice is never modified: it is returned as is when nothing matched,
+// and copied on the first change otherwise.
+func scrubDocumentFields(fields []zapcore.Field, exempt []string) []zapcore.Field {
 	var out []zapcore.Field
 
 	for i := range fields {
-		scrubbed, changed := scrubDocumentField(fields[i])
+		scrubbed, changed := fields[i], false
+		if !isExemptField(fields[i], exempt) {
+			scrubbed, changed = scrubDocumentField(fields[i])
+		}
 
 		if key := redaction.ScrubDocuments(scrubbed.Key); key != scrubbed.Key {
 			scrubbed.Key, changed = key, true
@@ -90,6 +102,43 @@ func scrubDocumentFields(fields []zapcore.Field) []zapcore.Field {
 
 	if out == nil {
 		return fields
+	}
+
+	return out
+}
+
+// isExemptField reports whether f's value is left as logged: a plain-text
+// field (string, byte string, binary or Stringer) under a listed key. An
+// error, a structured value, an OpenTelemetry attribute value or a context is
+// never exempt, whatever its key: its rendering is free text or nests values
+// the key does not name.
+func isExemptField(f zapcore.Field, exempt []string) bool {
+	if len(exempt) == 0 {
+		return false
+	}
+
+	switch f.Type {
+	case zapcore.StringType, zapcore.ByteStringType, zapcore.BinaryType, zapcore.StringerType:
+	default:
+		return false
+	}
+
+	if _, isContext := f.Interface.(context.Context); isContext || isAttributeValue(f.Interface) {
+		return false
+	}
+
+	return slices.ContainsFunc(exempt, func(key string) bool { return strings.EqualFold(key, f.Key) })
+}
+
+// documentScrubExemptKeys is a copy of keys without its empty entries, or nil
+// when none is left.
+func documentScrubExemptKeys(keys []string) []string {
+	var out []string
+
+	for _, key := range keys {
+		if key != "" {
+			out = append(out, key)
+		}
 	}
 
 	return out

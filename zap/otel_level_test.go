@@ -477,3 +477,42 @@ func TestScrubDocumentsCoversKeys(t *testing.T) {
 		})
 	}
 }
+
+// An exempt key keeps its value on the OTLP bridge as on the local sink,
+// whether it was logged with the entry or carried by With; the message and a
+// non-exempt key holding the same value are still scrubbed on both.
+func TestScrubDocumentsExemptKeysReachTheOTelBridge(t *testing.T) {
+	prev := global.GetLoggerProvider()
+	t.Cleanup(func() { global.SetLoggerProvider(prev) })
+
+	exporter := &recordingExporter{}
+	provider := sdklog.NewLoggerProvider(sdklog.WithProcessor(sdklog.NewSimpleProcessor(exporter)))
+	global.SetLoggerProvider(provider)
+
+	var buf bytes.Buffer
+
+	logger, err := New(Config{
+		Environment: EnvironmentProduction, Level: "info", OTelLibraryName: "t", Output: &buf,
+		ScrubDocuments: true, ScrubDocumentsExemptKeys: []string{"NumCtrlIF", "numctrlpart"}, DisableSampling: true,
+	})
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	logger.With(logpkg.String("NumCtrlPart", "52998224725")).
+		Log(ctx, logpkg.LevelInfo, "ctrl 12ABC34501DE35",
+			logpkg.String("NumCtrlIF", "12ABC34501DE35"), logpkg.String("note", "12ABC34501DE35"))
+	require.NoError(t, provider.ForceFlush(ctx))
+
+	assert.Equal(t, []string{"ctrl [REDACTED_DOCUMENT]"}, exporter.seen())
+
+	attrs := strings.Join(exporter.seenAttrs(), " ")
+	assert.Contains(t, attrs, "NumCtrlIF=12ABC34501DE35")
+	assert.Contains(t, attrs, "NumCtrlPart=52998224725")
+	assert.Contains(t, attrs, "note=[REDACTED_DOCUMENT]")
+
+	local := buf.String()
+	assert.Contains(t, local, `"NumCtrlIF":"12ABC34501DE35"`)
+	assert.Contains(t, local, `"NumCtrlPart":"52998224725"`)
+	assert.Contains(t, local, `"note":"[REDACTED_DOCUMENT]"`)
+	assert.NotContains(t, local, "ctrl 12ABC34501DE35")
+}
