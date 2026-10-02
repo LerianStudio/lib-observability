@@ -287,6 +287,101 @@ Improvements:
 
 Features:
 
+- **`redaction.ScrubDocuments`** replaces every CPF/CNPJ-shaped span of free
+  text with `redaction.DocumentPlaceholder` (`[REDACTED_DOCUMENT]`): bare and
+  formatted CPF and CNPJ, the alphanumeric CNPJ (IN RFB 2.229/2024), a whole
+  document misspelled with `-` or `/`, and the value right after a `cpf` or
+  `cnpj` label even when glued to it or written in lowercase
+  (`cliente cpf52998224725 bloqueado`, `cnpj 12abc34501de35`; only the value
+  is replaced, the label stays, and the whole value must be a document, so
+  `cpfValidator`, `isCnpjValid` or `cnpj 12345678` survive). A label may sit
+  inside a camelCase key (`payerCnpj=…`, `holderCpf…`) and up to eight bytes
+  that are not letters or digits from its value, which covers JSON with a
+  space after the colon (`{"cnpj": "…"}`), escaped JSON inside error text
+  (`{\"cnpj\": \"…\"}`), XML (`<CNPJ>…</CNPJ>`), `cnpj = '…'`, `cnpj (…)` and
+  `cnpj=[…]`. It matches by shape, validates no
+  check digit (a mistyped or test document is still redacted), runs in linear
+  time and allocates nothing when the text carries no document. Timestamps,
+  IPv4 addresses (including `192.168.100.10`), versions, OIDs, UUIDs, trace ids
+  and hex digests survive: a spelling needs a `-` or `/` separator unless it is
+  one unseparated group, and a digit stretch glued to a letter is part of an
+  identifier. The accepted false positives and open residues (a dots-only
+  spelling such as `529.982.247.25` with no label, a document glued to letters
+  that are not a label (`clientecpf52998224725`, `HOLDERCPF52998224725`), a
+  lowercase alphanumeric CNPJ with no label right before it, including one a
+  word (`CNPJ do cliente 12abc…`) or more than eight gap bytes (doubly escaped
+  JSON) away from the label) are listed in the package documentation. Use it for audit and
+  free-text fields; it is defence in depth, not a licence to format identifiers
+  into errors. The default sensitive field names are unchanged: `cpf` and
+  `cnpj` are not added, since name masking would also hide institution
+  identifiers such as a CNPJ root; pass them through `IsSensitiveField`'s
+  `extra` names to mask fields under those names.
+
+- **`redaction.ScrubDocumentsUnder(key, value)`** is `ScrubDocuments` for a
+  value stored under a key (a log field, a span attribute, a map entry): a key
+  ending in `cpf` or `cnpj`, in any case (`cnpj`, `payerCnpj`, `user_cpf`,
+  `cpfCnpj`), is read as the value's label, so a lowercase alphanumeric CNPJ
+  under it (`cnpj=12abc34501de35`) is replaced, which `ScrubDocuments` alone
+  leaves as an ordinary token. A key that does not end in a label
+  (`cnpjRoot`) changes nothing, and the whole token must still be a document
+  (`cnpj=12345678`, a CNPJ root, survives). Same guarantees: pure, linear,
+  allocation-free when nothing matches.
+
+- **`zap.Config.ScrubDocuments`** (opt-in, default false) runs every log entry
+  through `redaction.ScrubDocuments` before either sink sees it: the message
+  and string, byte-string, error, `Stringer`, object, array and reflected
+  field values, on the local sink (stderr or `Output`) and the OTLP bridge
+  alike, whether the entry comes through `Log`, the zap-typed helpers, `With`
+  or `Raw()`. Level gating and sampling still apply; the production sampler
+  keys on the scrubbed message, so messages that differ only by a document
+  share one sampling bucket. While it is on, an error field is emitted as its
+  message only (no `errorVerbose`), and a structured field is judged by both
+  sinks' renderings: the local JSON and the bridge's `%+v`, which also prints
+  unexported and `json:"-"` struct fields, plus the `<key>Error` text zap
+  writes for a failing marshaler or a panicking `Stringer`. One that held a
+  document becomes a string of its JSON with the document replaced; one that
+  held none keeps its shape. A context field stays the bridge's emit context.
+  A field key ending in `cpf` or `cnpj` is read as its value's label
+  (`redaction.ScrubDocumentsUnder`), at the top level and in object or inline
+  entries, so `logpkg.String("cnpj", "12abc34501de35")` is scrubbed.
+  Off, output is byte-identical to before. `log.GoLogger` does not scrub
+  content.
+
+- **`zap.Config.ScrubDocumentsExemptKeys`** (opt-in, default nil) lists field
+  keys whose value `ScrubDocuments` leaves as logged, for protocol identifiers
+  whose shape is also a CPF's or a CNPJ's (`NumCtrlIF`, `NumCtrlPart`). A key
+  matches when it equals a listed one whole, ignoring case; empty entries are
+  dropped and the list is copied by `New`. Only string, byte-string, binary
+  and `Stringer` fields are exempted: the message, error fields, object,
+  array, inline and reflected fields, attribute values, context fields and the
+  key itself stay scrubbed, and name-based masking of sensitive fields still
+  wins. Ignored while `ScrubDocuments` is off; unset, output is unchanged.
+
+- **`tracing.WithDocumentScrubbing()`** (opt-in `TelemetryOption` for
+  `NewTelemetryWithOptions`) wraps the OTLP span exporter so every exported
+  span's name, status description, string attributes (slices and maps
+  included), event names and attributes (the `exception` event's message
+  included) and link attributes pass through `redaction.ScrubDocuments`. It
+  runs at export, so it covers `HandleSpanError`, panic and assertion
+  instrumentation and a caller's own `RecordError` alike; a span without
+  documents is exported unchanged. An attribute key ending in `cpf` or `cnpj`
+  is read as its value's label (`redaction.ScrubDocumentsUnder`), in string,
+  string-slice, byte-slice and slice values, a map entry by its own key. The
+  provider still shuts the real
+  exporter down exactly once. Ignored on noop telemetry.
+
+- **`tracing.WithDocumentScrubExemptKeys(keys...)`** (opt-in `TelemetryOption`)
+  lists attribute keys whose value `WithDocumentScrubbing` leaves as recorded,
+  for protocol identifiers whose shape is also a CPF's or a CNPJ's
+  (`NumCtrlIF`, `NumCtrlPart`). A key matches when it equals a listed one
+  whole, ignoring case, so a namespaced key (`spb.num_ctrl_if`) is listed as
+  written; repeated options add to the list and empty entries are dropped.
+  Only string, string-slice and byte-slice attributes are exempted, in span,
+  event and link attributes and in map entries judged by their own key; a
+  slice of values or a map under a listed key, the span name, the status
+  description, event names and every `exception.*` attribute stay scrubbed.
+  Ignored without `WithDocumentScrubbing`; unset, export is unchanged.
+
 - Add symmetric opt-in `lerian.http.server.responses_4xx.by_tenant` and
   `lerian.http.server.responses_5xx.by_tenant` counters for authenticated tenant
   and normalized route, without exact status-code cardinality. Tenant metrics
@@ -374,6 +469,21 @@ Fixes:
   provider already drains the exporter it owns, so `ShutdownTelemetry`/
   `ShutdownTelemetryWithContext` no longer shut the same exporter down a second
   time and a normal process exit returns no error. (@fredcamaral)
+- The collector endpoint scheme is now matched case-insensitively.
+  `HTTPS://collector:4317` used to fall through as a bare address: the exporter
+  dialed plaintext with the scheme left inside the gRPC target, and in
+  production the insecure-exporter gate refused the boot for the wrong reason.
+  It is now stripped and dialed over TLS, exactly like `https://`; `HTTP://`
+  behaves like `http://`. `OTEL_EXPORTER_OTLP_*` values that already carry a
+  scheme in any letter case are no longer double-prefixed (`https://HTTPS://…`).
+  A gRPC resolver target whose scheme is registered in the process (`dns:///`,
+  `unix://`, `unix-abstract://`, `passthrough:///` by default) is passed to
+  gRPC verbatim with the bare-address plaintext default, exactly as before. An
+  endpoint with any other scheme (`grpc://`, `otlp://`, …), which gRPC cannot
+  resolve and which used to boot and silently export nothing, now fails
+  `NewTelemetry` with the new `ErrUnsupportedEndpointScheme` when telemetry is
+  enabled; the error names the scheme only, never the endpoint. With telemetry
+  disabled it is logged as a warning and ignored.
 
 Known limitations (documented, not addressed by this release):
 

@@ -65,6 +65,45 @@ type Config struct {
 	// afterwards - an agent harness, a CLI, a job whose output is the
 	// deliverable - where a dropped line is a lost clue. False keeps sampling.
 	DisableSampling bool
+	// ScrubDocuments replaces every CPF/CNPJ-shaped span in the entry message
+	// and in string-rendered field values with redaction.DocumentPlaceholder,
+	// on the local sink (stderr or Output) and on the OTLP log bridge alike.
+	// It covers messages, string, byte-string, error, Stringer, object, array
+	// and reflected fields, whether logged through Log, the zap-typed
+	// helpers, With or Raw(); numeric fields are left alone. An error field is
+	// rendered to its message, so errorVerbose is not emitted while this is
+	// on. A field's key is read as its value's label
+	// (redaction.ScrubDocumentsUnder), so a lowercase alphanumeric CNPJ under
+	// a key ending in cpf or cnpj (cnpj, payerCnpj) is replaced too, at the top
+	// level and in the entries of an object or inline field. A structured
+	// field is judged by both sinks' renderings (the local JSON, and the
+	// bridge's %+v, which also prints unexported and json:"-" struct fields),
+	// failure text zap adds under "<key>Error" included; one
+	// that holds a document becomes a string of its JSON with the document
+	// replaced, one that holds none keeps its shape. A context field stays the
+	// bridge's emit context. The production sampler keys on the scrubbed
+	// message, so messages that differ only by a document share one sampling
+	// bucket. False (the default) leaves every entry byte-identical to a
+	// logger without the knob.
+	//
+	// This is defence in depth, not a licence to format documents into log
+	// lines or errors: fix the origin first. See redaction.ScrubDocuments for
+	// the matching rule and its accepted false positives.
+	ScrubDocuments bool
+	// ScrubDocumentsExemptKeys lists field keys whose own value ScrubDocuments
+	// leaves as logged: protocol identifiers whose shape is also a CPF's or a
+	// CNPJ's (a NumCtrlIF, a NumCtrlPart). A key matches when it equals an
+	// entry whole, ignoring case (strings.EqualFold); there is no prefix, word
+	// or snake/camel-case matching. Empty entries are dropped, and the list is
+	// copied by New, so later edits to the caller's slice have no effect.
+	//
+	// Only a string, byte-string, binary or Stringer field is exempted. The
+	// entry message, error fields, object, array, inline and reflected fields,
+	// OpenTelemetry attribute values and context fields are scrubbed under any
+	// key, and the key itself is still scrubbed. Name-based masking of
+	// sensitive fields (redaction.IsSensitiveField) runs first and is never
+	// undone. Ignored while ScrubDocuments is false; nil keeps the full scrub.
+	ScrubDocumentsExemptKeys []string
 }
 
 func (c Config) validate() error {
@@ -112,6 +151,8 @@ func New(cfg Config) (*Logger, error) {
 		baseConfig.Sampling = nil
 	}
 
+	exempt := documentScrubExemptKeys(cfg.ScrubDocumentsExemptKeys)
+
 	coreOptions := []zap.Option{
 		zap.AddCallerSkip(callerSkipFrames),
 		zap.WrapCore(func(core zapcore.Core) zapcore.Core {
@@ -119,7 +160,16 @@ func New(cfg Config) (*Logger, error) {
 				core = outputCore(baseConfig, level, cfg.Output)
 			}
 
-			return zapcore.NewTee(core, levelGate{Core: otelzap.NewCore(cfg.OTelLibraryName), level: level})
+			tee := zapcore.NewTee(core, levelGate{Core: otelzap.NewCore(cfg.OTelLibraryName), level: level})
+			if cfg.ScrubDocuments {
+				return documentScrubCore{
+					Core:        tee,
+					errorOutput: zapcore.Lock(os.Stderr),
+					exempt:      exempt,
+				}
+			}
+
+			return tee
 		}),
 	}
 

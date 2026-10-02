@@ -1,0 +1,604 @@
+//go:build unit
+
+package zap
+
+import (
+	"bytes"
+	"context"
+	"encoding/base64"
+	"errors"
+	"fmt"
+	"strings"
+	"sync"
+	"testing"
+
+	logpkg "github.com/LerianStudio/lib-observability/v4/log"
+	"github.com/LerianStudio/lib-observability/v4/redaction"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/attribute"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+)
+
+const (
+	scrubTestCPF  = "529.982.247-25"
+	scrubTestCNPJ = "12.345.678/0001-95"
+	// scrubTestLowerCNPJ is an alphanumeric CNPJ written in lowercase, which is
+	// a document only after a cnpj label.
+	scrubTestLowerCNPJ = "12abc34501de35"
+)
+
+// syncBuffer is a bytes.Buffer safe for the concurrent writes of the race test.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	return b.buf.String()
+}
+
+func newScrubLogger(t *testing.T, w *syncBuffer, scrub bool, encoding string) *Logger {
+	t.Helper()
+
+	logger, err := New(Config{
+		Environment:     EnvironmentProduction,
+		Level:           "debug",
+		OTelLibraryName: "svc",
+		Output:          w,
+		Encoding:        encoding,
+		ScrubDocuments:  scrub,
+		DisableSampling: true,
+	})
+	require.NoError(t, err)
+
+	return logger
+}
+
+type docHolder struct {
+	Note string `json:"note"`
+	N    int    `json:"n"`
+}
+
+type docStringer struct{ v string }
+
+func (s docStringer) String() string { return s.v }
+
+type docObject struct{ v string }
+
+func (o docObject) MarshalLogObject(enc zapcore.ObjectEncoder) error {
+	enc.AddString("note", o.v)
+
+	return nil
+}
+
+// keyedObject adds one string entry under a key of its choosing.
+type keyedObject struct{ key, v string }
+
+func (o keyedObject) MarshalLogObject(enc zapcore.ObjectEncoder) error {
+	enc.AddString(o.key, o.v)
+
+	return nil
+}
+
+type failingObject struct{ v string }
+
+func (o failingObject) MarshalLogObject(enc zapcore.ObjectEncoder) error {
+	enc.AddString("partial", "ok")
+
+	return errors.New("marshal " + o.v)
+}
+
+type docPanickingStringer struct{}
+
+func (docPanickingStringer) String() string { panic("render " + scrubTestCPF) }
+
+type panickingStringer struct{}
+
+func (panickingStringer) String() string { panic("boom") }
+
+type panickingError struct{}
+
+func (panickingError) Error() string { panic("boom") }
+
+func TestScrubDocuments_RedactsEveryLogSurface(t *testing.T) {
+	cases := map[string]func(l *Logger){
+		"message via Log": func(l *Logger) {
+			l.Log(context.Background(), logpkg.LevelInfo, "payer "+scrubTestCPF+" rejected")
+		},
+		"message via Info": func(l *Logger) { l.Info("payer " + scrubTestCNPJ) },
+		"string field via Log": func(l *Logger) {
+			l.Log(context.Background(), logpkg.LevelInfo, "m", logpkg.String("note", "doc "+scrubTestCPF))
+		},
+		"error field via Log": func(l *Logger) {
+			l.Log(context.Background(), logpkg.LevelError, "m", logpkg.Err(fmt.Errorf("lookup %s: not found", scrubTestCPF)))
+		},
+		"error field via zap": func(l *Logger) {
+			l.Error("m", zap.Error(fmt.Errorf("lookup %s", scrubTestCNPJ)))
+		},
+		"struct field via Log": func(l *Logger) {
+			l.Log(context.Background(), logpkg.LevelInfo, "m", logpkg.Any("payload", docHolder{Note: scrubTestCPF, N: 1}))
+		},
+		"stringer field": func(l *Logger) { l.Info("m", zap.Stringer("s", docStringer{v: scrubTestCPF})) },
+		"byte string field": func(l *Logger) {
+			l.Info("m", zap.ByteString("raw", []byte("doc "+scrubTestCPF)))
+		},
+		"object marshaler field": func(l *Logger) { l.Info("m", zap.Object("obj", docObject{v: scrubTestCPF})) },
+		"string slice field":     func(l *Logger) { l.Info("m", zap.Strings("docs", []string{"a", scrubTestCPF})) },
+		"With child": func(l *Logger) {
+			l.With(logpkg.String("note", scrubTestCPF)).Log(context.Background(), logpkg.LevelInfo, "m")
+		},
+		"WithZapFields child": func(l *Logger) {
+			l.WithZapFields(zap.String("note", scrubTestCNPJ)).Info("m")
+		},
+		"Raw logger": func(l *Logger) { l.Raw().Info("raw " + scrubTestCPF) },
+		"Raw With child": func(l *Logger) {
+			l.Raw().With(zap.String("note", scrubTestCPF)).Info("m")
+		},
+		"document glued to a label in the message": func(l *Logger) {
+			l.Log(context.Background(), logpkg.LevelInfo, "cliente cpf52998224725 bloqueado")
+		},
+		"lowercase cnpj after a label in a field": func(l *Logger) {
+			l.Log(context.Background(), logpkg.LevelInfo, "m", logpkg.String("note", "cnpj "+scrubTestLowerCNPJ))
+		},
+		"lowercase cnpj under a cnpj field key": func(l *Logger) {
+			l.Log(context.Background(), logpkg.LevelInfo, "m", logpkg.String("cnpj", scrubTestLowerCNPJ))
+		},
+		"lowercase cnpj under a camelCase field key": func(l *Logger) {
+			l.Info("m", zap.String("payerCnpj", scrubTestLowerCNPJ))
+		},
+		"lowercase cnpj as bytes under a cnpj key": func(l *Logger) {
+			l.Info("m", zap.ByteString("cnpj", []byte(scrubTestLowerCNPJ)))
+		},
+		"lowercase cnpj from a Stringer under a cnpj key": func(l *Logger) {
+			l.Info("m", zap.Stringer("cnpj", docStringer{v: scrubTestLowerCNPJ}))
+		},
+		"lowercase cnpj under a cnpj key bound by With": func(l *Logger) {
+			l.With(logpkg.String("holderCnpj", scrubTestLowerCNPJ)).Log(context.Background(), logpkg.LevelInfo, "m")
+		},
+		"lowercase cnpj in an object entry under a cnpj key": func(l *Logger) {
+			l.Info("m", zap.Inline(keyedObject{key: "cnpj", v: scrubTestLowerCNPJ}))
+		},
+	}
+
+	for _, encoding := range []string{"json", "console"} {
+		for name, emit := range cases {
+			t.Run(encoding+"/"+name, func(t *testing.T) {
+				var out syncBuffer
+
+				emit(newScrubLogger(t, &out, true, encoding))
+
+				got := out.String()
+				require.NotEmpty(t, got, "the entry must still be written")
+				assert.NotContains(t, got, scrubTestCPF)
+				assert.NotContains(t, got, scrubTestCNPJ)
+				assert.NotContains(t, got, "52998224725")
+				assert.NotContains(t, got, scrubTestLowerCNPJ)
+				assert.Contains(t, got, redaction.DocumentPlaceholder)
+			})
+		}
+	}
+}
+
+// The text zap writes for a failure (a marshaler's error, a Stringer's panic)
+// goes to the sinks under "<key>Error"; it is scrubbed like any other value,
+// and the failure is still reported.
+func TestScrubDocuments_RedactsFailureText(t *testing.T) {
+	var out syncBuffer
+
+	logger := newScrubLogger(t, &out, true, "json")
+
+	assert.NotPanics(t, func() {
+		logger.Info("m",
+			zap.Object("obj", failingObject{v: scrubTestCPF}),
+			zap.Stringer("st", docPanickingStringer{}))
+	})
+
+	got := out.String()
+	assert.NotContains(t, got, scrubTestCPF)
+	assert.Contains(t, got, `"objError":"marshal `+redaction.DocumentPlaceholder+`"`)
+	assert.Contains(t, got, `"stError":"PANIC=render `+redaction.DocumentPlaceholder+`"`)
+}
+
+func TestScrubDocuments_DisabledOutputIsByteIdentical(t *testing.T) {
+	emit := func(l *Logger) {
+		l.Log(context.Background(), logpkg.LevelError, "payer "+scrubTestCPF,
+			logpkg.String("note", scrubTestCNPJ),
+			logpkg.Err(errors.New("doc "+scrubTestCPF)),
+			logpkg.Any("payload", docHolder{Note: scrubTestCPF}))
+		l.Info("m", zap.Stringer("s", docStringer{v: scrubTestCPF}))
+	}
+
+	var def, off syncBuffer
+
+	defLogger, err := New(Config{
+		Environment: EnvironmentProduction, Level: "debug", OTelLibraryName: "svc",
+		Output: &def, DisableSampling: true,
+	})
+	require.NoError(t, err)
+
+	emit(defLogger)
+	emit(newScrubLogger(t, &off, false, "json"))
+
+	stripTime := func(s string) string {
+		lines := strings.Split(strings.TrimSpace(s), "\n")
+		for i, line := range lines {
+			if start := strings.Index(line, `"timestamp":"`); start >= 0 {
+				end := strings.Index(line[start+len(`"timestamp":"`):], `"`)
+				lines[i] = line[:start] + line[start+len(`"timestamp":"`)+end+1:]
+			}
+		}
+
+		return strings.Join(lines, "\n")
+	}
+
+	assert.Equal(t, stripTime(def.String()), stripTime(off.String()))
+	assert.Contains(t, off.String(), scrubTestCPF, "the scrub is opt-in: disabled output keeps the text")
+}
+
+func TestScrubDocuments_UnmatchedFieldsKeepTheirShape(t *testing.T) {
+	var on, off syncBuffer
+
+	emit := func(l *Logger) {
+		l.Info("order 42 settled",
+			zap.String("s", "tenant-a"),
+			zap.Any("payload", docHolder{Note: "ok", N: 7}),
+			zap.Stringer("st", docStringer{v: "fine"}),
+			zap.Object("obj", docObject{v: "fine"}),
+			zap.Any("attr", attribute.ByteSliceValue([]byte("fine"))),
+			zap.Any("attrs", map[string]attribute.Value{"k": attribute.StringValue("fine")}),
+			zap.Binary("bin", []byte("fine")),
+			zap.Int64("n", 12345))
+	}
+
+	emit(newScrubLogger(t, &on, true, "json"))
+	emit(newScrubLogger(t, &off, false, "json"))
+
+	assert.Contains(t, on.String(), `"payload":{"note":"ok","n":7}`)
+	assert.Contains(t, on.String(), `"obj":{"note":"fine"}`)
+
+	cut := func(s string) string { return s[strings.Index(s, `"msg"`):] }
+	assert.Equal(t, cut(off.String()), cut(on.String()))
+}
+
+func TestScrubDocuments_UnrenderableValuesDoNotPanic(t *testing.T) {
+	var out syncBuffer
+
+	logger := newScrubLogger(t, &out, true, "json")
+
+	var typedNil *docStringer
+
+	assert.NotPanics(t, func() {
+		logger.Info("m",
+			zap.Stringer("panics", panickingStringer{}),
+			zap.Error(panickingError{}),
+			zap.Any("nilptr", typedNil),
+			zap.Any("unmarshalable", make(chan int)))
+	})
+	assert.NotEmpty(t, out.String())
+}
+
+func TestScrubDocuments_NilAndZeroLoggerStayNoOps(t *testing.T) {
+	var nilLogger *Logger
+
+	zero := &Logger{}
+
+	assert.NotPanics(t, func() {
+		nilLogger.Log(context.Background(), logpkg.LevelInfo, scrubTestCPF)
+		zero.Log(context.Background(), logpkg.LevelInfo, scrubTestCPF)
+		zero.With(logpkg.String("k", scrubTestCPF)).Log(context.Background(), logpkg.LevelInfo, "m")
+	})
+}
+
+func TestScrubDocuments_LevelAndSamplingStillApply(t *testing.T) {
+	var out syncBuffer
+
+	logger, err := New(Config{
+		Environment:     EnvironmentProduction,
+		Level:           "warn",
+		OTelLibraryName: "svc",
+		Output:          &out,
+		ScrubDocuments:  true,
+	})
+	require.NoError(t, err)
+
+	logger.Info("below level " + scrubTestCPF)
+	assert.Empty(t, out.String(), "an entry below the level is never written")
+
+	for range 250 {
+		logger.Warn("repeat " + scrubTestCPF)
+	}
+
+	lines := strings.Count(strings.TrimSpace(out.String()), "\n") + 1
+	assert.Equal(t, 101, lines, "the production 100:100 sampler must still drop repeats")
+
+	logger.Level().SetLevel(zapcore.DebugLevel)
+	logger.Debug("now enabled")
+	assert.Contains(t, out.String(), "now enabled")
+}
+
+func TestScrubDocuments_ConcurrentLogging(t *testing.T) {
+	var out syncBuffer
+
+	logger := newScrubLogger(t, &out, true, "json")
+	child := logger.With(logpkg.String("note", scrubTestCNPJ))
+
+	var wg sync.WaitGroup
+
+	for i := range 8 {
+		wg.Add(1)
+
+		go func() {
+			defer wg.Done()
+
+			for j := range 50 {
+				child.Log(context.Background(), logpkg.LevelInfo, fmt.Sprintf("w%d-%d %s", i, j, scrubTestCPF),
+					logpkg.Err(errors.New(scrubTestCPF)))
+			}
+		}()
+	}
+
+	wg.Wait()
+
+	got := out.String()
+	assert.Equal(t, 400, strings.Count(got, "\n"))
+	assert.NotContains(t, got, scrubTestCPF)
+	assert.NotContains(t, got, scrubTestCNPJ)
+}
+
+// Keys of a reflected map that print alike (1 and "1") must not collapse into
+// one entry while the values are inspected: the one dropped could be the one
+// holding the document.
+func TestPlainAttributes_KeepsEveryMapEntry(t *testing.T) {
+	value := map[any]attribute.Value{
+		1:   attribute.ByteSliceValue([]byte(scrubTestCPF)),
+		"1": attribute.StringValue("ok"),
+	}
+
+	plain, held := plainAttributes(value, 0)
+	require.True(t, held)
+
+	rendered, complete := bridgeRendering(plain)
+	require.True(t, complete)
+	assert.Contains(t, rendered, scrubTestCPF)
+	assert.Contains(t, rendered, "ok")
+}
+
+// scrubTestControlNumber is a protocol control number whose shape is also an
+// alphanumeric CNPJ's: the reason a consumer exempts its key.
+const scrubTestControlNumber = "12ABC34501DE35"
+
+func newExemptScrubLogger(t *testing.T, w *syncBuffer, exempt []string) *Logger {
+	t.Helper()
+
+	logger, err := New(Config{
+		Environment:              EnvironmentProduction,
+		Level:                    "debug",
+		OTelLibraryName:          "svc",
+		Output:                   w,
+		Encoding:                 "json",
+		ScrubDocuments:           true,
+		ScrubDocumentsExemptKeys: exempt,
+		DisableSampling:          true,
+	})
+	require.NoError(t, err)
+
+	return logger
+}
+
+func TestScrubDocumentsExemptKeys_KeepListedValues(t *testing.T) {
+	cases := map[string]struct {
+		emit func(l *Logger)
+		want string
+	}{
+		"string field via Log": {
+			emit: func(l *Logger) {
+				l.Log(context.Background(), logpkg.LevelInfo, "m", logpkg.String("NumCtrlIF", scrubTestControlNumber))
+			},
+			want: `"NumCtrlIF":"` + scrubTestControlNumber + `"`,
+		},
+		"case-insensitive key match": {
+			emit: func(l *Logger) {
+				l.Log(context.Background(), logpkg.LevelInfo, "m", logpkg.String("numctrlpart", "52998224725"))
+			},
+			want: `"numctrlpart":"52998224725"`,
+		},
+		"string field via With": {
+			emit: func(l *Logger) {
+				l.With(logpkg.String("NumCtrlIF", scrubTestControlNumber)).Log(context.Background(), logpkg.LevelInfo, "m")
+			},
+			want: `"NumCtrlIF":"` + scrubTestControlNumber + `"`,
+		},
+		"zap string field via Raw With": {
+			emit: func(l *Logger) { l.Raw().With(zap.String("NumCtrlIF", scrubTestControlNumber)).Info("m") },
+			want: `"NumCtrlIF":"` + scrubTestControlNumber + `"`,
+		},
+		"byte string field": {
+			emit: func(l *Logger) { l.Info("m", zap.ByteString("NumCtrlIF", []byte(scrubTestControlNumber))) },
+			want: `"NumCtrlIF":"` + scrubTestControlNumber + `"`,
+		},
+		"binary field": {
+			emit: func(l *Logger) { l.Info("m", zap.Binary("NumCtrlIF", []byte(scrubTestControlNumber))) },
+			want: `"NumCtrlIF":"` + base64.StdEncoding.EncodeToString([]byte(scrubTestControlNumber)) + `"`,
+		},
+		"stringer field": {
+			emit: func(l *Logger) { l.Info("m", zap.Stringer("NumCtrlIF", docStringer{v: scrubTestControlNumber})) },
+			want: `"NumCtrlIF":"` + scrubTestControlNumber + `"`,
+		},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			var out syncBuffer
+
+			tc.emit(newExemptScrubLogger(t, &out, []string{"numctrlif", "NumCtrlPart"}))
+
+			assert.Contains(t, out.String(), tc.want)
+		})
+	}
+}
+
+// The exemption covers the listed key's own value and nothing else: the
+// message, other keys, errors, structured values and name-based masking are
+// unaffected.
+func TestScrubDocumentsExemptKeys_ScrubEverythingElse(t *testing.T) {
+	exempt := []string{"NumCtrlIF", "error", "password"}
+
+	cases := map[string]func(l *Logger){
+		"message carrying the same value": func(l *Logger) {
+			l.Log(context.Background(), logpkg.LevelInfo, "ctrl "+scrubTestControlNumber)
+		},
+		"non-exempt key carrying the same value": func(l *Logger) {
+			l.Log(context.Background(), logpkg.LevelInfo, "m", logpkg.String("note", scrubTestControlNumber))
+		},
+		"error field under an exempt key": func(l *Logger) {
+			l.Log(context.Background(), logpkg.LevelError, "m", logpkg.Err(errors.New("ctrl "+scrubTestControlNumber)))
+		},
+		"named error under an exempt key": func(l *Logger) {
+			l.Error("m", zap.NamedError("NumCtrlIF", errors.New(scrubTestControlNumber)))
+		},
+		"object field under an exempt key": func(l *Logger) {
+			l.Info("m", zap.Object("NumCtrlIF", docObject{v: scrubTestControlNumber}))
+		},
+		"reflected field under an exempt key": func(l *Logger) {
+			l.Log(context.Background(), logpkg.LevelInfo, "m", logpkg.Any("NumCtrlIF", docHolder{Note: scrubTestControlNumber}))
+		},
+		"array field under an exempt key": func(l *Logger) {
+			l.Info("m", zap.Strings("NumCtrlIF", []string{scrubTestControlNumber}))
+		},
+		"inline field": func(l *Logger) { l.Info("m", zap.Inline(docObject{v: scrubTestControlNumber})) },
+		"attribute value under an exempt key": func(l *Logger) {
+			l.Info("m", zap.Any("NumCtrlIF", attribute.StringValue(scrubTestControlNumber)))
+		},
+		"context field under an exempt key": func(l *Logger) {
+			l.Info("m", zap.Any("NumCtrlIF", context.WithValue(context.Background(), scrubCtxKey{}, scrubTestControlNumber)))
+		},
+	}
+
+	for name, emit := range cases {
+		t.Run(name, func(t *testing.T) {
+			var out syncBuffer
+
+			emit(newExemptScrubLogger(t, &out, exempt))
+
+			got := out.String()
+			require.NotEmpty(t, got)
+			assert.NotContains(t, got, scrubTestControlNumber)
+			assert.Contains(t, got, redaction.DocumentPlaceholder)
+		})
+	}
+
+	t.Run("a sensitive key stays masked", func(t *testing.T) {
+		var out syncBuffer
+
+		newExemptScrubLogger(t, &out, exempt).
+			Log(context.Background(), logpkg.LevelInfo, "m", logpkg.String("password", scrubTestControlNumber))
+
+		assert.NotContains(t, out.String(), scrubTestControlNumber)
+		assert.Contains(t, out.String(), `"password":"[REDACTED]"`)
+	})
+
+	t.Run("a document-shaped exempt key is still scrubbed", func(t *testing.T) {
+		var out syncBuffer
+
+		newExemptScrubLogger(t, &out, []string{scrubTestCPF}).Info("m", zap.String(scrubTestCPF, "v"))
+
+		assert.NotContains(t, out.String(), scrubTestCPF)
+		assert.Contains(t, out.String(), `"`+redaction.DocumentPlaceholder+`":"v"`)
+	})
+}
+
+func TestScrubDocumentsExemptKeys_ListIsCopiedAtConstruction(t *testing.T) {
+	var out syncBuffer
+
+	exempt := []string{"NumCtrlIF"}
+	logger := newExemptScrubLogger(t, &out, exempt)
+	exempt[0] = "note"
+
+	logger.Log(context.Background(), logpkg.LevelInfo, "m",
+		logpkg.String("NumCtrlIF", scrubTestControlNumber), logpkg.String("note", scrubTestCPF))
+
+	assert.Contains(t, out.String(), `"NumCtrlIF":"`+scrubTestControlNumber+`"`)
+	assert.NotContains(t, out.String(), scrubTestCPF)
+}
+
+func TestScrubDocumentsExemptKeys_EmptyOrIgnoredListChangesNothing(t *testing.T) {
+	emit := func(l *Logger) {
+		l.Log(context.Background(), logpkg.LevelError, "payer "+scrubTestCPF,
+			logpkg.String("note", scrubTestCNPJ),
+			logpkg.String("NumCtrlIF", scrubTestControlNumber),
+			logpkg.Err(errors.New("doc "+scrubTestCPF)))
+	}
+
+	stripTime := func(s string) string {
+		line := strings.TrimSpace(s)
+		start := strings.Index(line, `"timestamp":"`) + len(`"timestamp":"`)
+
+		return line[strings.Index(line[start:], `"`)+start:]
+	}
+
+	t.Run("an empty list keeps the full scrub", func(t *testing.T) {
+		var base, empty syncBuffer
+
+		emit(newScrubLogger(t, &base, true, "json"))
+		emit(newExemptScrubLogger(t, &empty, []string{"", ""}))
+
+		assert.Equal(t, stripTime(base.String()), stripTime(empty.String()))
+		assert.NotContains(t, empty.String(), scrubTestControlNumber)
+	})
+
+	t.Run("without ScrubDocuments the list is ignored", func(t *testing.T) {
+		var base, listed syncBuffer
+
+		emit(newScrubLogger(t, &base, false, "json"))
+
+		logger, err := New(Config{
+			Environment: EnvironmentProduction, Level: "debug", OTelLibraryName: "svc", Output: &listed,
+			Encoding: "json", DisableSampling: true, ScrubDocumentsExemptKeys: []string{"NumCtrlIF"},
+		})
+		require.NoError(t, err)
+		emit(logger)
+
+		assert.Equal(t, stripTime(base.String()), stripTime(listed.String()))
+	})
+}
+
+func TestScrubDocumentsExemptKeys_ConcurrentLogging(t *testing.T) {
+	var out syncBuffer
+
+	child := newExemptScrubLogger(t, &out, []string{"NumCtrlIF"}).
+		With(logpkg.String("NumCtrlIF", scrubTestControlNumber))
+
+	var wg sync.WaitGroup
+
+	for i := range 8 {
+		wg.Add(1)
+
+		go func() {
+			defer wg.Done()
+
+			for j := range 50 {
+				child.With(logpkg.String("NumCtrlIF", scrubTestControlNumber)).
+					Log(context.Background(), logpkg.LevelInfo, fmt.Sprintf("w%d-%d", i, j), logpkg.String("note", scrubTestCPF))
+			}
+		}()
+	}
+
+	wg.Wait()
+
+	got := out.String()
+	assert.Equal(t, 400, strings.Count(got, "\n"))
+	assert.Equal(t, 800, strings.Count(got, `"NumCtrlIF":"`+scrubTestControlNumber+`"`))
+	assert.NotContains(t, got, scrubTestCPF)
+}
