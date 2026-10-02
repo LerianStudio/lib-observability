@@ -27,8 +27,9 @@ const (
 //
 // It matches by shape, the sequence of separator-delimited group lengths, over
 // a numeric and an alphanumeric reading of a document, plus a reading for a
-// misspelled one; the package documentation states the rule, the false
-// positives it accepts and the residue it leaves open. It validates no check
+// misspelled one and a reading for the value that follows a cpf or cnpj label;
+// the package documentation states the rule, the false positives it accepts and
+// the residue it leaves open. It validates no check
 // digit, so a mistyped, masked or test document is redacted as well.
 //
 // It is pure, safe for concurrent use and allocation-free when nothing matches:
@@ -126,17 +127,19 @@ func (r *reading) glues(b byte) bool {
 }
 
 // documentSpans returns the ordered, non-overlapping byte ranges of s that read
-// as a document. It returns nil, without allocating, when there are none. The
-// alphanumeric pass is skipped when s carries no uppercase letter, since every
-// match it could return needs one.
+// as a document: the numeric and alphanumeric shapes, and the values that follow
+// a cpf or cnpj label. It returns nil, without allocating, when there are none.
+// The alphanumeric pass is skipped when s carries no uppercase letter, since
+// every match it could return needs one.
 func documentSpans(s string) []span {
 	numeric := numericReading.scan(s)
+	labelled := labelledSpans(s)
 
 	if !hasUpperAlpha(s) {
-		return numeric
+		return mergeSpans(numeric, labelled)
 	}
 
-	return mergeSpans(numeric, alphanumericReading.scan(s))
+	return mergeSpans(numeric, alphanumericReading.scan(s), labelled)
 }
 
 // scan returns the matches of this reading in s, run by run, in order.
@@ -357,23 +360,33 @@ func misspelledBody(s string, start, end int) (span, bool) {
 	return body, true
 }
 
-// mergeSpans returns the union of two ordered match sets as one ordered,
-// non-overlapping list. An overlapping span is absorbed, never dropped: two
-// readings that overlap only partially each claim bytes the other does not
-// (529.982.247-25.ABC.123/4567-89 is a numeric CPF followed by an alphanumeric
-// CNPJ sharing "25"), and dropping the later span would emit its tail in clear.
-func mergeSpans(numeric, alphanumeric []span) []span {
-	if len(alphanumeric) == 0 {
-		return numeric
+// mergeSpans returns the union of ordered match sets as one ordered,
+// non-overlapping list. It allocates only when two or more sets are non-empty.
+// An overlapping span is absorbed, never dropped: two readings that overlap only
+// partially each claim bytes the other does not (529.982.247-25.ABC.123/4567-89
+// is a numeric CPF followed by an alphanumeric CNPJ sharing "25"), and dropping
+// the later span would emit its tail in clear.
+func mergeSpans(sets ...[]span) []span {
+	var only []span
+
+	nonEmpty, total := 0, 0
+
+	for _, set := range sets {
+		if len(set) > 0 {
+			only = set
+			nonEmpty++
+			total += len(set)
+		}
 	}
 
-	if len(numeric) == 0 {
-		return alphanumeric
+	if nonEmpty < 2 {
+		return only
 	}
 
-	all := make([]span, 0, len(numeric)+len(alphanumeric))
-	all = append(all, numeric...)
-	all = append(all, alphanumeric...)
+	all := make([]span, 0, total)
+	for _, set := range sets {
+		all = append(all, set...)
+	}
 
 	slices.SortFunc(all, func(a, b span) int {
 		if a.start != b.start {

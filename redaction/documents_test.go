@@ -63,6 +63,18 @@ func TestScrubDocuments_Redacts(t *testing.T) {
 			want: "token=" + ph,
 		},
 		{name: "error text", in: `consult failed: holder "529.982.247-25": timeout`, want: `consult failed: holder "` + ph + `": timeout`},
+		{name: "bare cpf glued to a label", in: "cliente cpf52998224725 bloqueado", want: "cliente cpf" + ph + " bloqueado"},
+		{name: "misspelled cpf glued to a label", in: "CPF529982247-25", want: "CPF" + ph},
+		{name: "bare cnpj glued to a label", in: "cnpj12345678000195", want: "cnpj" + ph},
+		{name: "lowercase alphanumeric cnpj after a label", in: "cnpj 12abc34501de35", want: "cnpj " + ph},
+		{name: "mixed-case alphanumeric cnpj after a label", in: "cnpj:12ABC34501de35", want: "cnpj:" + ph},
+		{name: "alphanumeric cnpj glued to an uppercase label", in: "CNPJ12ABC34501DE35", want: "CNPJ" + ph},
+		{name: "formatted lowercase alphanumeric cnpj after a label", in: "cnpj 12.abc.345/01de-35", want: "cnpj " + ph},
+		{name: "label at the end of a key", in: "user_cpf=52998224725", want: "user_cpf=" + ph},
+		{name: "label and a quoted json value", in: `{"cpf":"52998224725"}`, want: `{"cpf":"` + ph + `"}`},
+		{name: "label and a trailing dot", in: "cpf 52998224725.", want: "cpf " + ph + "."},
+		{name: "dots-only cpf after a label", in: "cpf 529.982.247.25", want: "cpf " + ph},
+		{name: "label repeated before the document", in: "cpf-cpf52998224725", want: "cpf-cpf" + ph},
 	}
 
 	for _, tt := range tests {
@@ -104,11 +116,22 @@ func TestScrubDocuments_LeavesOperationalValues(t *testing.T) {
 		"trace 0af7651916cd43dd8448eb211c80319c span b7ad6b7169203331", // trace and span ids
 		"sha256:9f86d081884c7d659a2feaa0c55ad0f52998224725b0f00a08",    // hex digest with an 11-digit run
 		"deadbeef12345678000195cafe",                                   // hex digest with a 14-digit run
-		"cpf52998224725",                                               // bare document glued to letters: identifier
+		"cpfValidator",                                                 // label inside an identifier
+		"cnpjRoot12345678",                                             // label and a CNPJ root
+		"cnpj 12345678",                                                // label and an 8-digit CNPJ root
+		"cpf: invalid",                                                 // label and no document
+		"cnpj lookup failed 0af7651916cd43dd8448eb211c80319c",          // label and a trace id
+		"cnpj=E00038166202609291200kR7mQ2xYz9A",                        // label and an EndToEndID
+		"cpf 52998224725abc",                                           // label and a longer token
+		"12abc34501de35",                                               // documented residue: lowercase cnpj, no label
+		"12.abc.345/01de-35",                                           // documented residue: formatted lowercase cnpj, no label
+		"my.app.com/user-42",                                           // dotted path with the 2.3.3/4-2 layout
+		"clientecpf52998224725",                                        // documented residue: label inside a word
+		"CNPJ do cliente 12abc34501de35",                               // documented residue: label too far from the value
 		"AbCDEFGHIJKL1234xy",                                           // mixed-case token, uppercase window
 		"5.29982247.25",                                                // documented residue: dots-only misspelling
 		"529.982.247.25",                                               // documented residue: dots-only spelling
-		"CPF529982247-25",                                              // documented residue: misspelling glued to letters
+		"ABC529982247-25",                                              // documented residue: misspelling glued to letters
 		"192.168.100.10",                                               // address with 3.3.3.2 octets
 		"172.217.160.14",                                               // address with 3.3.3.2 octets
 		"remote_addr=192.168.100.10:443",                               // address, port and label
@@ -175,6 +198,8 @@ func TestScrubDocuments_AcceptedFalsePositives(t *testing.T) {
 		{name: "14-digit integer part of an amount", in: "12345678901234.50", want: ph + ".50"},
 		{name: "uppercase hex digest ending in two digits", in: "ETAG=W/1A2B3C4D5E6F78", want: "ETAG=W/" + ph},
 		{name: "11-digit phone number", in: "tel 11987654321", want: "tel " + ph},
+		{name: "14-character word ending in two digits after a cnpj label", in: "cnpj notavailable12", want: "cnpj " + ph},
+		{name: "address after a cpf label", in: "cpf 192.168.100.10", want: "cpf " + ph},
 	}
 
 	for _, tt := range tests {
@@ -189,7 +214,7 @@ func TestScrubDocuments_AcceptedFalsePositives(t *testing.T) {
 func TestScrubDocuments_Idempotent(t *testing.T) {
 	t.Parallel()
 
-	once := ScrubDocuments("cpf=529.982.247-25 cnpj=12ABC34501DE35")
+	once := ScrubDocuments("cpf=529.982.247-25 cnpj=12ABC34501DE35 cliente cpf52998224725 cnpj 12abc34501de35")
 	assert.Equal(t, once, ScrubDocuments(once))
 }
 
@@ -206,6 +231,20 @@ func TestScrubDocuments_NoAllocationWithoutMatch(t *testing.T) {
 
 	assert.Equal(t, in, out)
 	assert.Zero(t, allocs, "a string with no document must not allocate")
+}
+
+func TestScrubDocuments_NoAllocationWithLabelsAndNoDocument(t *testing.T) {
+	in := "cpfValidator: cpf invalid for user_cpf=unknown, cnpj lookup failed (cnpjRoot 12345678, " +
+		"CNPJ do cliente pending, trace 4bf92f3577b34da6a3ce929d0e0e4736)"
+
+	var out string
+
+	allocs := testing.AllocsPerRun(100, func() {
+		out = ScrubDocuments(in)
+	})
+
+	assert.Equal(t, in, out)
+	assert.Zero(t, allocs, "a string with labels and no document must not allocate")
 }
 
 func TestScrubDocuments_Concurrent(t *testing.T) {
@@ -236,4 +275,15 @@ func TestScrubDocuments_LinearOnLongInput(t *testing.T) {
 	got := ScrubDocuments(long)
 	assert.True(t, strings.HasSuffix(got, ph))
 	assert.NotContains(t, got, "982.247")
+}
+
+// TestScrubDocuments_LinearOnRepeatedLabels feeds a run of labels each followed
+// by the next: every label reads a bounded token, so the scan stays linear.
+func TestScrubDocuments_LinearOnRepeatedLabels(t *testing.T) {
+	t.Parallel()
+
+	long := strings.Repeat("cpf-", 50_000) + "52998224725"
+
+	got := ScrubDocuments(long)
+	assert.Equal(t, strings.Repeat("cpf-", 50_000)+ph, got)
 }

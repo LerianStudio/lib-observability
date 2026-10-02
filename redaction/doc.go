@@ -73,15 +73,43 @@
 // # Alphanumeric CNPJ
 //
 // Since IN RFB 2.229/2024 the first twelve positions of a CNPJ may be letters and
-// only its two check digits are numeric. The alphanumeric reading matches only
-// the two CNPJ shapes, only uppercase (a lowercase document is not a valid
-// spelling, and widening the class would put every lowercase token at risk),
-// only when the last two positions are digits and at least one position is a
-// letter (an all-digit span is the numeric reading's). Groups are maximal, so a
+// only its two check digits are numeric. Without a label (see below) the
+// alphanumeric reading matches only the two CNPJ shapes, only uppercase (the
+// canonical spelling; widening the class to lowercase would put every
+// lowercase token at risk: my.app.com/user-42 has the 2.3.3/4-2 layout and ends
+// in two digits), only when the last two positions are digits and at least one
+// position is a letter (an all-digit span is the numeric reading's). Groups are maximal, so a
 // 20-character token is one group of 20 and no 14-character window is cut out
 // of it, and a {14} group touching a lowercase letter is part of a mixed-case
 // token and does not match. When the two readings overlap partially, the union
 // is redacted, never only one side.
+//
+// # Labelled documents
+//
+// A cpf or cnpj label says what the value after it is, so the value is read
+// with the label's meaning instead of on its shape alone. This catches what the
+// readings above refuse on purpose: a document glued to its label
+// (cliente cpf52998224725 bloqueado, CNPJ12ABC34501DE35, CPF529982247-25) and
+// an alphanumeric CNPJ written in lowercase (cnpj 12abc34501de35).
+//
+//   - The label is cpf or cnpj in any case, at the start of the text or after a
+//     byte that is neither a letter nor a digit: user_cpf and "cpf": are labels,
+//     clientecpf and 9cpf are not.
+//   - Up to three gap bytes from space, tab, : = # " ' _ - may follow it.
+//   - The value is the run of letters, digits and . - / that follows, trimmed of
+//     separators at both ends, and it is replaced only when the whole run is a
+//     document. After either label that is a run of digits and separators
+//     holding exactly 11 or 14 digits, separated any way; after cnpj it may also
+//     be an alphanumeric CNPJ in any case, one group of 14 or the 2.3.3/4-2
+//     layout, with at least one letter and two trailing digits.
+//   - The label stays in the output (cliente cpf[REDACTED_DOCUMENT] bloqueado).
+//   - A run longer than 24 bytes is no document, which bounds the work per label
+//     and keeps the scan linear however many labels the text carries.
+//
+// The whole-run rule is what keeps false positives bounded: cpfValidator,
+// cnpjRoot12345678, cnpj 12345678 (a CNPJ root), cpf: invalid, a trace id or an
+// EndToEndID after a label all survive. What it accepts by design is listed
+// under the false positives below.
 //
 // # No checksum
 //
@@ -102,6 +130,11 @@
 //     distinguishes the two. A redacted digest costs one correlation; an emitted
 //     CNPJ is a data-protection incident.
 //
+//   - after a cnpj label, a 14-character word ending in two digits
+//     (cnpj notavailable12), and after either label, any run of digits and
+//     separators holding 11 or 14 digits (cpf 192.168.100.10): the label is
+//     taken at its word.
+//
 // UUIDs never match. A UUID is hex groups of {8,4,4,4,12}: no run of its digits
 // fits a separated shape (the inner groups are whole 4-digit segments), an
 // unseparated shape (a partial segment touches a letter, a whole one is 8 or 12
@@ -113,19 +146,23 @@
 // These carry a document and are not redacted:
 //
 //   - a dots-only spelling, canonical widths (529.982.247.25) or not
-//     (5.29982247.25): closing it means telling a dotted run apart from
-//     decimals, addresses, versions and OIDs by group count and width, a pile of
-//     exceptions that would destroy an address the first time one of them was
-//     stated slightly wrong;
-//   - an unseparated or misspelled document glued to letters on either side,
-//     such as cpf52998224725 or CPF529982247-25: it reads exactly like the digit
-//     stretch of an identifier. A canonically formatted document glued to a
-//     label (cpf529.982.247-25) is still redacted.
+//     (5.29982247.25), with no label in front: closing it means telling a dotted
+//     run apart from decimals, addresses, versions and OIDs by group count and
+//     width, a pile of exceptions that would destroy an address the first time
+//     one of them was stated slightly wrong. After a label it is redacted;
+//   - an unseparated or misspelled document glued to letters that are not a
+//     label (ABC529982247-25, or clientecpf52998224725, where the label sits
+//     inside a word): it reads exactly like the digit stretch of an identifier;
+//   - a lowercase or mixed-case alphanumeric CNPJ with no label right before it
+//     (12abc34501de35, 12.abc.345/01de-35, CNPJ do cliente 12abc34501de35):
+//     without the label it is indistinguishable from an ordinary lowercase
+//     token or a dotted path.
 //
 // # Cost
 //
-// ScrubDocuments is a single-pass shape scanner without regular expressions. It
-// is linear in the input, allocates nothing when the input carries no
-// document, and skips the alphanumeric pass when the input has no uppercase
-// letter.
+// ScrubDocuments is a shape scanner without regular expressions: one pass per
+// reading, plus a byte loop for labels that reads a bounded value after each
+// one. It is linear in the input, allocates nothing when the input carries no
+// document (labels included), and skips the alphanumeric pass when the input
+// has no uppercase letter.
 package redaction

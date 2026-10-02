@@ -54,6 +54,7 @@ func emitDocumentSpan(tl *Telemetry) {
 		attribute.String("note", "payer "+spanTestCPF),
 		attribute.StringSlice("docs", []string{"ok", spanTestCNPJ}),
 		attribute.Int64("attempt", 3),
+		attribute.String("holder", "cnpj 12abc34501de35"),
 	)
 	span.AddEvent("lookup.miss", trace.WithAttributes(attribute.String("detail", "cnpj "+spanTestCNPJ)))
 	HandleSpanError(span, "lookup failed", fmt.Errorf("doc %s not found", spanTestCPF))
@@ -111,6 +112,7 @@ func TestWithDocumentScrubbing_ScrubsEveryExportedTextSurface(t *testing.T) {
 
 	assert.Equal(t, "payer "+redaction.DocumentPlaceholder, attrs["note"].AsString())
 	assert.Equal(t, []string{"ok", redaction.DocumentPlaceholder}, attrs["docs"].AsStringSlice())
+	assert.Equal(t, "cnpj "+redaction.DocumentPlaceholder, attrs["holder"].AsString(), "a lowercase CNPJ after a label is scrubbed")
 	assert.Equal(t, int64(3), attrs["attempt"].AsInt64(), "non-string attributes pass through")
 
 	var exceptionMessage string

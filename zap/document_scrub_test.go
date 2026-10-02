@@ -23,6 +23,9 @@ import (
 const (
 	scrubTestCPF  = "529.982.247-25"
 	scrubTestCNPJ = "12.345.678/0001-95"
+	// scrubTestLowerCNPJ is an alphanumeric CNPJ written in lowercase, which is
+	// a document only after a cnpj label.
+	scrubTestLowerCNPJ = "12abc34501de35"
 )
 
 // syncBuffer is a bytes.Buffer safe for the concurrent writes of the race test.
@@ -133,6 +136,12 @@ func TestScrubDocuments_RedactsEveryLogSurface(t *testing.T) {
 		"Raw With child": func(l *Logger) {
 			l.Raw().With(zap.String("note", scrubTestCPF)).Info("m")
 		},
+		"document glued to a label in the message": func(l *Logger) {
+			l.Log(context.Background(), logpkg.LevelInfo, "cliente cpf52998224725 bloqueado")
+		},
+		"lowercase cnpj after a label in a field": func(l *Logger) {
+			l.Log(context.Background(), logpkg.LevelInfo, "m", logpkg.String("note", "cnpj "+scrubTestLowerCNPJ))
+		},
 	}
 
 	for _, encoding := range []string{"json", "console"} {
@@ -147,6 +156,7 @@ func TestScrubDocuments_RedactsEveryLogSurface(t *testing.T) {
 				assert.NotContains(t, got, scrubTestCPF)
 				assert.NotContains(t, got, scrubTestCNPJ)
 				assert.NotContains(t, got, "52998224725")
+				assert.NotContains(t, got, scrubTestLowerCNPJ)
 				assert.Contains(t, got, redaction.DocumentPlaceholder)
 			})
 		}
