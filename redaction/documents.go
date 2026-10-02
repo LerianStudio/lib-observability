@@ -39,7 +39,28 @@ const (
 // span text), not a substitute for keeping identifiers out of that text in the
 // first place: it covers CPF and CNPJ only.
 func ScrubDocuments(s string) string {
-	spans := documentSpans(s)
+	return replaceSpans(s, documentSpans(s))
+}
+
+// ScrubDocumentsUnder is ScrubDocuments for a value stored under a key: a log
+// field, a span attribute, a map entry. A key that ends in cpf or cnpj, in any
+// case (cnpj, payerCnpj, user_cpf, cpfCnpj, NRCPF), is the value's label, so
+// value is also read as if it followed that label in text: the token at its
+// start, past up to eight gap bytes, is replaced when the whole token is a
+// document of the kind the label names. That is what catches a lowercase
+// alphanumeric CNPJ under a cnpj key, which ScrubDocuments alone leaves as an
+// ordinary token. Every other match is ScrubDocuments' own.
+//
+// It shares ScrubDocuments' guarantees: pure, safe for concurrent use, linear
+// in len(value), and value itself is returned, without allocating, when
+// nothing matches. "" in, "" out, whatever the key.
+func ScrubDocumentsUnder(key, value string) string {
+	return replaceSpans(value, documentSpansUnder(key, value))
+}
+
+// replaceSpans returns s with every span replaced by DocumentPlaceholder, or s
+// itself when there is none.
+func replaceSpans(s string, spans []span) string {
 	if len(spans) == 0 {
 		return s
 	}

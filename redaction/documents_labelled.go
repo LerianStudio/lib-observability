@@ -47,6 +47,39 @@ func labelledSpans(s string) []span {
 	return matches
 }
 
+// documentSpansUnder is documentSpans for a value stored under key, plus the
+// token at the start of value when key ends in a label and the whole token is
+// the document that label names.
+func documentSpansUnder(key, value string) []span {
+	spans := documentSpans(value)
+
+	cnpj, labelled := keyLabel(key)
+	if !labelled {
+		return spans
+	}
+
+	token, found := labelledToken(value, 0)
+	if !found || !isLabelledDocument(value[token.start:token.end], cnpj) {
+		return spans
+	}
+
+	return mergeSpans(spans, []span{token})
+}
+
+// keyLabel reports whether key ends in a label, and whether that label is
+// cnpj. Any byte may precede it: a key is a name chosen for its value, so a key
+// ending in cpf or cnpj (nrcpf, CPFCNPJ) names a document.
+func keyLabel(key string) (cnpj, labelled bool) {
+	switch {
+	case hasSuffixFold(key, "cnpj"):
+		return true, true
+	case hasSuffixFold(key, "cpf"):
+		return false, true
+	default:
+		return false, false
+	}
+}
+
 // labelAt reports whether a label starts at s[index], where its value may start,
 // and whether the label is cnpj.
 func labelAt(s string, index int) (int, bool, bool) {
@@ -156,6 +189,12 @@ func hasCheckDigits(token string) bool {
 // any case, without allocating.
 func hasPrefixFold(s, prefix string) bool {
 	return len(s) >= len(prefix) && strings.EqualFold(s[:len(prefix)], prefix)
+}
+
+// hasSuffixFold reports whether s ends with the lowercase ASCII suffix, in
+// any case, without allocating.
+func hasSuffixFold(s, suffix string) bool {
+	return len(s) >= len(suffix) && strings.EqualFold(s[len(s)-len(suffix):], suffix)
 }
 
 func isLabelledTokenByte(b byte) bool { return isAlphanumeric(rune(b)) || isSeparator(b) }

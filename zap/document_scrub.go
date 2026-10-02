@@ -164,7 +164,7 @@ func scrubDocumentField(f zapcore.Field) (zapcore.Field, bool) {
 
 	switch f.Type {
 	case zapcore.StringType:
-		scrubbed := redaction.ScrubDocuments(f.String)
+		scrubbed := redaction.ScrubDocumentsUnder(f.Key, f.String)
 		if scrubbed == f.String {
 			return f, false
 		}
@@ -179,7 +179,7 @@ func scrubDocumentField(f zapcore.Field) (zapcore.Field, bool) {
 			return f, false
 		}
 
-		scrubbed := redaction.ScrubDocuments(string(b))
+		scrubbed := redaction.ScrubDocumentsUnder(f.Key, string(b))
 		if scrubbed == string(b) {
 			return f, false
 		}
@@ -191,7 +191,7 @@ func scrubDocumentField(f zapcore.Field) (zapcore.Field, bool) {
 			return f, false
 		}
 
-		return zap.String(f.Key, redaction.ScrubDocuments(logpkg.SafeErrorMessage(err))), true
+		return zap.String(f.Key, redaction.ScrubDocumentsUnder(f.Key, logpkg.SafeErrorMessage(err))), true
 	case zapcore.StringerType, zapcore.ObjectMarshalerType, zapcore.ArrayMarshalerType,
 		zapcore.InlineMarshalerType, zapcore.ReflectType:
 		return scrubRenderedField(f, f)
@@ -226,7 +226,7 @@ func scrubRenderedField(f, original zapcore.Field) (zapcore.Field, bool) {
 	found := false
 
 	for key, value := range entries {
-		if redaction.ScrubDocuments(key) != key || valueHoldsDocument(value) {
+		if redaction.ScrubDocuments(key) != key || valueHoldsDocument(key, value) {
 			found = true
 
 			break
@@ -242,23 +242,23 @@ func scrubRenderedField(f, original zapcore.Field) (zapcore.Field, bool) {
 	for _, key := range slices.Sorted(maps.Keys(entries)) {
 		scrubbed = append(scrubbed, scrubbedEntry{
 			key:   redaction.ScrubDocuments(key),
-			value: scrubbedRendering(entries[key]),
+			value: scrubbedRendering(key, entries[key]),
 		})
 	}
 
 	return zap.Inline(scrubbed), true
 }
 
-// scrubbedRendering is what a sink may write for value once a document was
-// found in its field: its local rendering scrubbed, or the placeholder alone
-// when the value nests past the walk's bound, since what lies deeper was never
-// inspected.
-func scrubbedRendering(value any) string {
+// scrubbedRendering is what a sink may write for value, the entry under key,
+// once a document was found in its field: its local rendering scrubbed, or the
+// placeholder alone when the value nests past the walk's bound, since what lies
+// deeper was never inspected.
+func scrubbedRendering(key string, value any) string {
 	if _, complete := bridgeRendering(value); !complete {
 		return redaction.DocumentPlaceholder
 	}
 
-	return redaction.ScrubDocuments(localRendering(value))
+	return redaction.ScrubDocumentsUnder(key, localRendering(value))
 }
 
 // scrubContextField keeps a context field a context: the OTLP bridge takes any
@@ -325,13 +325,15 @@ func renderEntries(f zapcore.Field) (entries map[string]any, ok bool) {
 	return enc.Fields, true
 }
 
-// valueHoldsDocument reports whether either sink's rendering of value carries
-// a document. The two differ for reflected values: encoding/json skips
-// unexported and json:"-" fields, the bridge's %+v prints them. A value
-// nesting past the walk's bound counts as holding one: it fails closed.
-func valueHoldsDocument(value any) bool {
+// valueHoldsDocument reports whether either sink's rendering of value, the
+// entry under key, carries a document; key is read as the value's label
+// (redaction.ScrubDocumentsUnder). The two renderings differ for reflected
+// values: encoding/json skips unexported and json:"-" fields, the bridge's %+v
+// prints them. A value nesting past the walk's bound counts as holding one: it
+// fails closed.
+func valueHoldsDocument(key string, value any) bool {
 	if s, isString := value.(string); isString {
-		return redaction.ScrubDocuments(s) != s
+		return redaction.ScrubDocumentsUnder(key, s) != s
 	}
 
 	bridge, complete := bridgeRendering(value)
@@ -340,7 +342,7 @@ func valueHoldsDocument(value any) bool {
 	}
 
 	for _, rendered := range []string{localRendering(value), bridge} {
-		if redaction.ScrubDocuments(rendered) != rendered {
+		if redaction.ScrubDocumentsUnder(key, rendered) != rendered {
 			return true
 		}
 	}

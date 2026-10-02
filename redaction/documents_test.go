@@ -307,3 +307,66 @@ func TestScrubDocuments_LinearOnRepeatedLabels(t *testing.T) {
 	got := ScrubDocuments(long)
 	assert.Equal(t, strings.Repeat("cpf-", 50_000)+ph, got)
 }
+
+// TestScrubDocumentsUnder pins the key as a label: a value stored under a key
+// that ends in cpf or cnpj is read as if it followed that label in text.
+func TestScrubDocumentsUnder(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name, key, value, want string
+	}{
+		{name: "lowercase cnpj under a cnpj key", key: "cnpj", value: "12abc34501de35", want: ph},
+		{name: "lowercase cnpj under a camelCase key", key: "payerCnpj", value: "12abc34501de35", want: ph},
+		{name: "formatted lowercase cnpj under an uppercase key", key: "CNPJ", value: "12.abc.345/01de-35", want: ph},
+		{name: "key that names either document", key: "cpfCnpj", value: "12abc34501de35", want: ph},
+		{name: "key ending in the label inside a word", key: "NRCPFCNPJ", value: "12abc34501de35", want: ph},
+		{name: "dots-only cpf under a cpf key", key: "holder.cpf", value: "529.982.247.25", want: ph},
+		{name: "padding around the value stays", key: "cnpj", value: " 12abc34501de35 ", want: " " + ph + " "},
+		{name: "quoted value", key: "user_cnpj", value: `"12abc34501de35"`, want: `"` + ph + `"`},
+		{name: "shape match under any key", key: "note", value: "doc 529.982.247-25", want: "doc " + ph},
+		{name: "label inside the value under any key", key: "note", value: "cnpj 12abc34501de35", want: "cnpj " + ph},
+		{name: "document later in the value", key: "cnpj", value: "12abc34501de35 e cpf 52998224725", want: ph + " e cpf " + ph},
+		{name: "accepted false positive: a word under a cnpj key", key: "statusCnpj", value: "notavailable12", want: ph},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			assert.Equal(t, tt.want, ScrubDocumentsUnder(tt.key, tt.value))
+		})
+	}
+}
+
+func TestScrubDocumentsUnder_LeavesWhatTheKeyDoesNotName(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct{ key, value string }{
+		{key: "", value: ""},
+		{key: "cnpj", value: ""},
+		{key: "", value: "12abc34501de35"},
+		{key: "note", value: "12abc34501de35"},          // no label anywhere
+		{key: "cnpjRoot", value: "12abc34501de35"},      // key does not end in a label
+		{key: "cpf", value: "12abc34501de35"},           // there is no alphanumeric cpf
+		{key: "cnpj", value: "12345678"},                // a CNPJ root
+		{key: "cnpj", value: "lookup 12abc34501de35"},   // a word before the value
+		{key: "cnpj", value: "12abc34501de35abc"},       // a longer token
+		{key: "cpf", value: "invalid"},                  // no document
+		{key: "NumCtrlIF", value: "cnpj lookup failed"}, // no document after the label
+	} {
+		t.Run(tt.key+"="+tt.value, func(t *testing.T) {
+			t.Parallel()
+
+			assert.Equal(t, tt.value, ScrubDocumentsUnder(tt.key, tt.value))
+		})
+	}
+}
+
+func TestScrubDocumentsUnder_NoAllocationWithoutMatch(t *testing.T) {
+	allocs := testing.AllocsPerRun(100, func() {
+		_ = ScrubDocumentsUnder("payerCnpj", "12345678")
+	})
+
+	assert.Zero(t, allocs)
+}

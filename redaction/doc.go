@@ -167,6 +167,9 @@
 //     includes a label separated from it by a word (CNPJ do cliente
 //     12abc34501de35) or by more than eight gap bytes (doubly escaped JSON,
 //     {\\\"cnpj\\\":\\\"...\\\"}, is nine).
+//     A value stored under a key that ends in cpf or cnpj (a log field, a
+//     span attribute) is read with the key as its label: see
+//     ScrubDocumentsUnder, which the zap and tracing scrubs use.
 //
 // # Cost
 //

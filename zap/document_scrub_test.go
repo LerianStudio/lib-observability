@@ -83,6 +83,15 @@ func (o docObject) MarshalLogObject(enc zapcore.ObjectEncoder) error {
 	return nil
 }
 
+// keyedObject adds one string entry under a key of its choosing.
+type keyedObject struct{ key, v string }
+
+func (o keyedObject) MarshalLogObject(enc zapcore.ObjectEncoder) error {
+	enc.AddString(o.key, o.v)
+
+	return nil
+}
+
 type failingObject struct{ v string }
 
 func (o failingObject) MarshalLogObject(enc zapcore.ObjectEncoder) error {
@@ -142,6 +151,24 @@ func TestScrubDocuments_RedactsEveryLogSurface(t *testing.T) {
 		},
 		"lowercase cnpj after a label in a field": func(l *Logger) {
 			l.Log(context.Background(), logpkg.LevelInfo, "m", logpkg.String("note", "cnpj "+scrubTestLowerCNPJ))
+		},
+		"lowercase cnpj under a cnpj field key": func(l *Logger) {
+			l.Log(context.Background(), logpkg.LevelInfo, "m", logpkg.String("cnpj", scrubTestLowerCNPJ))
+		},
+		"lowercase cnpj under a camelCase field key": func(l *Logger) {
+			l.Info("m", zap.String("payerCnpj", scrubTestLowerCNPJ))
+		},
+		"lowercase cnpj as bytes under a cnpj key": func(l *Logger) {
+			l.Info("m", zap.ByteString("cnpj", []byte(scrubTestLowerCNPJ)))
+		},
+		"lowercase cnpj from a Stringer under a cnpj key": func(l *Logger) {
+			l.Info("m", zap.Stringer("cnpj", docStringer{v: scrubTestLowerCNPJ}))
+		},
+		"lowercase cnpj under a cnpj key bound by With": func(l *Logger) {
+			l.With(logpkg.String("holderCnpj", scrubTestLowerCNPJ)).Log(context.Background(), logpkg.LevelInfo, "m")
+		},
+		"lowercase cnpj in an object entry under a cnpj key": func(l *Logger) {
+			l.Info("m", zap.Inline(keyedObject{key: "cnpj", v: scrubTestLowerCNPJ}))
 		},
 	}
 

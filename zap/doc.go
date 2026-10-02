@@ -19,8 +19,10 @@
 // structured field is judged as each sink renders it: the local JSON, and the
 // bridge's %+v, which also prints unexported and json:"-" struct fields. Raw
 // bytes and OpenTelemetry attribute values, which the bridge exports as they
-// are, are judged by the text they carry, not by their base64 form. It
-// is defence in depth, not a licence to format documents into log lines. The
+// are, are judged by the text they carry, not by their base64 form. A field
+// key ending in cpf or cnpj is read as its value's label
+// (redaction.ScrubDocumentsUnder), so cnpj=12abc34501de35 logged as a field is
+// scrubbed like the same text in a message. It is defence in depth, not a licence to format documents into log lines. The
 // stdlib log.GoLogger fallback does not scrub content; call
 // redaction.ScrubDocuments yourself on text you hand it.
 //

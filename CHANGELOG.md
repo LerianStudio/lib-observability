@@ -317,6 +317,16 @@ Features:
   identifiers such as a CNPJ root; pass them through `IsSensitiveField`'s
   `extra` names to mask fields under those names.
 
+- **`redaction.ScrubDocumentsUnder(key, value)`** is `ScrubDocuments` for a
+  value stored under a key (a log field, a span attribute, a map entry): a key
+  ending in `cpf` or `cnpj`, in any case (`cnpj`, `payerCnpj`, `user_cpf`,
+  `cpfCnpj`), is read as the value's label, so a lowercase alphanumeric CNPJ
+  under it (`cnpj=12abc34501de35`) is replaced, which `ScrubDocuments` alone
+  leaves as an ordinary token. A key that does not end in a label
+  (`cnpjRoot`) changes nothing, and the whole token must still be a document
+  (`cnpj=12345678`, a CNPJ root, survives). Same guarantees: pure, linear,
+  allocation-free when nothing matches.
+
 - **`zap.Config.ScrubDocuments`** (opt-in, default false) runs every log entry
   through `redaction.ScrubDocuments` before either sink sees it: the message
   and string, byte-string, error, `Stringer`, object, array and reflected
@@ -331,6 +341,9 @@ Features:
   writes for a failing marshaler or a panicking `Stringer`. One that held a
   document becomes a string of its JSON with the document replaced; one that
   held none keeps its shape. A context field stays the bridge's emit context.
+  A field key ending in `cpf` or `cnpj` is read as its value's label
+  (`redaction.ScrubDocumentsUnder`), at the top level and in object or inline
+  entries, so `logpkg.String("cnpj", "12abc34501de35")` is scrubbed.
   Off, output is byte-identical to before. `log.GoLogger` does not scrub
   content.
 
@@ -351,7 +364,10 @@ Features:
   included) and link attributes pass through `redaction.ScrubDocuments`. It
   runs at export, so it covers `HandleSpanError`, panic and assertion
   instrumentation and a caller's own `RecordError` alike; a span without
-  documents is exported unchanged, and the provider still shuts the real
+  documents is exported unchanged. An attribute key ending in `cpf` or `cnpj`
+  is read as its value's label (`redaction.ScrubDocumentsUnder`), in string,
+  string-slice, byte-slice and slice values, a map entry by its own key. The
+  provider still shuts the real
   exporter down exactly once. Ignored on noop telemetry.
 
 - **`tracing.WithDocumentScrubExemptKeys(keys...)`** (opt-in `TelemetryOption`)

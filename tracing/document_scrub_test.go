@@ -281,6 +281,67 @@ func TestDocumentScrubbingExporter_EdgeCases(t *testing.T) {
 	})
 }
 
+// An attribute whose key is a cpf or cnpj label is read as labelled: a
+// lowercase alphanumeric CNPJ under it is scrubbed, in span, event and link
+// attributes, in string slices, slices and map entries.
+func TestWithDocumentScrubbing_KeyIsTheLabel(t *testing.T) {
+	const lower = "12abc34501de35"
+
+	spans := recordSpans(t, func(tr trace.Tracer) {
+		_, parent := tr.Start(context.Background(), "parent")
+		parent.End()
+
+		_, span := tr.Start(context.Background(), "lookup", trace.WithLinks(trace.Link{
+			SpanContext: parent.SpanContext(),
+			Attributes:  []attribute.KeyValue{attribute.String("cnpj", lower)},
+		}))
+		span.SetAttributes(
+			attribute.String("cnpj", lower),
+			attribute.String("payerCnpj", lower),
+			attribute.StringSlice("holder.cnpj", []string{lower, "ok"}),
+			attribute.String("cnpjRoot", "12345678"),
+			attribute.String("note", lower),
+		)
+		span.AddEvent("miss", trace.WithAttributes(attribute.String("beneficiaryCnpj", lower)))
+		span.End()
+	})
+
+	inner := &recordingSpanExporter{}
+	require.NoError(t, newDocumentScrubbingExporter(inner, nil).ExportSpans(context.Background(), spans))
+	require.Len(t, inner.spans, 2)
+
+	got := inner.spans[1]
+	attrs := attributeMap(got.Attributes())
+	assert.Equal(t, redaction.DocumentPlaceholder, attrs["cnpj"].AsString())
+	assert.Equal(t, redaction.DocumentPlaceholder, attrs["payerCnpj"].AsString())
+	assert.Equal(t, []string{redaction.DocumentPlaceholder, "ok"}, attrs["holder.cnpj"].AsStringSlice())
+	assert.Equal(t, "12345678", attrs["cnpjRoot"].AsString(), "a key that does not end in a label names no document")
+	assert.Equal(t, lower, attrs["note"].AsString(), "without a label a lowercase token is no document")
+	assert.Equal(t, redaction.DocumentPlaceholder, got.Events()[0].Attributes[0].Value.AsString())
+	assert.Equal(t, redaction.DocumentPlaceholder, got.Links()[0].Attributes[0].Value.AsString())
+}
+
+func TestDocumentScrubbing_KeyIsTheLabelInNestedValues(t *testing.T) {
+	const lower = "12abc34501de35"
+
+	x := documentScrubExemption(nil)
+
+	slice, changed := x.scrubValue("cnpj", attribute.SliceValue(attribute.StringValue(lower)))
+	require.True(t, changed)
+	assert.Equal(t, redaction.DocumentPlaceholder, slice.AsSlice()[0].AsString())
+
+	entries, changed := x.scrubValue("payer", attribute.MapValue(attribute.String("cnpj", lower), attribute.String("name", lower)))
+	require.True(t, changed)
+
+	m := attributeMap(entries.AsMap())
+	assert.Equal(t, redaction.DocumentPlaceholder, m["cnpj"].AsString(), "a map entry is judged by its own key")
+	assert.Equal(t, lower, m["name"].AsString())
+
+	raw, changed := x.scrubValue("cnpj", attribute.ByteSliceValue([]byte(lower)))
+	require.True(t, changed)
+	assert.Equal(t, redaction.DocumentPlaceholder, string(raw.AsByteSlice()))
+}
+
 // spanTestControlNumber is a protocol control number whose shape is also an
 // alphanumeric CNPJ's: the reason a consumer exempts its key.
 const spanTestControlNumber = "12ABC34501DE35"

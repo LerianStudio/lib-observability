@@ -19,7 +19,11 @@ import (
 // It runs at export, after the span has ended, so it catches text from every
 // source alike: HandleSpanError, panic and assertion instrumentation, and a
 // caller's own RecordError or SetStatus. A span without documents is exported
-// as the original value. Numeric attributes are not inspected. The option is
+// as the original value. Numeric attributes are not inspected. An attribute
+// key ending in cpf or cnpj is read as its value's label
+// (redaction.ScrubDocumentsUnder): a lowercase alphanumeric CNPJ under cnpj or
+// payerCnpj is scrubbed, in string, string-slice, byte-slice and slice values;
+// a map entry is judged by its own key. The option is
 // ignored when telemetry runs on noop providers, which export nothing.
 //
 // This is defence in depth, not a licence to format documents into span names,
@@ -186,7 +190,7 @@ func (x documentScrubExemption) scrubAttributes(kvs []attribute.KeyValue) ([]att
 			continue
 		}
 
-		value, changed := x.scrubValue(kv.Value)
+		value, changed := x.scrubValue(string(kv.Key), kv.Value)
 		if !changed {
 			continue
 		}
@@ -205,28 +209,31 @@ func (x documentScrubExemption) scrubAttributes(kvs []attribute.KeyValue) ([]att
 	return out, true
 }
 
-func (x documentScrubExemption) scrubValue(v attribute.Value) (attribute.Value, bool) {
+// scrubValue scrubs v, the value under key, reading key as its label
+// (redaction.ScrubDocumentsUnder); slice elements share the key, map entries
+// are judged by their own.
+func (x documentScrubExemption) scrubValue(key string, v attribute.Value) (attribute.Value, bool) {
 	switch v.Type() {
 	case attribute.STRING:
-		scrubbed := redaction.ScrubDocuments(v.AsString())
+		scrubbed := redaction.ScrubDocumentsUnder(key, v.AsString())
 		if scrubbed == v.AsString() {
 			return v, false
 		}
 
 		return attribute.StringValue(scrubbed), true
 	case attribute.STRINGSLICE:
-		return scrubStringSlice(v)
+		return scrubStringSlice(key, v)
 	case attribute.BYTESLICE:
 		raw := string(v.AsByteSlice())
 
-		scrubbed := redaction.ScrubDocuments(raw)
+		scrubbed := redaction.ScrubDocumentsUnder(key, raw)
 		if scrubbed == raw {
 			return v, false
 		}
 
 		return attribute.ByteSliceValue([]byte(scrubbed)), true
 	case attribute.SLICE:
-		return x.scrubValueSlice(v)
+		return x.scrubValueSlice(key, v)
 	case attribute.MAP:
 		entries, changed := x.scrubAttributes(v.AsMap())
 		if !changed {
@@ -239,13 +246,13 @@ func (x documentScrubExemption) scrubValue(v attribute.Value) (attribute.Value, 
 	}
 }
 
-func scrubStringSlice(v attribute.Value) (attribute.Value, bool) {
+func scrubStringSlice(key string, v attribute.Value) (attribute.Value, bool) {
 	values := v.AsStringSlice()
 
 	var out []string
 
 	for i, s := range values {
-		scrubbed := redaction.ScrubDocuments(s)
+		scrubbed := redaction.ScrubDocumentsUnder(key, s)
 		if scrubbed == s {
 			continue
 		}
@@ -264,13 +271,13 @@ func scrubStringSlice(v attribute.Value) (attribute.Value, bool) {
 	return attribute.StringSliceValue(out), true
 }
 
-func (x documentScrubExemption) scrubValueSlice(v attribute.Value) (attribute.Value, bool) {
+func (x documentScrubExemption) scrubValueSlice(key string, v attribute.Value) (attribute.Value, bool) {
 	values := v.AsSlice()
 
 	var out []attribute.Value
 
 	for i, element := range values {
-		scrubbed, changed := x.scrubValue(element)
+		scrubbed, changed := x.scrubValue(key, element)
 		if !changed {
 			continue
 		}
