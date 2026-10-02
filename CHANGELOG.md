@@ -347,6 +347,18 @@ Features:
   documents is exported unchanged, and the provider still shuts the real
   exporter down exactly once. Ignored on noop telemetry.
 
+- **`tracing.WithDocumentScrubExemptKeys(keys...)`** (opt-in `TelemetryOption`)
+  lists attribute keys whose value `WithDocumentScrubbing` leaves as recorded,
+  for protocol identifiers whose shape is also a CPF's or a CNPJ's
+  (`NumCtrlIF`, `NumCtrlPart`). A key matches when it equals a listed one
+  whole, ignoring case, so a namespaced key (`spb.num_ctrl_if`) is listed as
+  written; repeated options add to the list and empty entries are dropped.
+  Only string, string-slice and byte-slice attributes are exempted, in span,
+  event and link attributes and in map entries judged by their own key; a
+  slice of values or a map under a listed key, the span name, the status
+  description, event names and every `exception.*` attribute stay scrubbed.
+  Ignored without `WithDocumentScrubbing`; unset, export is unchanged.
+
 - Add symmetric opt-in `lerian.http.server.responses_4xx.by_tenant` and
   `lerian.http.server.responses_5xx.by_tenant` counters for authenticated tenant
   and normalized route, without exact status-code cardinality. Tenant metrics

@@ -194,7 +194,7 @@ func recordSpans(t *testing.T, build func(tr trace.Tracer)) []sdktrace.ReadOnlyS
 
 func TestDocumentScrubbingExporter_EdgeCases(t *testing.T) {
 	t.Run("nil inner exporter is a no-op", func(t *testing.T) {
-		exp := newDocumentScrubbingExporter(nil)
+		exp := newDocumentScrubbingExporter(nil, nil)
 
 		assert.NoError(t, exp.ExportSpans(context.Background(), nil))
 		assert.NoError(t, exp.Shutdown(context.Background()))
@@ -212,7 +212,7 @@ func TestDocumentScrubbingExporter_EdgeCases(t *testing.T) {
 		require.Len(t, spans, 2)
 
 		inner := &recordingSpanExporter{}
-		exp := newDocumentScrubbingExporter(inner)
+		exp := newDocumentScrubbingExporter(inner, nil)
 
 		require.NoError(t, exp.ExportSpans(context.Background(), []sdktrace.ReadOnlySpan{nil, spans[0], nil, spans[1]}))
 		require.Len(t, inner.spans, 2)
@@ -223,7 +223,7 @@ func TestDocumentScrubbingExporter_EdgeCases(t *testing.T) {
 
 	t.Run("the inner exporter error is returned", func(t *testing.T) {
 		wantErr := errors.New("collector down")
-		exp := newDocumentScrubbingExporter(&recordingSpanExporter{err: wantErr})
+		exp := newDocumentScrubbingExporter(&recordingSpanExporter{err: wantErr}, nil)
 
 		assert.ErrorIs(t, exp.ExportSpans(context.Background(), nil), wantErr)
 	})
@@ -241,7 +241,7 @@ func TestDocumentScrubbingExporter_EdgeCases(t *testing.T) {
 		})
 
 		inner := &recordingSpanExporter{}
-		require.NoError(t, newDocumentScrubbingExporter(inner).ExportSpans(context.Background(), spans))
+		require.NoError(t, newDocumentScrubbingExporter(inner, nil).ExportSpans(context.Background(), spans))
 
 		links := inner.spans[1].Links()
 		require.Len(t, links, 1)
@@ -257,7 +257,7 @@ func TestDocumentScrubbingExporter_EdgeCases(t *testing.T) {
 		})
 
 		inner := &recordingSpanExporter{}
-		exp := newDocumentScrubbingExporter(inner)
+		exp := newDocumentScrubbingExporter(inner, nil)
 
 		var wg sync.WaitGroup
 
@@ -279,4 +279,176 @@ func TestDocumentScrubbingExporter_EdgeCases(t *testing.T) {
 			assert.NotContains(t, s.Name(), spanTestCPF)
 		}
 	})
+}
+
+// spanTestControlNumber is a protocol control number whose shape is also an
+// alphanumeric CNPJ's: the reason a consumer exempts its key.
+const spanTestControlNumber = "12ABC34501DE35"
+
+func attributeMap(kvs []attribute.KeyValue) map[attribute.Key]attribute.Value {
+	out := make(map[attribute.Key]attribute.Value, len(kvs))
+	for _, kv := range kvs {
+		out[kv.Key] = kv.Value
+	}
+
+	return out
+}
+
+func TestWithDocumentScrubExemptKeys_KeepsListedAttributes(t *testing.T) {
+	exp := tracetest.NewInMemoryExporter()
+	tl := buildScrubTelemetry(t, exp, WithDocumentScrubbing(),
+		WithDocumentScrubExemptKeys("spb.num_ctrl_if", ""),
+		WithDocumentScrubExemptKeys("NUM_CTRL_PART", "raw_ctrl", "group", "items", "exception.message"))
+	t.Cleanup(func() { _ = tl.ShutdownTelemetryWithContext(context.Background()) })
+
+	_, span := tl.TracerProvider.Tracer("scrub-test").Start(context.Background(), "ctrl "+spanTestControlNumber)
+	span.SetAttributes(
+		attribute.String("spb.num_ctrl_if", spanTestControlNumber),
+		attribute.StringSlice("num_ctrl_part", []string{"52998224725"}),
+		attribute.KeyValue{Key: "raw_ctrl", Value: attribute.ByteSliceValue([]byte(spanTestControlNumber))},
+		attribute.String("note", spanTestControlNumber),
+		attribute.KeyValue{Key: "envelope", Value: attribute.MapValue(
+			attribute.String("spb.num_ctrl_if", spanTestControlNumber),
+			attribute.String("note", spanTestControlNumber),
+		)},
+		attribute.KeyValue{Key: "group", Value: attribute.MapValue(attribute.String("note", spanTestControlNumber))},
+		attribute.KeyValue{Key: "items", Value: attribute.SliceValue(attribute.StringValue(spanTestControlNumber))},
+	)
+	span.AddEvent("ctrl "+spanTestControlNumber, trace.WithAttributes(
+		attribute.String("spb.num_ctrl_if", spanTestControlNumber),
+		attribute.String("detail", spanTestControlNumber),
+	))
+	HandleSpanError(span, "ctrl "+spanTestControlNumber, errors.New("ctrl "+spanTestControlNumber))
+	span.End()
+	require.NoError(t, tl.ForceFlush(context.Background()))
+
+	stubs := exp.GetSpans()
+	require.Len(t, stubs, 1)
+
+	got := stubs[0]
+	attrs := attributeMap(got.Attributes)
+
+	assert.Equal(t, spanTestControlNumber, attrs["spb.num_ctrl_if"].AsString())
+	assert.Equal(t, []string{"52998224725"}, attrs["num_ctrl_part"].AsStringSlice(), "keys match ignoring case")
+	assert.Equal(t, spanTestControlNumber, string(attrs["raw_ctrl"].AsByteSlice()))
+	assert.Equal(t, redaction.DocumentPlaceholder, attrs["note"].AsString(), "a key not listed is scrubbed")
+
+	envelope := attributeMap(attrs["envelope"].AsMap())
+	assert.Equal(t, spanTestControlNumber, envelope["spb.num_ctrl_if"].AsString(), "a map entry is judged by its own key")
+	assert.Equal(t, redaction.DocumentPlaceholder, envelope["note"].AsString())
+
+	assert.Equal(t, redaction.DocumentPlaceholder, attributeMap(attrs["group"].AsMap())["note"].AsString(),
+		"a map under an exempt key is still scrubbed")
+	assert.Equal(t, redaction.DocumentPlaceholder, attrs["items"].AsSlice()[0].AsString(),
+		"a slice of values under an exempt key is still scrubbed")
+
+	assert.Equal(t, "ctrl "+redaction.DocumentPlaceholder, got.Name, "the span name is free text")
+	assert.NotContains(t, got.Status.Description, spanTestControlNumber, "the status is free text")
+	assert.Contains(t, got.Status.Description, redaction.DocumentPlaceholder)
+
+	evAttrs := map[attribute.Key]attribute.Value{}
+
+	for _, ev := range got.Events {
+		assert.NotContains(t, ev.Name, spanTestControlNumber, "an event name is free text")
+
+		for key, value := range attributeMap(ev.Attributes) {
+			evAttrs[key] = value
+		}
+	}
+
+	require.Contains(t, evAttrs, attribute.Key("exception.message"))
+	assert.Equal(t, spanTestControlNumber, evAttrs["spb.num_ctrl_if"].AsString())
+	assert.Equal(t, redaction.DocumentPlaceholder, evAttrs["detail"].AsString())
+	assert.NotContains(t, evAttrs["exception.message"].AsString(), spanTestControlNumber,
+		"exception attributes are never exempt")
+}
+
+func TestWithDocumentScrubExemptKeys_LinkAttributes(t *testing.T) {
+	spans := recordSpans(t, func(tr trace.Tracer) {
+		_, parent := tr.Start(context.Background(), "parent")
+		parent.End()
+
+		_, span := tr.Start(context.Background(), "child", trace.WithLinks(trace.Link{
+			SpanContext: parent.SpanContext(),
+			Attributes: []attribute.KeyValue{
+				attribute.String("NumCtrlIF", spanTestControlNumber),
+				attribute.String("why", spanTestControlNumber),
+			},
+		}))
+		span.End()
+	})
+
+	inner := &recordingSpanExporter{}
+	require.NoError(t, newDocumentScrubbingExporter(inner, []string{"numctrlif"}).ExportSpans(context.Background(), spans))
+
+	links := inner.spans[1].Links()
+	require.Len(t, links, 1)
+
+	attrs := attributeMap(links[0].Attributes)
+	assert.Equal(t, spanTestControlNumber, attrs["NumCtrlIF"].AsString())
+	assert.Equal(t, redaction.DocumentPlaceholder, attrs["why"].AsString())
+}
+
+func TestWithDocumentScrubExemptKeys_WithoutScrubbingChangesNothing(t *testing.T) {
+	exp := tracetest.NewInMemoryExporter()
+	tl := buildScrubTelemetry(t, exp, WithDocumentScrubExemptKeys("note"))
+	t.Cleanup(func() { _ = tl.ShutdownTelemetryWithContext(context.Background()) })
+
+	emitDocumentSpan(tl)
+	require.NoError(t, tl.ForceFlush(context.Background()))
+
+	got := spanText(exp.GetSpans())
+	assert.Contains(t, got, spanTestCPF, "the list alone installs no scrub")
+	assert.NotContains(t, got, redaction.DocumentPlaceholder)
+}
+
+func TestWithDocumentScrubExemptKeys_EmptyListKeepsTheFullScrub(t *testing.T) {
+	for name, option := range map[string]TelemetryOption{
+		"no keys":    WithDocumentScrubExemptKeys(),
+		"empty keys": WithDocumentScrubExemptKeys("", ""),
+	} {
+		t.Run(name, func(t *testing.T) {
+			base := tracetest.NewInMemoryExporter()
+			baseTL := buildScrubTelemetry(t, base, WithDocumentScrubbing())
+			t.Cleanup(func() { _ = baseTL.ShutdownTelemetryWithContext(context.Background()) })
+
+			listed := tracetest.NewInMemoryExporter()
+			listedTL := buildScrubTelemetry(t, listed, WithDocumentScrubbing(), option)
+			t.Cleanup(func() { _ = listedTL.ShutdownTelemetryWithContext(context.Background()) })
+
+			emitDocumentSpan(baseTL)
+			emitDocumentSpan(listedTL)
+			require.NoError(t, baseTL.ForceFlush(context.Background()))
+			require.NoError(t, listedTL.ForceFlush(context.Background()))
+
+			assert.Equal(t, spanText(base.GetSpans()), spanText(listed.GetSpans()))
+			assert.NotContains(t, spanText(listed.GetSpans()), spanTestCPF)
+		})
+	}
+}
+
+func TestWithDocumentScrubExemptKeys_ListIsCopied(t *testing.T) {
+	keys := []string{"NumCtrlIF"}
+	option := WithDocumentScrubExemptKeys(keys...)
+	keys[0] = "why"
+
+	spans := recordSpans(t, func(tr trace.Tracer) {
+		_, span := tr.Start(context.Background(), "s")
+		span.SetAttributes(attribute.String("NumCtrlIF", spanTestControlNumber), attribute.String("why", spanTestControlNumber))
+		span.End()
+	})
+
+	resolved := telemetryOptions{}
+	option.apply(&resolved)
+
+	exempt := resolved.documentScrubExemptKeys
+	inner := &recordingSpanExporter{}
+	exp := newDocumentScrubbingExporter(inner, exempt)
+	exempt[0] = "why"
+
+	require.NoError(t, exp.ExportSpans(context.Background(), spans))
+
+	attrs := attributeMap(inner.spans[0].Attributes())
+	assert.Equal(t, spanTestControlNumber, attrs["NumCtrlIF"].AsString())
+	assert.Equal(t, redaction.DocumentPlaceholder, attrs["why"].AsString())
 }

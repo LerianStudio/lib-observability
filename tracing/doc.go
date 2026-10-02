@@ -42,5 +42,8 @@
 // attributes, event names and attributes (exception.message included) and link
 // attributes. It is off by default, runs at export so it catches text from any
 // source, and is defence in depth, not a licence to format CPF or CNPJ into
-// span text.
+// span text. WithDocumentScrubExemptKeys keeps protocol identifiers whose
+// shape is also a document's (a NumCtrlIF, a NumCtrlPart) under the attribute
+// keys it lists, matched whole and ignoring case; span names, status
+// descriptions, event names and exception.* attributes stay scrubbed.
 package tracing

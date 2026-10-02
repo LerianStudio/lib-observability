@@ -200,8 +200,9 @@ type TelemetryOption interface {
 }
 
 type telemetryOptions struct {
-	metricCardinalityLimit int
-	scrubDocuments         bool
+	metricCardinalityLimit  int
+	scrubDocuments          bool
+	documentScrubExemptKeys []string
 }
 
 type telemetryOptionFunc func(*telemetryOptions)
@@ -535,7 +536,7 @@ func buildTelemetry(
 	if options.scrubDocuments {
 		// The wrapper delegates Shutdown, so the provider still drains the
 		// real exporter exactly once.
-		tExp = newDocumentScrubbingExporter(tExp)
+		tExp = newDocumentScrubbingExporter(tExp, options.documentScrubExemptKeys)
 	}
 
 	mp := cfg.newMeterProvider(r, mExp, options.metricCardinalityLimit)
