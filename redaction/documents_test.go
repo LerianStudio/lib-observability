@@ -75,6 +75,20 @@ func TestScrubDocuments_Redacts(t *testing.T) {
 		{name: "label and a trailing dot", in: "cpf 52998224725.", want: "cpf " + ph + "."},
 		{name: "dots-only cpf after a label", in: "cpf 529.982.247.25", want: "cpf " + ph},
 		{name: "label repeated before the document", in: "cpf-cpf52998224725", want: "cpf-cpf" + ph},
+		{name: "json with a space after the colon", in: `{"cnpj": "12abc34501de35"}`, want: `{"cnpj": "` + ph + `"}`},
+		{name: "json with spaces around the colon", in: `{"cnpj" : "12abc34501de35"}`, want: `{"cnpj" : "` + ph + `"}`},
+		{name: "escaped json inside error text", in: `body {\"cnpj\":\"12abc34501de35\"}`, want: `body {\"cnpj\":\"` + ph + `\"}`},
+		{name: "escaped json with a space", in: `{\"cnpj\": \"12abc34501de35\"}`, want: `{\"cnpj\": \"` + ph + `\"}`},
+		{name: "xml element", in: "<CNPJ>12abc34501de35</CNPJ>", want: "<CNPJ>" + ph + "</CNPJ>"},
+		{name: "spaced assignment and quote", in: "cnpj = '12abc34501de35'", want: "cnpj = '" + ph + "'"},
+		{name: "parenthesised value", in: "cnpj (12abc34501de35)", want: "cnpj (" + ph + ")"},
+		{name: "bracketed value", in: "cnpj=[12abc34501de35]", want: "cnpj=[" + ph + "]"},
+		{name: "comma after the label", in: "cnpj, 12abc34501de35", want: "cnpj, " + ph},
+		{name: "utf-8 quotes around the value", in: "cnpj «12abc34501de35»", want: "cnpj «" + ph + "»"},
+		{name: "camelCase key and lowercase cnpj", in: "payerCnpj=12abc34501de35", want: "payerCnpj=" + ph},
+		{name: "camelCase json key and lowercase cnpj", in: `{"payerCnpj":"12abc34501de35"}`, want: `{"payerCnpj":"` + ph + `"}`},
+		{name: "cpf glued to a camelCase label", in: "holderCpf52998224725", want: "holderCpf" + ph},
+		{name: "uppercase label after a lowercase letter", in: "holderCPF52998224725", want: "holderCPF" + ph},
 	}
 
 	for _, tt := range tests {
@@ -128,6 +142,10 @@ func TestScrubDocuments_LeavesOperationalValues(t *testing.T) {
 		"my.app.com/user-42",                                           // dotted path with the 2.3.3/4-2 layout
 		"clientecpf52998224725",                                        // documented residue: label inside a word
 		"CNPJ do cliente 12abc34501de35",                               // documented residue: label too far from the value
+		"cnpj ......... 12abc34501de35",                                // documented residue: gap wider than eight bytes
+		"isCnpjValid",                                                  // camelCase label and no document
+		"payerCnpjRoot12345678",                                        // camelCase label and a CNPJ root
+		"HOLDERCPF52998224725",                                         // documented residue: label inside an uppercase word
 		"AbCDEFGHIJKL1234xy",                                           // mixed-case token, uppercase window
 		"5.29982247.25",                                                // documented residue: dots-only misspelling
 		"529.982.247.25",                                               // documented residue: dots-only spelling
@@ -200,6 +218,8 @@ func TestScrubDocuments_AcceptedFalsePositives(t *testing.T) {
 		{name: "11-digit phone number", in: "tel 11987654321", want: "tel " + ph},
 		{name: "14-character word ending in two digits after a cnpj label", in: "cnpj notavailable12", want: "cnpj " + ph},
 		{name: "address after a cpf label", in: "cpf 192.168.100.10", want: "cpf " + ph},
+		{name: "word after a camelCase cnpj label", in: "statusCnpj=notavailable12", want: "statusCnpj=" + ph},
+		{name: "word after punctuation following a cnpj label", in: "cnpj: (notavailable12)", want: "cnpj: (" + ph + ")"},
 	}
 
 	for _, tt := range tests {

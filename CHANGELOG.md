@@ -294,7 +294,12 @@ Features:
   `cnpj` label even when glued to it or written in lowercase
   (`cliente cpf52998224725 bloqueado`, `cnpj 12abc34501de35`; only the value
   is replaced, the label stays, and the whole value must be a document, so
-  `cpfValidator` or `cnpj 12345678` survive). It matches by shape, validates no
+  `cpfValidator`, `isCnpjValid` or `cnpj 12345678` survive). A label may sit
+  inside a camelCase key (`payerCnpj=…`, `holderCpf…`) and up to eight bytes
+  that are not letters or digits from its value, which covers JSON with a
+  space after the colon (`{"cnpj": "…"}`), escaped JSON inside error text
+  (`{\"cnpj\": \"…\"}`), XML (`<CNPJ>…</CNPJ>`), `cnpj = '…'`, `cnpj (…)` and
+  `cnpj=[…]`. It matches by shape, validates no
   check digit (a mistyped or test document is still redacted), runs in linear
   time and allocates nothing when the text carries no document. Timestamps,
   IPv4 addresses (including `192.168.100.10`), versions, OIDs, UUIDs, trace ids
@@ -302,8 +307,10 @@ Features:
   one unseparated group, and a digit stretch glued to a letter is part of an
   identifier. The accepted false positives and open residues (a dots-only
   spelling such as `529.982.247.25` with no label, a document glued to letters
-  that are not a label, a lowercase alphanumeric CNPJ with no label) are listed
-  in the package documentation. Use it for audit and
+  that are not a label (`clientecpf52998224725`, `HOLDERCPF52998224725`), a
+  lowercase alphanumeric CNPJ with no label right before it, including one a
+  word (`CNPJ do cliente 12abc…`) or more than eight gap bytes (doubly escaped
+  JSON) away from the label) are listed in the package documentation. Use it for audit and
   free-text fields; it is defence in depth, not a licence to format identifiers
   into errors. The default sensitive field names are unchanged: `cpf` and
   `cnpj` are not added, since name masking would also hide institution

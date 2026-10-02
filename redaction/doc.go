@@ -92,10 +92,15 @@
 // (cliente cpf52998224725 bloqueado, CNPJ12ABC34501DE35, CPF529982247-25) and
 // an alphanumeric CNPJ written in lowercase (cnpj 12abc34501de35).
 //
-//   - The label is cpf or cnpj in any case, at the start of the text or after a
-//     byte that is neither a letter nor a digit: user_cpf and "cpf": are labels,
-//     clientecpf and 9cpf are not.
-//   - Up to three gap bytes from space, tab, : = # " ' _ - may follow it.
+//   - The label is cpf or cnpj in any case, at the start of the text, after a
+//     byte that is neither a letter nor a digit, or at a camelCase boundary (an
+//     uppercase C right after a lowercase letter): user_cpf, "cpf":, <CNPJ>,
+//     payerCnpj and holderCPF are labels; clientecpf, HOLDERCPF and 9cpf are not.
+//   - Up to eight gap bytes may follow it, any byte that is not an ASCII letter
+//     or digit: quotes, backslashes, brackets, markup, punctuation, whitespace
+//     and UTF-8 characters. That covers {"cnpj": "..."}, escaped JSON inside
+//     error text ({\"cnpj\": \"...\"}), <CNPJ>...</CNPJ>, cnpj = '...',
+//     cnpj (...) and cnpj=[...]. A letter or digit ends the gap.
 //   - The value is the run of letters, digits and . - / that follows, trimmed of
 //     separators at both ends, and it is replaced only when the whole run is a
 //     document. After either label that is a run of digits and separators
@@ -107,9 +112,11 @@
 //     and keeps the scan linear however many labels the text carries.
 //
 // The whole-run rule is what keeps false positives bounded: cpfValidator,
-// cnpjRoot12345678, cnpj 12345678 (a CNPJ root), cpf: invalid, a trace id or an
-// EndToEndID after a label all survive. What it accepts by design is listed
-// under the false positives below.
+// isCnpjValid, cnpjRoot12345678, cnpj 12345678 (a CNPJ root), cpf: invalid, a
+// trace id or an EndToEndID after a label all survive: the gap and the camelCase
+// boundary decide only where a value may start, never what counts as a
+// document. What it accepts by design is listed under the false positives
+// below.
 //
 // # No checksum
 //
@@ -129,11 +136,11 @@
 //     alphanumeric CNPJ 12ABC34501DE35 is itself valid uppercase hex, so nothing
 //     distinguishes the two. A redacted digest costs one correlation; an emitted
 //     CNPJ is a data-protection incident.
-//
 //   - after a cnpj label, a 14-character word ending in two digits
-//     (cnpj notavailable12), and after either label, any run of digits and
-//     separators holding 11 or 14 digits (cpf 192.168.100.10): the label is
-//     taken at its word.
+//     (cnpj notavailable12, statusCnpj=notavailable12, cnpj: (notavailable12)),
+//     and after either label, any run of digits and separators holding 11 or
+//     14 digits (cpf 192.168.100.10): the label is taken at its word, up to
+//     eight bytes of punctuation away and inside a camelCase key.
 //
 // UUIDs never match. A UUID is hex groups of {8,4,4,4,12}: no run of its digits
 // fits a separated shape (the inner groups are whole 4-digit segments), an
@@ -151,12 +158,15 @@
 //     width, a pile of exceptions that would destroy an address the first time
 //     one of them was stated slightly wrong. After a label it is redacted;
 //   - an unseparated or misspelled document glued to letters that are not a
-//     label (ABC529982247-25, or clientecpf52998224725, where the label sits
-//     inside a word): it reads exactly like the digit stretch of an identifier;
+//     label (ABC529982247-25, or clientecpf52998224725 and HOLDERCPF52998224725,
+//     where the label sits inside a word with no camelCase boundary): it reads
+//     exactly like the digit stretch of an identifier;
 //   - a lowercase or mixed-case alphanumeric CNPJ with no label right before it
-//     (12abc34501de35, 12.abc.345/01de-35, CNPJ do cliente 12abc34501de35):
-//     without the label it is indistinguishable from an ordinary lowercase
-//     token or a dotted path.
+//     (12abc34501de35, 12.abc.345/01de-35): without the label it is
+//     indistinguishable from an ordinary lowercase token or a dotted path. That
+//     includes a label separated from it by a word (CNPJ do cliente
+//     12abc34501de35) or by more than eight gap bytes (doubly escaped JSON,
+//     {\\\"cnpj\\\":\\\"...\\\"}, is nine).
 //
 // # Cost
 //
