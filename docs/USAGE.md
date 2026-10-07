@@ -74,7 +74,10 @@ if raw, ok := os.LookupEnv("OTEL_TRACES_SAMPLER_ARG"); ok {
 //   var version, revision string
 //   go build -ldflags "-X main.version=1.4.2 -X main.revision=$(git rev-parse HEAD)"
 
-tel, err := tracing.NewTelemetry(tracing.TelemetryConfig{
+// NewTelemetryWithOptions aceita os mesmos campos; as opções são opt-in.
+// WithDocumentScrubbing troca CPF/CNPJ por [REDACTED_DOCUMENT] em todo span
+// exportado (nome, status, atributos string, eventos, links).
+tel, err := tracing.NewTelemetryWithOptions(tracing.TelemetryConfig{
     LibraryName:               os.Getenv("OTEL_LIBRARY_NAME"),         // scope das SUAS métricas/spans de negócio
     ServiceName:               os.Getenv("OTEL_RESOURCE_SERVICE_NAME"),
     ServiceVersion:            version,  // -> service.version
@@ -85,7 +88,8 @@ tel, err := tracing.NewTelemetry(tracing.TelemetryConfig{
     EnableRuntimeMetrics:      true, // liga go.* (goroutines/heap/gc). opt-in.
     SampleRatio:               sampleRatio, // 0 = amostra tudo (default do SDK). opt-in.
     InsecureExporter:          insecure,
-})
+}, tracing.WithDocumentScrubbing(), // opt-in: defesa em profundidade p/ CPF/CNPJ
+    tracing.WithDocumentScrubExemptKeys("spb.num_ctrl_if")) // opt-in: chave exata, valor intacto
 if err != nil {
     // NewTelemetry pode retornar handle nil em falha — trate e SAIA aqui,
     // NÃO siga para o defer (deferir shutdown de um tel nil causa panic).
@@ -105,7 +109,9 @@ defer tel.ShutdownTelemetryWithContext(ctx) // flush/close no shutdown (ou tel.S
 - **`ServiceVersion`/`ServiceRevision` vêm do build, não de env.** `OTEL_RESOURCE_SERVICE_VERSION` não serve: a env fica presa ao valor do deploy e mente quando a mesma imagem é repromovida. `main.version`/`main.revision` guardam o que a CI injetou no binário via `-ldflags`. `ServiceRevision` vazio simplesmente omite `vcs.ref.head.revision`. O lib-commons está publicando nesta mesma rodada um pacote `commons/buildinfo` que embrulha esses valores (`buildinfo.Get()`); use-o quando estiver disponível.
 - Endpoint, service name, env etc. vêm SEMPRE de env (Helm). O `.env.example` do serviço documenta os valores por ambiente. O código só lê `os.Getenv(...)`.
 - `NewTelemetry` **não** registra os providers globais no caminho de sucesso: `tel.ApplyGlobals()` é obrigatório logo depois (o exemplo acima chama). Só o fallback sem endpoint (`ErrEmptyEndpoint`) aplica os providers no-op sozinho.
-- **Segurança do exporter:** em ambiente `production`/`prd`, `InsecureExporter: true` faz o `NewTelemetry` **retornar erro** (o serviço não sobe) a menos que a env `ALLOW_INSECURE_OTEL="<justificativa>"` esteja definida. Em produção o `OTEL_EXPORTER_OTLP_ENDPOINT` deve ser `https://...` e `InsecureExporter` false. Insecure só em `development`/`local` (cluster interno sem TLS). Como isso vem de env, é o Helm de cada ambiente que decide — o código não fixa nada. Com `InsecureExporter: false` os exporters passam credenciais TLS explicitamente (piso TLS 1.2), então um `OTEL_EXPORTER_OTLP_ENDPOINT` sem esquema não derruba mais a conexão para texto puro — a própria env é normalizada no processo com o esquema correspondente (`https://` quando seguro, `http://` quando insecure).
+- **Segurança do exporter:** em ambiente `production`/`prd`, `InsecureExporter: true` faz o `NewTelemetry` **retornar erro** (o serviço não sobe) a menos que a env `ALLOW_INSECURE_OTEL="<justificativa>"` esteja definida. Em produção o `OTEL_EXPORTER_OTLP_ENDPOINT` deve ser `https://...` e `InsecureExporter` false. Insecure só em `development`/`local` (cluster interno sem TLS). Como isso vem de env, é o Helm de cada ambiente que decide — o código não fixa nada. Com `InsecureExporter: false` os exporters passam credenciais TLS explicitamente (piso TLS 1.2), então um `OTEL_EXPORTER_OTLP_ENDPOINT` sem esquema não derruba mais a conexão para texto puro — a própria env é normalizada no processo com o esquema correspondente (`https://` quando seguro, `http://` quando insecure). O esquema do endpoint é comparado sem distinguir maiúsculas (`HTTPS://` vale como `https://`); um alvo de resolver gRPC registrado (`dns:///`, `unix://`, `passthrough:///`) segue literal para o gRPC, como antes; qualquer outro esquema (`grpc://`, `otlp://`) faz o `NewTelemetry` retornar `ErrUnsupportedEndpointScheme` quando a telemetria está ligada, em vez de virar silenciosamente um destino em texto puro que não exporta nada.
+- **`tracing.WithDocumentScrubbing()`** (opt-in, desligado por padrão) → embrulha o exporter de spans: todo span exportado passa por `redaction.ScrubDocuments` no nome, na descrição do status, nos atributos string (inclusive slices e mapas), nos eventos (a `exception.message` do `HandleSpanError`, do panic e do assert incluída) e nos atributos de link. Roda na exportação, então pega texto de qualquer origem, inclusive o `RecordError` do próprio serviço. Span sem documento sai inalterado; atributo numérico não é inspecionado. Na telemetria no-op a opção é ignorada. Par do lado de log: `zap.Config.ScrubDocuments` (§1a).
+- **`tracing.WithDocumentScrubExemptKeys(keys...)`** (opt-in) → atributos cuja chave é **igual** a uma da lista (sem distinguir maiúsculas; sem prefixo nem conversão de caixa, então `spb.num_ctrl_if` vai escrito como está) saem com o valor intacto: serve a identificador de protocolo com forma de CPF/CNPJ (`NumCtrlIF`, `NumCtrlPart`). Só atributo string, slice de string ou bytes fica isento, no span, nos eventos, nos links e em entradas de mapa (cada uma julgada pela própria chave); slice de valores ou mapa sob chave listada, nome do span, descrição do status, nome de evento e qualquer `exception.*` continuam limpos. Chamadas repetidas somam; entrada vazia é descartada. Sem `WithDocumentScrubbing`, não faz nada. Par do lado de log: `zap.Config.ScrubDocumentsExemptKeys` (§1a).
 - `EnableTelemetry: false` (env `ENABLE_TELEMETRY=false`) → telemetria no-op segura (nada quebra, nada emite). Padrão em dev/teste.
 - `EnableRuntimeMetrics: true` → emite `go.*` automaticamente (sem mais código).
 - `SampleRatio` → amostragem de cabeça (head sampling). `0` = **unset**, mantém o default do SDK (`ParentBased(AlwaysSample)`: todo trace é gravado) — o comportamento de sempre. Um valor em `(0, 1]` instala `ParentBased(TraceIDRatioBased(ratio))`: `0.05` grava ~5% dos traces RAIZ, e um request que chega com pai já amostrado continua sendo gravado (trace nunca corta no meio). Qualquer outro valor (negativo, > 1, NaN) faz `NewTelemetry` retornar `ErrInvalidSampleRatio` **antes** de construir qualquer provider — o serviço não sobe com config errada. Vem de env (Helm), como o resto.
@@ -115,7 +121,7 @@ defer tel.ShutdownTelemetryWithContext(ctx) // flush/close no shutdown (ou tel.S
 
 ### 1a. Logger (`zap`) — dois botões que o ambiente não decide por você
 
-O `zap.New(zap.Config{...})` deriva encoder e amostragem do `Environment`. Dois campos opcionais quebram esse acoplamento quando ele não serve:
+O `zap.New(zap.Config{...})` deriva encoder e amostragem do `Environment`. Dois campos opcionais quebram esse acoplamento quando ele não serve; um terceiro, `ScrubDocuments`, liga a limpeza de CPF/CNPJ no conteúdo:
 
 ```go
 logger, err := zap.New(zap.Config{
@@ -123,11 +129,16 @@ logger, err := zap.New(zap.Config{
     OTelLibraryName: os.Getenv("OTEL_LIBRARY_NAME"),
     Encoding:        "json", // opt-in: encoder explícito ("json" | "console")
     DisableSampling: true,   // opt-in: sem sampler, nenhuma linha some
+    ScrubDocuments:  true,   // opt-in: CPF/CNPJ em texto livre vira [REDACTED_DOCUMENT]
+    // opt-in: identificadores de protocolo com forma de documento passam intactos
+    ScrubDocumentsExemptKeys: []string{"NumCtrlIF", "NumCtrlPart"},
 })
 ```
 
 - **`Encoding`** → escolhe o encoder **direto**, sem passar pelo `Environment`. Serve ao processo cujo config próprio pede JSON enquanto o ambiente de deploy é `development`: antes ele precisava **mentir o ambiente** para conseguir JSON. Vazio mantém o comportamento de sempre. Precedência **igual à do `Level`**: o campo vence, `LOG_ENCODING` é o fallback, o `Environment` é o default. Valor desconhecido → **erro do `New`** (nunca fallback silencioso: typo de config aparece no start-up).
 - **`DisableSampling`** → remove o sampler. O perfil de produção amostra **100:100**: passada a centésima cópia de uma mensagem dentro de um segundo, só a cada 100ª é escrita e **o resto some sem registro**. Para serviço sob carga é o trade certo; para log de diagnóstico que um humano lê depois (agent harness, CLI, job cujo output é a entrega) linha perdida é pista perdida — ligue lá. `false` mantém a amostragem.
+- **`ScrubDocuments`** → troca todo trecho com forma de CPF/CNPJ por `[REDACTED_DOCUMENT]` na mensagem e nos valores de campo renderizados como texto (string, erro, `Stringer`, bytes, struct/objeto/array), no sink local **e** no bridge OTLP, venha a entrada de `Log`, dos helpers zap, de `With` ou de `Raw()`. Campo numérico não é inspecionado. Com ele ligado, um campo de erro sai só com a mensagem (sem `errorVerbose`), e um campo estruturado só vira string quando carregava documento; sem documento, a saída é a mesma. `false` (default) deixa a saída byte a byte igual. É **defesa em profundidade**, não licença para formatar documento em mensagem ou erro. O `log.GoLogger` (fallback stdlib) não limpa conteúdo.
+- **`ScrubDocumentsExemptKeys`** → lista de chaves cujo valor o `ScrubDocuments` deixa como foi logado: identificador de protocolo que tem forma de CPF/CNPJ (`NumCtrlIF`, `NumCtrlPart`) e não é documento. A chave casa quando é **igual** a uma da lista, sem distinguir maiúsculas (sem prefixo, sem palavra, sem converter camelCase/snake_case). Só campo string, byte-string, binário ou `Stringer` fica isento; a mensagem, campo de erro, objeto/array/struct, `attribute.Value`, contexto e a própria chave continuam limpos, e o mascaramento por nome sensível (`password` etc.) roda antes e nunca é desfeito. Entradas vazias são descartadas e a lista é copiada no `New`. Sem `ScrubDocuments` ligado, é ignorada; vazia, nada muda.
 
 ---
 
@@ -468,6 +479,7 @@ _ = c.WithAttributes(attribute.String("tenant.id", tenantID)).AddOne(ctx)
 ## 9. Regras invioláveis (cardinalidade / PII)
 - Unidade sempre segundos. Nunca ms na app.
 - NUNCA como label: query text, SQL, params, routing key, message id, url.path com id, uuid, cpf/cnpj, pix key, email, payload.
+- CPF/CNPJ em texto livre (campo de auditoria, mensagem de erro montada pelo serviço): passe por `redaction.ScrubDocuments(s)`, que troca todo trecho com forma de CPF/CNPJ (numérico, formatado, mal formatado com `-` ou `/`, CNPJ alfanumérico) por `[REDACTED_DOCUMENT]`. Depois de um rótulo `cpf`/`cnpj` (qualquer caixa, também dentro de chave camelCase como `payerCnpj`/`holderCpf`, com até 8 bytes que não sejam letra ou dígito entre rótulo e valor: cobre `{"cnpj": "…"}`, JSON escapado dentro de erro, `<CNPJ>…</CNPJ>`, `cnpj = '…'`) o valor inteiro também é trocado quando é documento, mesmo colado ao rótulo ou em minúsculas: `cliente cpf52998224725 bloqueado` → `cliente cpf[REDACTED_DOCUMENT] bloqueado`, `cnpj 12abc34501de35` → `cnpj [REDACTED_DOCUMENT]`. O rótulo fica; `cpfValidator`, `cnpj 12345678` (raiz) e `cpf: invalid` passam intactos. Sem rótulo logo antes (ou com uma palavra entre eles, como `CNPJ do cliente 12abc…`), CNPJ alfanumérico minúsculo continua passando (seria indistinguível de token comum). Para valor guardado sob uma chave (campo de log, atributo de span), `redaction.ScrubDocumentsUnder(chave, valor)` lê a chave terminada em `cpf`/`cnpj` (`cnpj`, `payerCnpj`, `user_cpf`) como rótulo do valor: `logpkg.String("cnpj", "12abc34501de35")` sai como `[REDACTED_DOCUMENT]`; os scrubs de zap e tracing já usam isso. `cpf`/`cnpj` não estão na lista padrão de nomes sensíveis (a raiz de CNPJ de uma instituição não é dado pessoal): para mascarar por nome, passe-os como `extra` em `redaction.IsSensitiveField`. Para a telemetria, ligue os dois botões opt-in: `zap.Config.ScrubDocuments` (mensagem e campos de log, no sink local e no bridge OTLP) e `tracing.WithDocumentScrubbing()` (nome, status, atributos e eventos de todo span exportado). É defesa em profundidade, não licença para formatar documento em erro: o certo continua sendo não colocar o documento no texto. Identificador de protocolo com forma de documento (`NumCtrlIF`, `NumCtrlPart`) que precisa sair intacto vai numa lista de isenção por chave exata: `zap.Config.ScrubDocumentsExemptKeys` (§1a) e `tracing.WithDocumentScrubExemptKeys` (§1); texto livre (mensagem, erro) continua sempre limpo.
 - `tenant.id`: nunca em métricas HTTP; automático em gRPC server; manual em negócio.
 - Ao adotar um wrapper de infra, REMOVER o span manual equivalente (senão duplica custo).
 
