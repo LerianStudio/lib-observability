@@ -92,6 +92,12 @@ func TestWithHTTPLoggingLogsProblemReasonOnRefusedRequests(t *testing.T) {
 			wantLevel: obslog.LevelWarn,
 		},
 		{
+			name:      "json media type matches without regard to case",
+			handler:   sendBody(http.StatusUnprocessableEntity, "Application/Problem+JSON", `[{"location":"body.cpf","value":"`+cpfLike+`"}]`),
+			want:      map[string]any{},
+			wantLevel: obslog.LevelWarn,
+		},
+		{
 			name:    "more than ten errors keeps ten and counts the rest",
 			handler: sendBody(http.StatusUnprocessableEntity, problemJSON, humaErrors(12)),
 			want: map[string]any{

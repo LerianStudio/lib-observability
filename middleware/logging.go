@@ -317,7 +317,7 @@ func problemFields(c fiber.Ctx, withText bool) []obslog.Field {
 	// A JSON-shaped body goes through the struct whatever its label, so the
 	// missing `value` field cannot be bypassed through problem_text.
 	mediaType, _, _ := strings.Cut(string(response.Header.ContentType()), ";")
-	if !strings.HasSuffix(strings.TrimSpace(mediaType), "json") && !bytes.HasPrefix(bytes.TrimSpace(body), []byte("{")) {
+	if !strings.HasSuffix(strings.ToLower(strings.TrimSpace(mediaType)), "json") && !bytes.HasPrefix(bytes.TrimSpace(body), []byte("{")) {
 		if !withText {
 			return nil
 		}
