@@ -5,6 +5,7 @@ package middleware
 import (
 	"bytes"
 	"compress/gzip"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -94,6 +95,12 @@ func TestWithHTTPLoggingLogsProblemReasonOnRefusedRequests(t *testing.T) {
 		{
 			name:      "json media type matches without regard to case",
 			handler:   sendBody(http.StatusUnprocessableEntity, "Application/Problem+JSON", `[{"location":"body.cpf","value":"`+cpfLike+`"}]`),
+			want:      map[string]any{},
+			wantLevel: obslog.LevelWarn,
+		},
+		{
+			name:      "json array labelled as text never becomes problem_text",
+			handler:   sendBody(http.StatusUnprocessableEntity, "text/plain", ` [{"location":"body.cpf","value":"`+cpfLike+`"}]`),
 			want:      map[string]any{},
 			wantLevel: obslog.LevelWarn,
 		},
@@ -229,27 +236,61 @@ func TestWithHTTPLoggingLogsProblemReasonOnRefusedRequests(t *testing.T) {
 	}
 }
 
-// The error field already carries a rendered error's text; problem_text would repeat it.
-func TestWithHTTPLoggingOmitsProblemTextForReturnedError(t *testing.T) {
+// problem_text is dropped only when it repeats the line's error field.
+func TestWithHTTPLoggingProblemTextForReturnedError(t *testing.T) {
 	t.Parallel()
 
-	logger := &captureLogger{}
-	app := fiber.New()
-	app.Use(WithHTTPLogging(WithCustomLogger(logger)))
-	app.Use(WithHTTPErrorHandling())
-	app.Get("/v1/holders", func(fiber.Ctx) error { return fiber.ErrNotFound })
+	tests := []struct {
+		name         string
+		errorHandler fiber.ErrorHandler
+		returned     error
+		wantBody     string
+		wantError    string
+		want         map[string]any
+	}{
+		{
+			name:         "rendered text equal to the error is omitted",
+			errorHandler: fiber.DefaultErrorHandler,
+			returned:     fiber.ErrNotFound,
+			wantBody:     "Not Found",
+			wantError:    "Not Found",
+			want:         map[string]any{},
+		},
+		{
+			name: "rendered text different from the error is kept",
+			errorHandler: func(c fiber.Ctx, _ error) error {
+				return c.Status(http.StatusForbidden).SendString("access denied by policy")
+			},
+			returned:  errors.New("tenant mismatch"),
+			wantBody:  "access denied by policy",
+			wantError: "tenant mismatch",
+			want:      map[string]any{"problem_text": "access denied by policy"},
+		},
+	}
 
-	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/v1/holders", nil))
-	require.NoError(t, err)
-	defer func() { require.NoError(t, resp.Body.Close()) }()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	body, err := io.ReadAll(resp.Body)
-	require.NoError(t, err)
-	require.Equal(t, "Not Found", string(body), "precondition: the error is rendered inside the logging scope")
+			logger := &captureLogger{}
+			app := fiber.New(fiber.Config{ErrorHandler: tt.errorHandler})
+			app.Use(WithHTTPLogging(WithCustomLogger(logger)))
+			app.Use(WithHTTPErrorHandling())
+			app.Get("/v1/holders", func(fiber.Ctx) error { return tt.returned })
 
-	_, fields := logger.snapshot()
-	assert.Contains(t, fields, obslog.String("error", "Not Found"))
-	assert.Empty(t, problemFieldsOf(fields))
+			resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/v1/holders", nil))
+			require.NoError(t, err)
+			defer func() { require.NoError(t, resp.Body.Close()) }()
+
+			body, err := io.ReadAll(resp.Body)
+			require.NoError(t, err)
+			require.Equal(t, tt.wantBody, string(body), "precondition: the error is rendered inside the logging scope")
+
+			_, fields := logger.snapshot()
+			assert.Contains(t, fields, obslog.String("error", tt.wantError))
+			assert.Equal(t, tt.want, problemFieldsOf(fields))
+		})
+	}
 }
 
 func problemFieldsOf(fields []obslog.Field) map[string]any {

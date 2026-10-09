@@ -261,17 +261,20 @@ func WithHTTPLogging(opts ...LogMiddlewareOption) fiber.Handler {
 			fields = append(fields, obslog.String(constant.AttrKeyTenantID, tenantID))
 		}
 
+		var errorText string
+
 		if handlerErr != nil {
 			// tracing.ErrorMessage, not obslog.Err(handlerErr) storing the raw
 			// error: the access log's error text must match what the span
 			// records - same Bearer/Basic redaction, same length cap - and
 			// must never hand a raw error straight to a log sink that a
 			// different backend might stringify unguarded.
-			fields = append(fields, obslog.String("error", tracing.ErrorMessage(handlerErr)))
+			errorText = tracing.ErrorMessage(handlerErr)
+			fields = append(fields, obslog.String("error", errorText))
 		}
 
 		if info.Status >= fiber.StatusBadRequest {
-			fields = append(fields, problemFields(c, handlerErr == nil)...)
+			fields = append(fields, problemFields(c, errorText)...)
 		}
 
 		logger.With(fields).Log(c.Context(), httpAccessLogLevel(info.Status), info.CLFString())
@@ -302,8 +305,8 @@ type problemBody struct {
 
 // problemFields reads the reason a refused request was given from the body
 // the client received. A stream, an encoded, an oversized or an undecodable
-// body adds nothing; withText false omits problem_text (the error field has it).
-func problemFields(c fiber.Ctx, withText bool) []obslog.Field {
+// body adds nothing, nor does text that repeats the line's error field.
+func problemFields(c fiber.Ctx, errorText string) []obslog.Field {
 	response := c.Response()
 	if response.IsBodyStream() || len(response.Header.ContentEncoding()) > 0 {
 		return nil
@@ -317,12 +320,17 @@ func problemFields(c fiber.Ctx, withText bool) []obslog.Field {
 	// A JSON-shaped body goes through the struct whatever its label, so the
 	// missing `value` field cannot be bypassed through problem_text.
 	mediaType, _, _ := strings.Cut(string(response.Header.ContentType()), ";")
-	if !strings.HasSuffix(strings.ToLower(strings.TrimSpace(mediaType)), "json") && !bytes.HasPrefix(bytes.TrimSpace(body), []byte("{")) {
-		if !withText {
+	trimmed := bytes.TrimSpace(body)
+	jsonShaped := strings.HasSuffix(strings.ToLower(strings.TrimSpace(mediaType)), "json") ||
+		bytes.HasPrefix(trimmed, []byte("{")) || bytes.HasPrefix(trimmed, []byte("["))
+
+	if !jsonShaped {
+		text := problemValue(string(body))
+		if text == problemValue(errorText) {
 			return nil
 		}
 
-		return []obslog.Field{obslog.String("problem_text", problemValue(string(body), maxProblemValueLen))}
+		return []obslog.Field{obslog.String("problem_text", text)}
 	}
 
 	var problem problemBody
@@ -334,7 +342,7 @@ func problemFields(c fiber.Ctx, withText bool) []obslog.Field {
 
 	add := func(key, value string) {
 		if value != "" {
-			fields = append(fields, obslog.String(key, problemValue(value, maxProblemValueLen)))
+			fields = append(fields, obslog.String(key, problemValue(value)))
 		}
 	}
 
@@ -356,7 +364,7 @@ func problemFields(c fiber.Ctx, withText bool) []obslog.Field {
 	for _, detail := range kept {
 		// Cut at ": " drops Huma's quoted parse error, which can echo the input.
 		message, _, _ := strings.Cut(detail.Message, ": ")
-		entries = append(entries, problemValue(detail.Location+": "+message, maxProblemValueLen))
+		entries = append(entries, problemValue(detail.Location+": "+message))
 	}
 
 	fields = append(fields, obslog.Any("problem_errors", entries))
@@ -368,11 +376,11 @@ func problemFields(c fiber.Ctx, withText bool) []obslog.Field {
 	return fields
 }
 
-// problemValue applies the error field's redaction and the line's sanitizing, then caps at limit bytes.
-func problemValue(raw string, limit int) string {
+// problemValue applies the error field's redaction and the line's sanitizing, then the cap.
+func problemValue(raw string) string {
 	value := sanitizeLogValue(tracing.ErrorMessage(errors.New(raw)))
-	if len(value) > limit {
-		value = strings.ToValidUTF8(value[:limit], "")
+	if len(value) > maxProblemValueLen {
+		value = strings.ToValidUTF8(value[:maxProblemValueLen], "")
 	}
 
 	return value
