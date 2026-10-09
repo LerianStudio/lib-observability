@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"encoding/json"
@@ -270,7 +271,7 @@ func WithHTTPLogging(opts ...LogMiddlewareOption) fiber.Handler {
 		}
 
 		if info.Status >= fiber.StatusBadRequest {
-			fields = append(fields, problemFields(c)...)
+			fields = append(fields, problemFields(c, handlerErr == nil)...)
 		}
 
 		logger.With(fields).Log(c.Context(), httpAccessLogLevel(info.Status), info.CLFString())
@@ -282,7 +283,6 @@ func WithHTTPLogging(opts ...LogMiddlewareOption) fiber.Handler {
 const (
 	maxProblemBodyBytes = 8 << 10
 	maxProblemValueLen  = 128
-	maxProblemTextLen   = 120
 	maxProblemErrors    = 10
 )
 
@@ -301,10 +301,11 @@ type problemBody struct {
 }
 
 // problemFields reads the reason a refused request was given from the body
-// the client received. A stream, an oversized or an undecodable body adds nothing.
-func problemFields(c fiber.Ctx) []obslog.Field {
+// the client received. A stream, an encoded, an oversized or an undecodable
+// body adds nothing; withText false omits problem_text (the error field has it).
+func problemFields(c fiber.Ctx, withText bool) []obslog.Field {
 	response := c.Response()
-	if response.IsBodyStream() {
+	if response.IsBodyStream() || len(response.Header.ContentEncoding()) > 0 {
 		return nil
 	}
 
@@ -313,9 +314,15 @@ func problemFields(c fiber.Ctx) []obslog.Field {
 		return nil
 	}
 
+	// A JSON-shaped body goes through the struct whatever its label, so the
+	// missing `value` field cannot be bypassed through problem_text.
 	mediaType, _, _ := strings.Cut(string(response.Header.ContentType()), ";")
-	if !strings.HasSuffix(strings.TrimSpace(mediaType), "json") {
-		return []obslog.Field{obslog.String("problem_text", problemValue(string(body), maxProblemTextLen))}
+	if !strings.HasSuffix(strings.TrimSpace(mediaType), "json") && !bytes.HasPrefix(bytes.TrimSpace(body), []byte("{")) {
+		if !withText {
+			return nil
+		}
+
+		return []obslog.Field{obslog.String("problem_text", problemValue(string(body), maxProblemValueLen))}
 	}
 
 	var problem problemBody

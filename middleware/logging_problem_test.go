@@ -3,6 +3,8 @@
 package middleware
 
 import (
+	"bytes"
+	"compress/gzip"
 	"fmt"
 	"io"
 	"net/http"
@@ -28,6 +30,25 @@ func sendBody(status int, contentType, body string) fiber.Handler {
 	}
 }
 
+// huma422 is a Huma v2.39.1 validation refusal; both messages and every value echo the input.
+const huma422 = `{"title":"Unprocessable Entity","status":422,"detail":"validation failed","errors":[` +
+	`{"message":"expected length <= 11","location":"body.cpf","value":"` + cpfLike + `00"},` +
+	`{"message":"expected string to be RFC 3986 uri: parse \"` + cpfLike + `%zz\": invalid URL escape \"%zz\"",` +
+	`"location":"body.site","value":"` + cpfLike + `%zz"}]}`
+
+func gzipped(t *testing.T, text string) []byte {
+	t.Helper()
+
+	var buf bytes.Buffer
+
+	writer := gzip.NewWriter(&buf)
+	_, err := writer.Write([]byte(text))
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	return buf.Bytes()
+}
+
 func humaErrors(n int) string {
 	entries := make([]string, n)
 	for i := range n {
@@ -43,6 +64,13 @@ func TestWithHTTPLoggingLogsProblemReasonOnRefusedRequests(t *testing.T) {
 	const problemJSON = "application/problem+json"
 
 	longDetail := strings.Repeat("d", 300)
+	runeAtCap := strings.Repeat("a", 127) + "éé"
+	gzipBody := gzipped(t, "Bad Request")
+	huma422Fields := map[string]any{
+		"problem_title":  "Unprocessable Entity",
+		"problem_detail": "validation failed",
+		"problem_errors": []string{"body.cpf: expected length <= 11", "body.site: expected string to be RFC 3986 uri"},
+	}
 	hugeBody := `{"code":"X-0001","title":"Bad Request","detail":"` + strings.Repeat("x", 9<<10) + `"}`
 
 	tests := []struct {
@@ -52,16 +80,15 @@ func TestWithHTTPLoggingLogsProblemReasonOnRefusedRequests(t *testing.T) {
 		wantLevel int
 	}{
 		{
-			name: "huma 422 logs location and message, never the value",
-			handler: sendBody(http.StatusUnprocessableEntity, problemJSON, `{"title":"Unprocessable Entity","status":422,`+
-				`"detail":"validation failed","errors":[`+
-				`{"message":"expected length <= 11","location":"body.cpf","value":"`+cpfLike+`"},`+
-				`{"message":"expected string to be RFC 3339 date-time: parsing time \"`+cpfLike+`\"","location":"body.nascimento","value":"`+cpfLike+`"}]}`),
-			want: map[string]any{
-				"problem_title":  "Unprocessable Entity",
-				"problem_detail": "validation failed",
-				"problem_errors": []string{"body.cpf: expected length <= 11", "body.nascimento: expected string to be RFC 3339 date-time"},
-			},
+			name:      "huma 422 logs location and message, never the value",
+			handler:   sendBody(http.StatusUnprocessableEntity, problemJSON, huma422),
+			want:      huma422Fields,
+			wantLevel: obslog.LevelWarn,
+		},
+		{
+			name:      "json mislabelled as text still goes through the struct",
+			handler:   sendBody(http.StatusUnprocessableEntity, "text/plain", "  "+huma422),
+			want:      huma422Fields,
 			wantLevel: obslog.LevelWarn,
 		},
 		{
@@ -93,6 +120,12 @@ func TestWithHTTPLoggingLogsProblemReasonOnRefusedRequests(t *testing.T) {
 			wantLevel: obslog.LevelWarn,
 		},
 		{
+			name:      "cap never splits a rune",
+			handler:   sendBody(http.StatusConflict, problemJSON, `{"detail":"`+runeAtCap+`"}`),
+			want:      map[string]any{"problem_detail": runeAtCap[:127]},
+			wantLevel: obslog.LevelWarn,
+		},
+		{
 			name:      "old format code title message",
 			handler:   sendBody(http.StatusNotFound, "application/json", `{"code":"0007","title":"Entity Not Found","message":"holder `+cpfLike+` not found"}`),
 			want:      map[string]any{"problem_code": "0007", "problem_title": "Entity Not Found"},
@@ -111,9 +144,9 @@ func TestWithHTTPLoggingLogsProblemReasonOnRefusedRequests(t *testing.T) {
 			wantLevel: obslog.LevelWarn,
 		},
 		{
-			name:      "plain text is capped at 120 bytes",
+			name:      "plain text is capped at 128 bytes",
 			handler:   sendBody(http.StatusUnauthorized, "text/plain", strings.Repeat("u", 200)),
-			want:      map[string]any{"problem_text": strings.Repeat("u", 120)},
+			want:      map[string]any{"problem_text": strings.Repeat("u", 128)},
 			wantLevel: obslog.LevelWarn,
 		},
 		{
@@ -125,6 +158,18 @@ func TestWithHTTPLoggingLogsProblemReasonOnRefusedRequests(t *testing.T) {
 		{
 			name:      "body over 8 KiB adds nothing",
 			handler:   sendBody(http.StatusBadRequest, problemJSON, hugeBody),
+			want:      map[string]any{},
+			wantLevel: obslog.LevelWarn,
+		},
+		{
+			name: "encoded body adds nothing",
+			handler: func(c fiber.Ctx) error {
+				c.Status(http.StatusBadRequest)
+				c.Set(fiber.HeaderContentType, "text/plain")
+				c.Set(fiber.HeaderContentEncoding, "gzip")
+
+				return c.Send(gzipBody)
+			},
 			want:      map[string]any{},
 			wantLevel: obslog.LevelWarn,
 		},
@@ -176,6 +221,29 @@ func TestWithHTTPLoggingLogsProblemReasonOnRefusedRequests(t *testing.T) {
 			assert.NotContains(t, messages[0]+fmt.Sprint(fields), cpfLike)
 		})
 	}
+}
+
+// The error field already carries a rendered error's text; problem_text would repeat it.
+func TestWithHTTPLoggingOmitsProblemTextForReturnedError(t *testing.T) {
+	t.Parallel()
+
+	logger := &captureLogger{}
+	app := fiber.New()
+	app.Use(WithHTTPLogging(WithCustomLogger(logger)))
+	app.Use(WithHTTPErrorHandling())
+	app.Get("/v1/holders", func(fiber.Ctx) error { return fiber.ErrNotFound })
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/v1/holders", nil))
+	require.NoError(t, err)
+	defer func() { require.NoError(t, resp.Body.Close()) }()
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.Equal(t, "Not Found", string(body), "precondition: the error is rendered inside the logging scope")
+
+	_, fields := logger.snapshot()
+	assert.Contains(t, fields, obslog.String("error", "Not Found"))
+	assert.Empty(t, problemFieldsOf(fields))
 }
 
 func problemFieldsOf(fields []obslog.Field) map[string]any {
