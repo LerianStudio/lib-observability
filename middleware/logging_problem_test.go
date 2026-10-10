@@ -76,6 +76,7 @@ func TestWithHTTPLoggingLogsProblemReasonOnRefusedRequests(t *testing.T) {
 
 	tests := []struct {
 		name      string
+		opts      []LogMiddlewareOption
 		handler   fiber.Handler
 		want      map[string]any
 		wantLevel int
@@ -125,6 +126,48 @@ func TestWithHTTPLoggingLogsProblemReasonOnRefusedRequests(t *testing.T) {
 			handler:   sendBody(http.StatusBadRequest, problemJSON, `{"code":"CLT-0042","title":"Bad Request","detail":"cpf `+cpfLike+` invalid"}`),
 			want:      map[string]any{"problem_code": "CLT-0042", "problem_title": "Bad Request"},
 			wantLevel: obslog.LevelWarn,
+		},
+		{
+			name:      "opted-in coded problem logs the detail",
+			opts:      []LogMiddlewareOption{WithProblemDetail()},
+			handler:   sendBody(http.StatusUnprocessableEntity, problemJSON, `{"code":"CLT-0006","title":"Unprocessable Entity","detail":"installment exceeds the available margin"}`),
+			want:      map[string]any{"problem_code": "CLT-0006", "problem_title": "Unprocessable Entity", "problem_detail": "installment exceeds the available margin"},
+			wantLevel: obslog.LevelWarn,
+		},
+		{
+			name:      "opted-in coded detail is capped at 128 bytes",
+			opts:      []LogMiddlewareOption{WithProblemDetail()},
+			handler:   sendBody(http.StatusUnprocessableEntity, problemJSON, `{"code":"CLT-0006","detail":"`+longDetail+`"}`),
+			want:      map[string]any{"problem_code": "CLT-0006", "problem_detail": longDetail[:128]},
+			wantLevel: obslog.LevelWarn,
+		},
+		{
+			name:      "opted-in coded detail equal to the title is omitted",
+			opts:      []LogMiddlewareOption{WithProblemDetail()},
+			handler:   sendBody(http.StatusBadRequest, problemJSON, `{"code":"CLT-0006","title":"Bad Request","detail":"Bad Request"}`),
+			want:      map[string]any{"problem_code": "CLT-0006", "problem_title": "Bad Request"},
+			wantLevel: obslog.LevelWarn,
+		},
+		{
+			name:      "opted-in coded problem never falls back to message",
+			opts:      []LogMiddlewareOption{WithProblemDetail()},
+			handler:   sendBody(http.StatusNotFound, "application/json", `{"code":"0007","title":"Entity Not Found","message":"holder `+cpfLike+` not found"}`),
+			want:      map[string]any{"problem_code": "0007", "problem_title": "Entity Not Found"},
+			wantLevel: obslog.LevelWarn,
+		},
+		{
+			name:      "opted-in coded 5xx omits the detail",
+			opts:      []LogMiddlewareOption{WithProblemDetail()},
+			handler:   sendBody(http.StatusBadGateway, problemJSON, `{"code":"CLT-0099","title":"Bad Gateway","detail":"upstream said no"}`),
+			want:      map[string]any{"problem_code": "CLT-0099", "problem_title": "Bad Gateway"},
+			wantLevel: obslog.LevelError,
+		},
+		{
+			name:      "opted-in 2xx body is never read",
+			opts:      []LogMiddlewareOption{WithProblemDetail()},
+			handler:   sendBody(http.StatusOK, problemJSON, `{"code":"X","title":"T","detail":"D"}`),
+			want:      map[string]any{},
+			wantLevel: obslog.LevelInfo,
 		},
 		{
 			name:      "uncoded detail is capped at 128 bytes",
@@ -217,7 +260,7 @@ func TestWithHTTPLoggingLogsProblemReasonOnRefusedRequests(t *testing.T) {
 
 			logger := &captureLogger{}
 			app := fiber.New()
-			app.Use(WithHTTPLogging(WithCustomLogger(logger)))
+			app.Use(WithHTTPLogging(append(tt.opts, WithCustomLogger(logger))...))
 			app.Post("/v1/holders", tt.handler)
 
 			resp, err := app.Test(httptest.NewRequest(http.MethodPost, "/v1/holders", nil))

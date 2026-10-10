@@ -62,6 +62,7 @@ var defaultLogExcludedRoutes = []string{"/health", "/readyz", "/metrics"}
 type logMiddleware struct {
 	Logger         obslog.Logger
 	ExcludedRoutes []string
+	ProblemDetail  bool
 }
 
 // LogMiddlewareOption configures HTTP and gRPC logging middleware.
@@ -102,6 +103,15 @@ func WithExcludedRoutes(routes ...string) LogMiddlewareOption {
 
 			l.ExcludedRoutes = append(l.ExcludedRoutes, r)
 		}
+	}
+}
+
+// WithProblemDetail logs problem_detail on the HTTP access line of a coded 4xx
+// too, unless it repeats the title; a coded 5xx still omits it. Enable it only
+// when the service never interpolates personal data or client input into a 4xx detail.
+func WithProblemDetail() LogMiddlewareOption {
+	return func(l *logMiddleware) {
+		l.ProblemDetail = true
 	}
 }
 
@@ -274,7 +284,9 @@ func WithHTTPLogging(opts ...LogMiddlewareOption) fiber.Handler {
 		}
 
 		if info.Status >= fiber.StatusBadRequest {
-			fields = append(fields, problemFields(c, errorText)...)
+			// The service's guarantee behind WithProblemDetail covers 4xx details only.
+			codedDetail := mid.ProblemDetail && info.Status < fiber.StatusInternalServerError
+			fields = append(fields, problemFields(c, errorText, codedDetail)...)
 		}
 
 		logger.With(fields).Log(c.Context(), httpAccessLogLevel(info.Status), info.CLFString())
@@ -306,7 +318,7 @@ type problemBody struct {
 // problemFields reads the reason a refused request was given from the body
 // the client received. A stream, an encoded, an oversized or an undecodable
 // body adds nothing, nor does text that repeats the line's error field.
-func problemFields(c fiber.Ctx, errorText string) []obslog.Field {
+func problemFields(c fiber.Ctx, errorText string, codedDetail bool) []obslog.Field {
 	response := c.Response()
 	if response.IsBodyStream() || len(response.Header.ContentEncoding()) > 0 {
 		return nil
@@ -349,10 +361,7 @@ func problemFields(c fiber.Ctx, errorText string) []obslog.Field {
 	add("problem_code", problem.Code)
 	add("problem_title", problem.Title)
 
-	// A coded problem's detail may interpolate input, and its code already names the reason.
-	if problem.Code == "" {
-		add("problem_detail", cmp.Or(problem.Detail, problem.Message))
-	}
+	add("problem_detail", loggableDetail(problem, codedDetail))
 
 	if len(problem.Errors) == 0 {
 		return fields
@@ -374,6 +383,21 @@ func problemFields(c fiber.Ctx, errorText string) []obslog.Field {
 	}
 
 	return fields
+}
+
+// loggableDetail returns the detail the line may carry, or "". A coded problem's
+// detail may interpolate input, so only its `detail` is logged, only on the
+// service's word (WithProblemDetail) that it does not, and never as the title.
+func loggableDetail(problem problemBody, codedDetail bool) string {
+	if problem.Code == "" {
+		return cmp.Or(problem.Detail, problem.Message)
+	}
+
+	if !codedDetail || problem.Detail == problem.Title {
+		return ""
+	}
+
+	return problem.Detail
 }
 
 // problemValue applies the error field's redaction and the line's sanitizing, then the cap.
