@@ -13,6 +13,7 @@ var defaultSensitiveFields = []string{
 	"newpassword",
 	"oldpassword",
 	"passwordsalt",
+	"senha",
 	"token",
 	"secret",
 	"key",
@@ -33,8 +34,6 @@ var defaultSensitiveFields = []string{
 	"cookie",
 	"private_key",
 	"privatekey",
-	"clientid",
-	"client_id",
 	"clientsecret",
 	"client_secret",
 	"passwd",
@@ -64,9 +63,6 @@ var defaultSensitiveFields = []string{
 	"card_expiry",
 	"date_of_birth",
 	"dob",
-	"tax_id",
-	"taxid",
-	"tin",
 	"national_id",
 	"sort_code",
 	"bsb",
@@ -89,6 +85,39 @@ var defaultSensitiveFields = []string{
 	"city",
 	"zip",
 	"postal_code",
+	"nome",
+	"full_name",
+	"first_name",
+	"last_name",
+	"holder_name",
+	"mother_name",
+	"officer_name",
+	"telefone",
+	"celular",
+	"contato",
+	"endereco",
+	"logradouro",
+	"complemento",
+	"bairro",
+	"cidade",
+	"municipio",
+	"cep",
+	"banco",
+	"agencia",
+	"conta",
+	"chave_pix",
+}
+
+// clearFields are names a default entry matches by one token that carry no
+// secret or personal data: an idempotency key, an IP, the kind of an account or
+// Pix key, a flag about a trade name. Matched on the underscore-joined tokens.
+var clearFields = map[string]bool{
+	"idempotency_key":        true,
+	"idempotency_key_digest": true,
+	"ip_address":             true,
+	"tipo_conta":             true,
+	"tipo_chave_pix":         true,
+	"nome_fantasia_ausente":  true,
 }
 
 var (
@@ -144,7 +173,6 @@ var shortSensitiveTokens = map[string]bool{
 	"bic":  true,
 	"bsb":  true,
 	"dob":  true,
-	"tin":  true,
 	"jwt":  true,
 	"zip":  true,
 	"city": true,
@@ -322,7 +350,9 @@ func IsSensitiveField(fieldName string, extra ...string) bool {
 		}
 	}
 
-	tokens, singular := singularizeTokens(splitTokens(normalized), len(extra) > 0)
+	base := splitTokens(normalized)
+
+	tokens, singular := singularizeTokens(base, len(extra) > 0)
 	if singular != "" && m[singular] {
 		return true
 	}
@@ -338,7 +368,11 @@ func IsSensitiveField(fieldName string, extra ...string) bool {
 		candidates = append(candidates, singular)
 	}
 
-	return matchesDefaultFields(candidates, tokens) || matchesExtraFields(candidates, extra)
+	if matchesExtraFields(candidates, extra) {
+		return true
+	}
+
+	return matchesDefaultFields(candidates, tokens) && !clearFields[strings.Join(base, "_")]
 }
 
 // matchesWordBoundary checks if the pattern appears in the field with word boundaries.
