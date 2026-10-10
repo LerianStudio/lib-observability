@@ -13,14 +13,23 @@ import (
 	"strings"
 	"testing"
 
+	observability "github.com/LerianStudio/lib-observability/v4"
 	obslog "github.com/LerianStudio/lib-observability/v4/log"
 	"github.com/gofiber/fiber/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// cpfLike is a CPF-shaped input a refusal body may echo; it must never reach the line.
+// cpfLike is a CPF-shaped input a refusal body may echo; CPF is logged in clear.
 const cpfLike = "12345678909"
+
+// libCommonsErrorResponse mirrors lib-commons ErrorResponse (commons/net/http),
+// the body of every RespondError: idempotency and rate-limit refusals among them.
+type libCommonsErrorResponse struct {
+	Code    int    `json:"code"`
+	Title   string `json:"title"`
+	Message string `json:"message"`
+}
 
 func sendBody(status int, contentType, body string) fiber.Handler {
 	return func(c fiber.Ctx) error {
@@ -70,19 +79,25 @@ func TestWithHTTPLoggingLogsProblemReasonOnRefusedRequests(t *testing.T) {
 	huma422Fields := map[string]any{
 		"problem_title":  "Unprocessable Entity",
 		"problem_detail": "validation failed",
-		"problem_errors": []string{"body.cpf: expected length <= 11", "body.site: expected string to be RFC 3986 uri"},
+		"problem_errors": []string{
+			`body.cpf: expected length <= 11 value="` + cpfLike + `00"`,
+			`body.site: expected string to be RFC 3986 uri: parse "` + cpfLike + `%zz": invalid URL escape "%zz" value="` + cpfLike + `%zz"`,
+		},
+	}
+	firstTen := make([]string, maxProblemErrors)
+	for i := range firstTen {
+		firstTen[i] = fmt.Sprintf(`body.f%d: expected number value="%s"`, i, cpfLike)
 	}
 	hugeBody := `{"code":"X-0001","title":"Bad Request","detail":"` + strings.Repeat("x", 9<<10) + `"}`
 
 	tests := []struct {
 		name      string
-		opts      []LogMiddlewareOption
 		handler   fiber.Handler
 		want      map[string]any
 		wantLevel int
 	}{
 		{
-			name:      "huma 422 logs location and message, never the value",
+			name:      "huma 422 logs location, whole message and value",
 			handler:   sendBody(http.StatusUnprocessableEntity, problemJSON, huma422),
 			want:      huma422Fields,
 			wantLevel: obslog.LevelWarn,
@@ -109,65 +124,76 @@ func TestWithHTTPLoggingLogsProblemReasonOnRefusedRequests(t *testing.T) {
 			name:    "more than ten errors keeps ten and counts the rest",
 			handler: sendBody(http.StatusUnprocessableEntity, problemJSON, humaErrors(12)),
 			want: map[string]any{
-				"problem_title":  "Unprocessable Entity",
-				"problem_detail": "validation failed",
-				"problem_errors": []string{
-					"body.f0: expected number", "body.f1: expected number", "body.f2: expected number",
-					"body.f3: expected number", "body.f4: expected number", "body.f5: expected number",
-					"body.f6: expected number", "body.f7: expected number", "body.f8: expected number",
-					"body.f9: expected number",
-				},
+				"problem_title":          "Unprocessable Entity",
+				"problem_detail":         "validation failed",
+				"problem_errors":         firstTen,
 				"problem_errors_dropped": 2,
 			},
 			wantLevel: obslog.LevelWarn,
 		},
 		{
-			name:      "coded problem omits the detail",
+			name:      "coded problem logs the detail",
 			handler:   sendBody(http.StatusBadRequest, problemJSON, `{"code":"CLT-0042","title":"Bad Request","detail":"cpf `+cpfLike+` invalid"}`),
-			want:      map[string]any{"problem_code": "CLT-0042", "problem_title": "Bad Request"},
+			want:      map[string]any{"problem_code": "CLT-0042", "problem_title": "Bad Request", "problem_detail": "cpf " + cpfLike + " invalid"},
 			wantLevel: obslog.LevelWarn,
 		},
 		{
-			name:      "opted-in coded problem logs the detail",
-			opts:      []LogMiddlewareOption{WithProblemDetail()},
-			handler:   sendBody(http.StatusUnprocessableEntity, problemJSON, `{"code":"CLT-0006","title":"Unprocessable Entity","detail":"installment exceeds the available margin"}`),
-			want:      map[string]any{"problem_code": "CLT-0006", "problem_title": "Unprocessable Entity", "problem_detail": "installment exceeds the available margin"},
+			name: "lib-commons int code decodes",
+			handler: func(c fiber.Ctx) error {
+				return c.Status(http.StatusBadRequest).JSON(libCommonsErrorResponse{
+					Code:    http.StatusBadRequest,
+					Title:   "IDEMPOTENCY_KEY_REQUIRED",
+					Message: "X-Idempotency header is required for this request",
+				})
+			},
+			want: map[string]any{
+				"problem_code":   "400",
+				"problem_title":  "IDEMPOTENCY_KEY_REQUIRED",
+				"problem_detail": "X-Idempotency header is required for this request",
+			},
 			wantLevel: obslog.LevelWarn,
 		},
 		{
-			name:      "opted-in coded detail is capped at 128 bytes",
-			opts:      []LogMiddlewareOption{WithProblemDetail()},
-			handler:   sendBody(http.StatusUnprocessableEntity, problemJSON, `{"code":"CLT-0006","detail":"`+longDetail+`"}`),
-			want:      map[string]any{"problem_code": "CLT-0006", "problem_detail": longDetail[:128]},
-			wantLevel: obslog.LevelWarn,
-		},
-		{
-			name:      "opted-in coded detail equal to the title is omitted",
-			opts:      []LogMiddlewareOption{WithProblemDetail()},
+			name:      "detail equal to the title is omitted",
 			handler:   sendBody(http.StatusBadRequest, problemJSON, `{"code":"CLT-0006","title":"Bad Request","detail":"Bad Request"}`),
 			want:      map[string]any{"problem_code": "CLT-0006", "problem_title": "Bad Request"},
 			wantLevel: obslog.LevelWarn,
 		},
 		{
-			name:      "opted-in coded problem never falls back to message",
-			opts:      []LogMiddlewareOption{WithProblemDetail()},
-			handler:   sendBody(http.StatusNotFound, "application/json", `{"code":"0007","title":"Entity Not Found","message":"holder `+cpfLike+` not found"}`),
-			want:      map[string]any{"problem_code": "0007", "problem_title": "Entity Not Found"},
+			name: "value of a sensitive location is masked, its parse error cut",
+			handler: sendBody(http.StatusUnprocessableEntity, problemJSON, `{"errors":[`+
+				`{"location":"body.holder.email","message":"expected string to be RFC 5322 email: mail: no @ in joao.silva","value":"joao.silva"},`+
+				`{"location":"header.Authorization","message":"expected string","value":"Bearer eyJhbGciOi"}]}`),
+			want: map[string]any{"problem_errors": []string{
+				"body.holder.email: expected string to be RFC 5322 email value=[REDACTED]",
+				"header.Authorization: expected string value=[REDACTED]",
+			}},
 			wantLevel: obslog.LevelWarn,
 		},
 		{
-			name:      "opted-in coded 5xx omits the detail",
-			opts:      []LogMiddlewareOption{WithProblemDetail()},
-			handler:   sendBody(http.StatusBadGateway, problemJSON, `{"code":"CLT-0099","title":"Bad Gateway","detail":"upstream said no"}`),
-			want:      map[string]any{"problem_code": "CLT-0099", "problem_title": "Bad Gateway"},
-			wantLevel: obslog.LevelError,
+			name: "value is capped at 64 bytes; numbers kept, containers never logged",
+			handler: sendBody(http.StatusUnprocessableEntity, problemJSON, `{"errors":[`+
+				`{"location":"body.ref","message":"expected length <= 10","value":"`+longDetail+`"},`+
+				`{"location":"body.amount","message":"expected number <= 100","value":250},`+
+				`{"location":"body","message":"expected required property cpf to be present","value":{"nome":"JOAO"}}]}`),
+			want: map[string]any{"problem_errors": []string{
+				`body.ref: expected length <= 10 value="` + longDetail[:63],
+				"body.amount: expected number <= 100 value=250",
+				"body: expected required property cpf to be present",
+			}},
+			wantLevel: obslog.LevelWarn,
 		},
 		{
-			name:      "opted-in 2xx body is never read",
-			opts:      []LogMiddlewareOption{WithProblemDetail()},
-			handler:   sendBody(http.StatusOK, problemJSON, `{"code":"X","title":"T","detail":"D"}`),
-			want:      map[string]any{},
-			wantLevel: obslog.LevelInfo,
+			name:      "coded detail is capped at 128 bytes",
+			handler:   sendBody(http.StatusUnprocessableEntity, problemJSON, `{"code":"CLT-0006","detail":"`+longDetail+`"}`),
+			want:      map[string]any{"problem_code": "CLT-0006", "problem_detail": longDetail[:128]},
+			wantLevel: obslog.LevelWarn,
+		},
+		{
+			name:      "coded 5xx logs the detail",
+			handler:   sendBody(http.StatusBadGateway, problemJSON, `{"code":"CLT-0099","title":"Bad Gateway","detail":"upstream said no"}`),
+			want:      map[string]any{"problem_code": "CLT-0099", "problem_title": "Bad Gateway", "problem_detail": "upstream said no"},
+			wantLevel: obslog.LevelError,
 		},
 		{
 			name:      "uncoded detail is capped at 128 bytes",
@@ -184,7 +210,7 @@ func TestWithHTTPLoggingLogsProblemReasonOnRefusedRequests(t *testing.T) {
 		{
 			name:      "old format code title message",
 			handler:   sendBody(http.StatusNotFound, "application/json", `{"code":"0007","title":"Entity Not Found","message":"holder `+cpfLike+` not found"}`),
-			want:      map[string]any{"problem_code": "0007", "problem_title": "Entity Not Found"},
+			want:      map[string]any{"problem_code": "0007", "problem_title": "Entity Not Found", "problem_detail": "holder " + cpfLike + " not found"},
 			wantLevel: obslog.LevelWarn,
 		},
 		{
@@ -260,7 +286,7 @@ func TestWithHTTPLoggingLogsProblemReasonOnRefusedRequests(t *testing.T) {
 
 			logger := &captureLogger{}
 			app := fiber.New()
-			app.Use(WithHTTPLogging(append(tt.opts, WithCustomLogger(logger))...))
+			app.Use(WithHTTPLogging(WithCustomLogger(logger)))
 			app.Post("/v1/holders", tt.handler)
 
 			resp, err := app.Test(httptest.NewRequest(http.MethodPost, "/v1/holders", nil))
@@ -274,7 +300,9 @@ func TestWithHTTPLoggingLogsProblemReasonOnRefusedRequests(t *testing.T) {
 			require.Len(t, messages, 1, "one line per request, never a second")
 			assert.Equal(t, []int{tt.wantLevel}, logger.levelSnapshot())
 			assert.Equal(t, tt.want, problemFieldsOf(fields))
-			assert.NotContains(t, messages[0]+fmt.Sprint(fields), cpfLike)
+			assert.NotContains(t, fmt.Sprint(fields), "joao.silva")
+			assert.NotContains(t, fmt.Sprint(fields), "eyJhbGciOi")
+			assert.NotContains(t, fmt.Sprint(fields), "JOAO")
 		})
 	}
 }
@@ -346,4 +374,54 @@ func problemFieldsOf(fields []obslog.Field) map[string]any {
 	}
 
 	return out
+}
+
+// A 5xx body hides its cause; the line's error field carries it.
+func TestWithHTTPLoggingRecordedCause(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		returned  error
+		wantError string
+	}{
+		{name: "recorded cause fills the error field", wantError: "pq: connection refused"},
+		{name: "chain error wins over the cause", returned: errors.New("chain failed"), wantError: "chain failed"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			logger := &captureLogger{}
+			app := fiber.New()
+			app.Use(WithHTTPLogging(WithCustomLogger(logger)))
+			app.Get("/v1/holders", func(c fiber.Ctx) error {
+				observability.RecordErrorCause(c.Context(), errors.New("pq: connection refused"))
+
+				if tt.returned != nil {
+					return tt.returned
+				}
+
+				return sendBody(http.StatusInternalServerError, "application/problem+json",
+					`{"title":"Internal Server Error","status":500,"detail":"internal error"}`)(c)
+			})
+
+			resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/v1/holders", nil))
+			require.NoError(t, err)
+			require.NoError(t, resp.Body.Close())
+
+			_, fields := logger.snapshot()
+
+			var errorFields []obslog.Field
+
+			for _, f := range fields {
+				if f.Key == "error" {
+					errorFields = append(errorFields, f)
+				}
+			}
+
+			assert.Equal(t, []obslog.Field{obslog.String("error", tt.wantError)}, errorFields)
+		})
+	}
 }
