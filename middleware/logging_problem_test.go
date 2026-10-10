@@ -149,6 +149,13 @@ func TestWithHTTPLoggingLogsProblemReasonOnRefusedRequests(t *testing.T) {
 			wantLevel: obslog.LevelWarn,
 		},
 		{
+			name:      "opted-in coded problem never falls back to message",
+			opts:      []LogMiddlewareOption{WithProblemDetail()},
+			handler:   sendBody(http.StatusNotFound, "application/json", `{"code":"0007","title":"Entity Not Found","message":"holder `+cpfLike+` not found"}`),
+			want:      map[string]any{"problem_code": "0007", "problem_title": "Entity Not Found"},
+			wantLevel: obslog.LevelWarn,
+		},
+		{
 			name:      "opted-in coded 5xx omits the detail",
 			opts:      []LogMiddlewareOption{WithProblemDetail()},
 			handler:   sendBody(http.StatusBadGateway, problemJSON, `{"code":"CLT-0099","title":"Bad Gateway","detail":"upstream said no"}`),

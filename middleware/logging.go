@@ -386,15 +386,18 @@ func problemFields(c fiber.Ctx, errorText string, codedDetail bool) []obslog.Fie
 }
 
 // loggableDetail returns the detail the line may carry, or "". A coded problem's
-// detail may interpolate input, so it is logged only on the service's word
-// (WithProblemDetail) that it does not, and never when it repeats the title.
+// detail may interpolate input, so only its `detail` is logged, only on the
+// service's word (WithProblemDetail) that it does not, and never as the title.
 func loggableDetail(problem problemBody, codedDetail bool) string {
-	detail := cmp.Or(problem.Detail, problem.Message)
-	if problem.Code != "" && (!codedDetail || detail == problem.Title) {
+	if problem.Code == "" {
+		return cmp.Or(problem.Detail, problem.Message)
+	}
+
+	if !codedDetail || problem.Detail == problem.Title {
 		return ""
 	}
 
-	return detail
+	return problem.Detail
 }
 
 // problemValue applies the error field's redaction and the line's sanitizing, then the cap.
