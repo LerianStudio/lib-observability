@@ -106,9 +106,9 @@ func WithExcludedRoutes(routes ...string) LogMiddlewareOption {
 	}
 }
 
-// WithProblemDetail logs problem_detail on the HTTP access line of a coded
-// refusal too, unless it repeats the title. Enable it only when the service
-// never interpolates personal data or client input into a 4xx detail.
+// WithProblemDetail logs problem_detail on the HTTP access line of a coded 4xx
+// too, unless it repeats the title; a coded 5xx still omits it. Enable it only
+// when the service never interpolates personal data or client input into a 4xx detail.
 func WithProblemDetail() LogMiddlewareOption {
 	return func(l *logMiddleware) {
 		l.ProblemDetail = true
@@ -284,7 +284,9 @@ func WithHTTPLogging(opts ...LogMiddlewareOption) fiber.Handler {
 		}
 
 		if info.Status >= fiber.StatusBadRequest {
-			fields = append(fields, problemFields(c, errorText, mid.ProblemDetail)...)
+			// The service's guarantee behind WithProblemDetail covers 4xx details only.
+			codedDetail := mid.ProblemDetail && info.Status < fiber.StatusInternalServerError
+			fields = append(fields, problemFields(c, errorText, codedDetail)...)
 		}
 
 		logger.With(fields).Log(c.Context(), httpAccessLogLevel(info.Status), info.CLFString())
