@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -14,6 +15,7 @@ import (
 	constant "github.com/LerianStudio/lib-observability/v4/constants"
 	"github.com/LerianStudio/lib-observability/v4/grpcmiddleware"
 	obslog "github.com/LerianStudio/lib-observability/v4/log"
+	"github.com/LerianStudio/lib-observability/v4/redaction"
 	"github.com/LerianStudio/lib-observability/v4/tracing"
 	"github.com/gofiber/fiber/v3"
 	"go.opentelemetry.io/otel/attribute"
@@ -62,7 +64,6 @@ var defaultLogExcludedRoutes = []string{"/health", "/readyz", "/metrics"}
 type logMiddleware struct {
 	Logger         obslog.Logger
 	ExcludedRoutes []string
-	ProblemDetail  bool
 }
 
 // LogMiddlewareOption configures HTTP and gRPC logging middleware.
@@ -103,15 +104,6 @@ func WithExcludedRoutes(routes ...string) LogMiddlewareOption {
 
 			l.ExcludedRoutes = append(l.ExcludedRoutes, r)
 		}
-	}
-}
-
-// WithProblemDetail logs problem_detail on the HTTP access line of a coded 4xx
-// too, unless it repeats the title; a coded 5xx still omits it. Enable it only
-// when the service never interpolates personal data or client input into a 4xx detail.
-func WithProblemDetail() LogMiddlewareOption {
-	return func(l *logMiddleware) {
-		l.ProblemDetail = true
 	}
 }
 
@@ -237,6 +229,7 @@ func WithHTTPLogging(opts ...LogMiddlewareOption) fiber.Handler {
 			With(obslog.String("message_prefix", requestID+constant.LoggerDefaultSeparator))
 
 		ctx = observability.ContextWithLogger(ctx, logger)
+		ctx, recordedCause := observability.ContextWithErrorCause(ctx)
 		c.SetContext(ctx)
 
 		returnedErr := c.Next()
@@ -273,20 +266,18 @@ func WithHTTPLogging(opts ...LogMiddlewareOption) fiber.Handler {
 
 		var errorText string
 
-		if handlerErr != nil {
-			// tracing.ErrorMessage, not obslog.Err(handlerErr) storing the raw
+		if cause := cmp.Or(handlerErr, recordedCause()); cause != nil {
+			// tracing.ErrorMessage, not obslog.Err(cause) storing the raw
 			// error: the access log's error text must match what the span
 			// records - same Bearer/Basic redaction, same length cap - and
 			// must never hand a raw error straight to a log sink that a
 			// different backend might stringify unguarded.
-			errorText = tracing.ErrorMessage(handlerErr)
+			errorText = tracing.ErrorMessage(cause)
 			fields = append(fields, obslog.String("error", errorText))
 		}
 
 		if info.Status >= fiber.StatusBadRequest {
-			// The service's guarantee behind WithProblemDetail covers 4xx details only.
-			codedDetail := mid.ProblemDetail && info.Status < fiber.StatusInternalServerError
-			fields = append(fields, problemFields(c, errorText, codedDetail)...)
+			fields = append(fields, problemFields(c, errorText)...)
 		}
 
 		logger.With(fields).Log(c.Context(), httpAccessLogLevel(info.Status), info.CLFString())
@@ -298,27 +289,28 @@ func WithHTTPLogging(opts ...LogMiddlewareOption) fiber.Handler {
 const (
 	maxProblemBodyBytes = 8 << 10
 	maxProblemValueLen  = 128
+	maxProblemInputLen  = 64
 	maxProblemErrors    = 10
 )
 
-// problemBody declares only what the access line may log. It has no `value`
-// field: Huma echoes the offending input there, and an undeclared field is
-// never decoded.
+// problemBody declares only what the access line may log. Code is raw because
+// lib-commons writes the HTTP status there as a number, Huma-style bodies a string.
 type problemBody struct {
-	Code    string `json:"code"`
-	Title   string `json:"title"`
-	Detail  string `json:"detail"`
-	Message string `json:"message"`
+	Code    json.RawMessage `json:"code"`
+	Title   string          `json:"title"`
+	Detail  string          `json:"detail"`
+	Message string          `json:"message"`
 	Errors  []struct {
-		Location string `json:"location"`
-		Message  string `json:"message"`
+		Location string          `json:"location"`
+		Message  string          `json:"message"`
+		Value    json.RawMessage `json:"value"`
 	} `json:"errors"`
 }
 
 // problemFields reads the reason a refused request was given from the body
 // the client received. A stream, an encoded, an oversized or an undecodable
 // body adds nothing, nor does text that repeats the line's error field.
-func problemFields(c fiber.Ctx, errorText string, codedDetail bool) []obslog.Field {
+func problemFields(c fiber.Ctx, errorText string) []obslog.Field {
 	response := c.Response()
 	if response.IsBodyStream() || len(response.Header.ContentEncoding()) > 0 {
 		return nil
@@ -330,7 +322,7 @@ func problemFields(c fiber.Ctx, errorText string, codedDetail bool) []obslog.Fie
 	}
 
 	// A JSON-shaped body goes through the struct whatever its label, so the
-	// missing `value` field cannot be bypassed through problem_text.
+	// mask on a sensitive location cannot be bypassed through problem_text.
 	mediaType, _, _ := strings.Cut(string(response.Header.ContentType()), ";")
 	trimmed := bytes.TrimSpace(body)
 	jsonShaped := strings.HasSuffix(strings.ToLower(strings.TrimSpace(mediaType)), "json") ||
@@ -358,10 +350,12 @@ func problemFields(c fiber.Ctx, errorText string, codedDetail bool) []obslog.Fie
 		}
 	}
 
-	add("problem_code", problem.Code)
+	add("problem_code", rawJSONText(problem.Code))
 	add("problem_title", problem.Title)
 
-	add("problem_detail", loggableDetail(problem, codedDetail))
+	if detail := cmp.Or(problem.Detail, problem.Message); detail != problem.Title {
+		add("problem_detail", detail)
+	}
 
 	if len(problem.Errors) == 0 {
 		return fields
@@ -371,9 +365,7 @@ func problemFields(c fiber.Ctx, errorText string, codedDetail bool) []obslog.Fie
 	entries := make([]string, 0, len(kept))
 
 	for _, detail := range kept {
-		// Cut at ": " drops Huma's quoted parse error, which can echo the input.
-		message, _, _ := strings.Cut(detail.Message, ": ")
-		entries = append(entries, problemValue(detail.Location+": "+message))
+		entries = append(entries, problemError(detail.Location, detail.Message, detail.Value))
 	}
 
 	fields = append(fields, obslog.Any("problem_errors", entries))
@@ -385,29 +377,53 @@ func problemFields(c fiber.Ctx, errorText string, codedDetail bool) []obslog.Fie
 	return fields
 }
 
-// loggableDetail returns the detail the line may carry, or "". A coded problem's
-// detail may interpolate input, so only its `detail` is logged, only on the
-// service's word (WithProblemDetail) that it does not, and never as the title.
-func loggableDetail(problem problemBody, codedDetail bool) string {
-	if problem.Code == "" {
-		return cmp.Or(problem.Detail, problem.Message)
+// problemError renders one errors[] entry as "<location>: <message> value=<raw JSON>".
+func problemError(location, message string, value json.RawMessage) string {
+	segments := strings.FieldsFunc(location, func(r rune) bool { return r == '.' || r == '[' || r == ']' })
+	// Any segment naming a redacted field masks: body.holder.email, header.Authorization.
+	masked := slices.ContainsFunc(segments, func(segment string) bool { return redaction.IsSensitiveField(segment) })
+
+	// Cut at ": " drops Huma's quoted parse error, which echoes the masked input.
+	if masked {
+		message, _, _ = strings.Cut(message, ": ")
 	}
 
-	if !codedDetail || problem.Detail == problem.Title {
-		return ""
-	}
+	entry := problemValue(location + ": " + message)
 
-	return problem.Detail
+	switch {
+	case len(value) == 0 || len(segments) < 2 || value[0] == '{' || value[0] == '[':
+		// Absent; a bare root (body, query) whose value is the raw request; or a
+		// container whose keys the mask cannot see.
+		return entry
+	case masked:
+		return entry + " value=[REDACTED]"
+	default:
+		return entry + " value=" + clip(problemValue(string(value)), maxProblemInputLen)
+	}
 }
 
 // problemValue applies the error field's redaction and the line's sanitizing, then the cap.
 func problemValue(raw string) string {
-	value := sanitizeLogValue(tracing.ErrorMessage(errors.New(raw)))
-	if len(value) > maxProblemValueLen {
-		value = strings.ToValidUTF8(value[:maxProblemValueLen], "")
+	return clip(sanitizeLogValue(tracing.ErrorMessage(errors.New(raw))), maxProblemValueLen)
+}
+
+// clip cuts s to at most n bytes without splitting a rune.
+func clip(s string, n int) string {
+	if len(s) > n {
+		s = strings.ToValidUTF8(s[:n], "")
 	}
 
-	return value
+	return s
+}
+
+// rawJSONText renders a JSON string as its text and any other JSON value as written.
+func rawJSONText(raw json.RawMessage) string {
+	var text string
+	if json.Unmarshal(raw, &text) == nil {
+		return text
+	}
+
+	return string(raw)
 }
 
 func responseBodySize(c fiber.Ctx) int {
