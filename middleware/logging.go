@@ -266,8 +266,6 @@ func WithHTTPLogging(opts ...LogMiddlewareOption) fiber.Handler {
 
 		var errorText string
 
-		// The chain's error wins; a cause recorded in the request (a 5xx whose
-		// body hides it) fills the field only when the chain returned none.
 		if cause := cmp.Or(handlerErr, recordedCause()); cause != nil {
 			// tracing.ErrorMessage, not obslog.Err(cause) storing the raw
 			// error: the access log's error text must match what the span
@@ -381,7 +379,9 @@ func problemFields(c fiber.Ctx, errorText string) []obslog.Field {
 
 // problemError renders one errors[] entry as "<location>: <message> value=<raw JSON>".
 func problemError(location, message string, value json.RawMessage) string {
-	masked := sensitiveLocation(location)
+	segments := strings.FieldsFunc(location, func(r rune) bool { return r == '.' || r == '[' || r == ']' })
+	// Any segment naming a redacted field masks: body.holder.email, header.Authorization.
+	masked := slices.ContainsFunc(segments, func(segment string) bool { return redaction.IsSensitiveField(segment) })
 
 	// Cut at ": " drops Huma's quoted parse error, which echoes the masked input.
 	if masked {
@@ -391,23 +391,15 @@ func problemError(location, message string, value json.RawMessage) string {
 	entry := problemValue(location + ": " + message)
 
 	switch {
-	case len(value) == 0 || value[0] == '{' || value[0] == '[':
-		// Absent, or a container whose keys the location mask cannot see.
+	case len(value) == 0 || len(segments) < 2 || value[0] == '{' || value[0] == '[':
+		// Absent; a bare root (body, query) whose value is the raw request; or a
+		// container whose keys the mask cannot see.
 		return entry
 	case masked:
 		return entry + " value=[REDACTED]"
 	default:
 		return entry + " value=" + clip(problemValue(string(value)), maxProblemInputLen)
 	}
-}
-
-// sensitiveLocation reports whether any segment of a location (body.holder.email,
-// header.Authorization) names a redacted field. Per segment, so a name the redaction
-// list exempts stays clear under any parent path.
-func sensitiveLocation(location string) bool {
-	segments := strings.FieldsFunc(location, func(r rune) bool { return r == '.' || r == '[' || r == ']' })
-
-	return slices.ContainsFunc(segments, func(segment string) bool { return redaction.IsSensitiveField(segment) })
 }
 
 // problemValue applies the error field's redaction and the line's sanitizing, then the cap.

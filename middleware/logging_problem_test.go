@@ -171,6 +171,27 @@ func TestWithHTTPLoggingLogsProblemReasonOnRefusedRequests(t *testing.T) {
 			wantLevel: obslog.LevelWarn,
 		},
 		{
+			name: "malformed body is never echoed through the bare body location",
+			handler: sendBody(http.StatusBadRequest, problemJSON, `{"title":"Bad Request","errors":[{"location":"body",`+
+				`"message":"invalid character '}' looking for beginning of object key string",`+
+				`"value":"{\"clientId\":\"abc\",\"clientSecret\":\"s3cr3t-XYZ\",}"}]}`),
+			want: map[string]any{
+				"problem_title":  "Bad Request",
+				"problem_errors": []string{"body: invalid character '}' looking for beginning of object key string"},
+			},
+			wantLevel: obslog.LevelWarn,
+		},
+		{
+			name: "form body of a 415 is never echoed",
+			handler: sendBody(http.StatusUnsupportedMediaType, problemJSON, `{"title":"Unsupported Media Type","errors":[`+
+				`{"location":"body","message":"unknown content type","value":"client_id=abc&client_secret=s3cr3t-XYZ"}]}`),
+			want: map[string]any{
+				"problem_title":  "Unsupported Media Type",
+				"problem_errors": []string{"body: unknown content type"},
+			},
+			wantLevel: obslog.LevelWarn,
+		},
+		{
 			name: "value is capped at 64 bytes; numbers kept, containers never logged",
 			handler: sendBody(http.StatusUnprocessableEntity, problemJSON, `{"errors":[`+
 				`{"location":"body.ref","message":"expected length <= 10","value":"`+longDetail+`"},`+
@@ -300,9 +321,9 @@ func TestWithHTTPLoggingLogsProblemReasonOnRefusedRequests(t *testing.T) {
 			require.Len(t, messages, 1, "one line per request, never a second")
 			assert.Equal(t, []int{tt.wantLevel}, logger.levelSnapshot())
 			assert.Equal(t, tt.want, problemFieldsOf(fields))
-			assert.NotContains(t, fmt.Sprint(fields), "joao.silva")
-			assert.NotContains(t, fmt.Sprint(fields), "eyJhbGciOi")
-			assert.NotContains(t, fmt.Sprint(fields), "JOAO")
+			for _, secret := range []string{"joao.silva", "eyJhbGciOi", "JOAO", "s3cr3t"} {
+				assert.NotContains(t, fmt.Sprint(fields), secret)
+			}
 		})
 	}
 }
