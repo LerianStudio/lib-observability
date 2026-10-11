@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"slices"
 	"strconv"
 	"strings"
@@ -232,58 +233,75 @@ func WithHTTPLogging(opts ...LogMiddlewareOption) fiber.Handler {
 		ctx, recordedCause := observability.ContextWithErrorCause(ctx)
 		c.SetContext(ctx)
 
+		// A panic unwinds past the code below: log it as the 500 the outer
+		// recover middleware will render, then hand the panic on to it.
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				info.FinishRequestInfo(&ResponseMetricsWrapper{
+					Context:    c,
+					StatusCode: fiber.StatusInternalServerError,
+					Size:       unknownResponseBodySize,
+				})
+				writeAccessLine(c, logger, info, fmt.Errorf("panic: %v", recovered))
+				panic(recovered)
+			}
+		}()
+
 		returnedErr := c.Next()
 		statusCode, chainErr, handlerErr := resolveHTTPResponse(c, returnedErr)
 
-		rw := ResponseMetricsWrapper{
+		info.FinishRequestInfo(&ResponseMetricsWrapper{
 			Context:    c,
 			StatusCode: statusCode,
 			Size:       responseBodySize(c),
-		}
-
-		info.FinishRequestInfo(&rw)
-
-		fields := []obslog.Field{
-			obslog.Int("http_status_code", info.Status),
-			obslog.String("http_method", info.Method),
-			obslog.String("http_path", info.URI),
-			obslog.Int("http_latency_ms", int(info.Duration.Milliseconds())),
-		}
-
-		// Resolved from the context as it stands AFTER c.Next(), not from the
-		// one captured above: the tenant is attested by a route-level
-		// middleware running behind the consumer's auth handler, so it does
-		// not exist yet when this middleware binds its request logger. The
-		// resolver reads the request AttrBag and OTel baggage, both of which
-		// that middleware writes through c.SetContext - so the access log
-		// agrees with the span attribute rather than reporting a second,
-		// separately derived notion of tenant. Absent tenant yields "", and
-		// no field is appended: an empty tenant.id would read as a real
-		// dimension to every log backend.
-		if tenantID := resolveTenantIDForTelemetry(c.Context()); tenantID != "" {
-			fields = append(fields, obslog.String(constant.AttrKeyTenantID, tenantID))
-		}
-
-		var errorText string
-
-		if cause := cmp.Or(handlerErr, recordedCause()); cause != nil {
-			// tracing.ErrorMessage, not obslog.Err(cause) storing the raw
-			// error: the access log's error text must match what the span
-			// records - same Bearer/Basic redaction, same length cap - and
-			// must never hand a raw error straight to a log sink that a
-			// different backend might stringify unguarded.
-			errorText = tracing.ErrorMessage(cause)
-			fields = append(fields, obslog.String("error", errorText))
-		}
-
-		if info.Status >= fiber.StatusBadRequest {
-			fields = append(fields, problemFields(c, errorText)...)
-		}
-
-		logger.With(fields).Log(c.Context(), httpAccessLogLevel(info.Status), info.CLFString())
+		})
+		writeAccessLine(c, logger, info, cmp.Or(handlerErr, recordedCause()))
 
 		return chainErr
 	}
+}
+
+// writeAccessLine logs the access line of a finished request. cause, when
+// non-nil, is the error behind the status.
+func writeAccessLine(c fiber.Ctx, logger obslog.Logger, info *RequestInfo, cause error) {
+	fields := []obslog.Field{
+		obslog.Int("http_status_code", info.Status),
+		obslog.String("http_method", info.Method),
+		obslog.String("http_path", info.URI),
+		obslog.Int("http_latency_ms", int(info.Duration.Milliseconds())),
+	}
+
+	// Resolved from the context as it stands AFTER c.Next(), not from the
+	// one the request logger was bound to: the tenant is attested by a route-level
+	// middleware running behind the consumer's auth handler, so it does
+	// not exist yet when this middleware binds its request logger. The
+	// resolver reads the request AttrBag and OTel baggage, both of which
+	// that middleware writes through c.SetContext - so the access log
+	// agrees with the span attribute rather than reporting a second,
+	// separately derived notion of tenant. Absent tenant yields "", and
+	// no field is appended: an empty tenant.id would read as a real
+	// dimension to every log backend.
+	if tenantID := resolveTenantIDForTelemetry(c.Context()); tenantID != "" {
+		fields = append(fields, obslog.String(constant.AttrKeyTenantID, tenantID))
+	}
+
+	var errorText string
+
+	if cause != nil {
+		// tracing.ErrorMessage, not obslog.Err(cause) storing the raw
+		// error: the access log's error text must match what the span
+		// records - same Bearer/Basic redaction, same length cap - and
+		// must never hand a raw error straight to a log sink that a
+		// different backend might stringify unguarded.
+		errorText = tracing.ErrorMessage(cause)
+		fields = append(fields, obslog.String("error", errorText))
+	}
+
+	if info.Status >= fiber.StatusBadRequest {
+		fields = append(fields, problemFields(c, errorText)...)
+	}
+
+	logger.With(fields).Log(c.Context(), httpAccessLogLevel(info.Status), info.CLFString())
 }
 
 const (
