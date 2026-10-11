@@ -19,6 +19,7 @@ import (
 	"github.com/LerianStudio/lib-observability/v4/redaction"
 	"github.com/LerianStudio/lib-observability/v4/tracing"
 	"github.com/gofiber/fiber/v3"
+	"github.com/valyala/fasthttp"
 	"go.opentelemetry.io/otel/attribute"
 	"google.golang.org/grpc"
 )
@@ -210,7 +211,7 @@ func WithHTTPLogging(opts ...LogMiddlewareOption) fiber.Handler {
 	return func(c fiber.Ctx) error {
 		mid := buildOpts(opts...)
 
-		if isRouteExcludedFromList(c, mid.ExcludedRoutes) {
+		if c.Locals(refusedBeforeRoutingKey{}) != nil || isRouteExcludedFromList(c, mid.ExcludedRoutes) {
 			return nextWithNormalizedHTTPError(c)
 		}
 
@@ -222,14 +223,9 @@ func WithHTTPLogging(opts ...LogMiddlewareOption) fiber.Handler {
 
 		info := NewRequestInfo(c, false)
 
-		requestID := c.Get(headerID)
-		ctx := c.Context()
+		logger := requestLogger(mid.Logger, info.TraceID)
 
-		logger := mid.Logger.
-			With(obslog.String(headerID, info.TraceID)).
-			With(obslog.String("message_prefix", requestID+constant.LoggerDefaultSeparator))
-
-		ctx = observability.ContextWithLogger(ctx, logger)
+		ctx := observability.ContextWithLogger(c.Context(), logger)
 		ctx, recordedCause := observability.ContextWithErrorCause(ctx)
 		c.SetContext(ctx)
 
@@ -259,6 +255,43 @@ func WithHTTPLogging(opts ...LogMiddlewareOption) fiber.Handler {
 
 		return chainErr
 	}
+}
+
+// refusedBeforeRoutingKey marks a request fasthttp refused before routing.
+type refusedBeforeRoutingKey struct{}
+
+// LogRefusalsBeforeRouting writes the access line of a request Fiber refuses
+// before routing (a body over BodyLimit, an unreadable request), which its
+// ErrorHandler renders after the Use chain ran with nothing decided. Call it
+// once after fiber.New, before serving, with WithHTTPLogging's options.
+func LogRefusalsBeforeRouting(app *fiber.App, opts ...LogMiddlewareOption) {
+	server := app.Server()
+	render := server.ErrorHandler
+	base := buildOpts(opts...).Logger
+
+	server.ErrorHandler = func(fctx *fasthttp.RequestCtx, err error) {
+		fctx.SetUserValue(refusedBeforeRoutingKey{}, true)
+		render(fctx, err)
+
+		c := app.AcquireCtx(fctx)
+		defer app.ReleaseCtx(c)
+
+		setRequestHeaderID(c)
+
+		info := NewRequestInfo(c, false)
+		info.FinishRequestInfo(&ResponseMetricsWrapper{
+			Context:    c,
+			StatusCode: c.Response().StatusCode(),
+			Size:       responseBodySize(c),
+		})
+		writeAccessLine(c, requestLogger(base, info.TraceID), info, err)
+	}
+}
+
+func requestLogger(logger obslog.Logger, requestID string) obslog.Logger {
+	return logger.
+		With(obslog.String(headerID, requestID)).
+		With(obslog.String("message_prefix", requestID+constant.LoggerDefaultSeparator))
 }
 
 // writeAccessLine logs the access line of a finished request. cause, when
