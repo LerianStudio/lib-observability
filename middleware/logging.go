@@ -273,6 +273,11 @@ func LogRefusalsBeforeRouting(app *fiber.App, opts ...LogMiddlewareOption) {
 		fctx.SetUserValue(refusedBeforeRoutingKey{}, true)
 		render(fctx, err)
 
+		// No request was read (a TCP health check, a scan): no request to log.
+		if len(fctx.Request.Header.RawHeaders()) == 0 {
+			return
+		}
+
 		c := app.AcquireCtx(fctx)
 		defer app.ReleaseCtx(c)
 
@@ -306,16 +311,8 @@ func writeAccessLine(c fiber.Ctx, logger obslog.Logger, info *RequestInfo, cause
 		obslog.Int("http_latency_ms", int(info.Duration.Milliseconds())),
 	}
 
-	// Resolved from the context as it stands AFTER c.Next(), not from the
-	// one the request logger was bound to: the tenant is attested by a route-level
-	// middleware running behind the consumer's auth handler, so it does
-	// not exist yet when this middleware binds its request logger. The
-	// resolver reads the request AttrBag and OTel baggage, both of which
-	// that middleware writes through c.SetContext - so the access log
-	// agrees with the span attribute rather than reporting a second,
-	// separately derived notion of tenant. Absent tenant yields "", and
-	// no field is appended: an empty tenant.id would read as a real
-	// dimension to every log backend.
+	// Read from the context as it stands now, where route middleware attested
+	// the tenant; no tenant appends no field, never an empty tenant.id.
 	if tenantID := resolveTenantIDForTelemetry(c.Context()); tenantID != "" {
 		fields = append(fields, obslog.String(constant.AttrKeyTenantID, tenantID))
 	}

@@ -143,7 +143,6 @@ help:
 	@echo "  make lint-fix                    - Run linting with auto-fix on all packages"
 	@echo "  make format                      - Format code in all packages"
 	@echo "  make tidy                        - Clean dependencies"
-	@echo "  make check-tests                 - Verify test coverage for packages"
 	@echo "  make vet                         - Run go vet on all packages"
 	@echo "  make sec                         - Run security checks using gosec"
 	@echo "  make sec SARIF=1                 - Run security checks with SARIF output"
@@ -185,7 +184,6 @@ ci:
 	$(MAKE) lint-fix
 	$(MAKE) format
 	$(MAKE) tidy
-	$(MAKE) check-tests
 	$(MAKE) sec
 	$(MAKE) vet
 	$(MAKE) test-unit
@@ -493,12 +491,6 @@ format:
 	$(call check_command,gofmt,"Install Go from https://golang.org/doc/install")
 	@gofmt -w ./
 	@echo "$(GREEN)$(BOLD)[ok]$(NC) All go files formatted$(GREEN) ✔️$(NC)"
-
-.PHONY: check-tests
-check-tests:
-	$(call print_title,Verifying test coverage for packages)
-	go test -tags=unit -cover ./...
-	@echo "$(GREEN)$(BOLD)[ok]$(NC) Test coverage verification completed$(GREEN) ✔️$(NC)"
 
 .PHONY: vet
 vet:

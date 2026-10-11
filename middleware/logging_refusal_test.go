@@ -3,6 +3,7 @@
 package middleware
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -79,4 +80,18 @@ func TestLogRefusalsBeforeRoutingLeavesRoutedRequestsToWithHTTPLogging(t *testin
 	messages, _ := logger.snapshot()
 	require.Len(t, messages, 1)
 	assert.Contains(t, messages[0], `"POST /contracts" 200`)
+}
+
+// A connection closed before one byte (a TCP health check, a scan) still
+// reaches the server error handler; there is no request to log.
+func TestLogRefusalsBeforeRoutingSkipsConnectionsWithNoRequest(t *testing.T) {
+	t.Parallel()
+
+	logger := &captureLogger{}
+	app := refusalApp(logger)
+
+	app.Server().ErrorHandler(&fasthttp.RequestCtx{}, io.ErrUnexpectedEOF)
+
+	messages, _ := logger.snapshot()
+	assert.Empty(t, messages)
 }
