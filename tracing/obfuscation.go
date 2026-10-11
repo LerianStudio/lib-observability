@@ -46,16 +46,10 @@ type Redactor struct {
 	hmacKey   []byte // per-instance key used by HMAC-SHA256 hashing
 }
 
-// NewDefaultRedactor builds a mask-based redactor from default sensitive fields.
+// NewDefaultRedactor masks every field redaction.IsSensitiveField names: a rule
+// without a FieldPattern decides with the same matcher the log path uses.
 func NewDefaultRedactor() *Redactor {
-	fields := redaction.DefaultSensitiveFields()
-
-	rules := make([]RedactionRule, 0, len(fields))
-	for _, field := range fields {
-		rules = append(rules, RedactionRule{FieldPattern: `(?i)^` + regexp.QuoteMeta(field) + `$`, Action: RedactionMask})
-	}
-
-	r, err := NewRedactor(rules, cn.ObfuscatedValue)
+	r, err := NewRedactor([]RedactionRule{{Action: RedactionMask}}, cn.ObfuscatedValue)
 	if err != nil {
 		// Rule compilation failed unexpectedly. Return a conservative always-mask
 		// redactor rather than a no-rules redactor that would leak everything.
