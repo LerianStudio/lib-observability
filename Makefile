@@ -497,12 +497,7 @@ format:
 .PHONY: check-tests
 check-tests:
 	$(call print_title,Verifying test coverage for packages)
-	@if [ -f "./scripts/check-tests.sh" ]; then \
-		sh ./scripts/check-tests.sh; \
-	else \
-		echo "Running basic test coverage check..."; \
-		go test -cover ./...; \
-	fi
+	go test -tags=unit -cover ./...
 	@echo "$(GREEN)$(BOLD)[ok]$(NC) Test coverage verification completed$(GREEN) ✔️$(NC)"
 
 .PHONY: vet
