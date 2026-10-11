@@ -231,18 +231,9 @@ func normalizeFieldName(fieldName string) string {
 	return strings.ToLower(b.String())
 }
 
-// singularizeTokens folds a single trailing "s" off every token whose singular
-// could still match something, appends those singulars to tokens, and returns
-// the rejoined singular spelling of the whole name. It returns "" when no fold
-// applies -- the common case, which then costs no second matching pass.
-//
-// Only one trailing "s" is folded, so "es" and "ies" plurals ("addresses",
-// "cities") are out of scope, and the original tokens are kept alongside the
-// folded ones so "address", "status", "class", "bus" and "pass" keep their own
-// verdict. A fold is kept only when its singular is a token of some default
-// field, which is lossless: a plural can only match a pattern whose own tokens
-// include that singular. Callers passing extra field names fold everything,
-// since those names are not in the default vocabulary.
+// singularizeTokens folds one trailing "s" off each token whose singular is a default-field
+// token, and off the last token (the noun the field names) for any caller extra name too,
+// keeping the original tokens beside the folds. It returns "" when nothing folds.
 func singularizeTokens(tokens []string, foldAll bool) ([]string, string) {
 	known := sensitiveFieldTokens()
 
@@ -254,7 +245,7 @@ func singularizeTokens(tokens []string, foldAll bool) ([]string, string) {
 		}
 
 		singular := token[:len(token)-1]
-		if !foldAll && !known[singular] {
+		if !known[singular] && (!foldAll || i != len(tokens)-1) {
 			continue
 		}
 
