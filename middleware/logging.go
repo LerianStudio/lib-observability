@@ -284,6 +284,8 @@ func LogRefusalsBeforeRouting(app *fiber.App, opts ...LogMiddlewareOption) {
 			StatusCode: c.Response().StatusCode(),
 			Size:       responseBodySize(c),
 		})
+		// No route was resolved: name what the client called, owned past the pooled ctx.
+		info.URI = sanitizeLogValue(strings.Clone(c.Path()))
 		writeAccessLine(c, requestLogger(base, info.TraceID), info, err)
 	}
 }

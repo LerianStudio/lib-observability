@@ -54,7 +54,8 @@ func TestLogRefusalsBeforeRoutingLogsBodyLimitRefusalOnce(t *testing.T) {
 
 	messages, fields := logger.snapshot()
 	require.Len(t, messages, 1, "one access line, not WithHTTPLogging's 200 plus the hook's 413")
-	assert.Contains(t, messages[0], `"POST /{unmatched}" 413`)
+	assert.Contains(t, messages[0], `"POST /contracts" 413`)
+	assert.Contains(t, fields, obslog.String("http_path", "/contracts"), "the raw path the client called")
 	assert.Equal(t, []int{obslog.LevelWarn}, logger.levelSnapshot())
 	assert.Contains(t, fields, obslog.Int("http_status_code", http.StatusRequestEntityTooLarge))
 	assert.Contains(t, fields, obslog.String("http_method", http.MethodPost))
