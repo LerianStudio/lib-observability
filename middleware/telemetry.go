@@ -841,22 +841,17 @@ func (tm *TelemetryMiddleware) EndTracingSpans(c fiber.Ctx) error {
 		return ErrContextNotFound
 	}
 
-	originalCtx := c.Context()
-
-	defer finishOnPanic(func(_ int, cause error) { endRequestSpan(c, originalCtx, cause) })
+	defer finishOnPanic(func(_ int, cause error) { endRequestSpan(c, cause) })
 
 	err := normalizeHTTPHandlerError(c.Next())
-	endRequestSpan(c, originalCtx, nil)
+	endRequestSpan(c, nil)
 
 	return err
 }
 
 // endRequestSpan ends the span in c's context; a non-nil cause fails it first.
-func endRequestSpan(c fiber.Ctx, originalCtx context.Context, cause error) {
+func endRequestSpan(c fiber.Ctx, cause error) {
 	endCtx := c.Context()
-	if endCtx == nil {
-		endCtx = originalCtx
-	}
 
 	// WithTelemetry ends its own span after finalizing it; ending it here could,
 	// under Fiber's LIFO unwinding, run ahead of that finalization.
