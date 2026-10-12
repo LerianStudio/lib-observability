@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"slices"
 	"strconv"
 	"strings"
@@ -301,21 +302,38 @@ func WithHTTPLogging(opts ...LogMiddlewareOption) fiber.Handler {
 // refusedBeforeRoutingKey marks a request fasthttp refused before routing.
 type refusedBeforeRoutingKey struct{}
 
+// refusalCause keeps a pre-routing refusal's error chain but ends its text at
+// the first quote: fasthttp and net/textproto quote the client's bytes with %q.
+type refusalCause struct{ err error }
+
+func (r refusalCause) Error() string {
+	rule, _, _ := strings.Cut(r.err.Error(), `"`)
+
+	return strings.TrimRight(rule, " :")
+}
+
+func (r refusalCause) Unwrap() error { return r.err }
+
 // LogRefusalsBeforeRouting writes the access line of a request Fiber refuses
 // before routing (a body over BodyLimit, an unreadable request), which its
 // ErrorHandler renders after the Use chain ran with nothing decided. Call it
-// once after fiber.New, before serving, with WithHTTPLogging's options.
+// once after fiber.New, before serving, with WithHTTPLogging's options. The
+// ErrorHandler and the line get the cause cut where fasthttp quotes the client's bytes.
 func LogRefusalsBeforeRouting(app *fiber.App, opts ...LogMiddlewareOption) {
 	server := app.Server()
+	server.SecureErrorLogMessage = true
 	render := server.ErrorHandler
 	base := buildOpts(opts...).Logger
 
 	server.ErrorHandler = func(fctx *fasthttp.RequestCtx, err error) {
 		fctx.SetUserValue(refusedBeforeRoutingKey{}, true)
-		render(fctx, err)
 
-		// No request was read (a TCP health check, a scan): no request to log.
-		if len(fctx.Request.Header.RawHeaders()) == 0 {
+		cause := refusalCause{err: err}
+		render(fctx, cause)
+
+		// fasthttp hands over the bare read error when the connection sent no byte
+		// (a reset, ReadTimeout): no request to log. A body the network cut off looks the same.
+		if _, nothingRead := err.(*net.OpError); nothingRead { //nolint:errorlint // only the bare error means nothing was read
 			return
 		}
 
@@ -330,7 +348,14 @@ func LogRefusalsBeforeRouting(app *fiber.App, opts ...LogMiddlewareOption) {
 			StatusCode: c.Response().StatusCode(),
 			Size:       responseBodySize(c),
 		})
-		writeAccessLine(c, requestLogger(base, info.TraceID), info, err)
+
+		// A request fasthttp could not read, or reset after reading, has no headers
+		// and reads as its defaults (GET / HTTP/1.1), never what the client sent.
+		if len(fctx.Request.Header.RawHeaders()) == 0 {
+			info.Method, info.URI, info.Protocol = "-", "-", "-"
+		}
+
+		writeAccessLine(c, requestLogger(base, info.TraceID), info, cause)
 	}
 }
 

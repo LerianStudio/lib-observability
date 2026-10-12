@@ -3,11 +3,16 @@
 package middleware
 
 import (
+	"bufio"
+	"errors"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	obslog "github.com/LerianStudio/lib-observability/v4/log"
 	"github.com/gofiber/fiber/v3"
@@ -18,19 +23,18 @@ import (
 )
 
 // refusalApp mirrors the services' stack: recover outside the logger, the
-// finalizer inside it, and an ErrorHandler rendering a problem body.
+// finalizer inside it, and an ErrorHandler rendering the Fiber error's message
+// as lib-commons' FiberErrorHandler does.
 func refusalApp(logger *captureLogger) *fiber.App {
 	app := fiber.New(fiber.Config{
-		BodyLimit: 16,
+		BodyLimit: 64,
 		ErrorHandler: func(c fiber.Ctx, err error) error {
 			fiberErr := asFiberError(err)
 			if fiberErr == nil {
 				fiberErr = fiber.ErrInternalServerError
 			}
 
-			c.Set(fiber.HeaderContentType, "application/problem+json")
-
-			return c.Status(fiberErr.Code).SendString(`{"title":"` + fiberErr.Message + `","detail":"body over the limit"}`)
+			return c.Status(fiberErr.Code).JSON(fiber.Map{"code": fiberErr.Code, "title": "Request Failed", "message": fiberErr.Message})
 		},
 	})
 	LogRefusalsBeforeRouting(app, WithCustomLogger(logger))
@@ -42,13 +46,32 @@ func refusalApp(logger *captureLogger) *fiber.App {
 	return app
 }
 
+// serveOnLoopback serves app on a real loopback socket until the test ends.
+func serveOnLoopback(t *testing.T, app *fiber.App) string {
+	t.Helper()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+
+	served := make(chan error, 1)
+	go func() { served <- app.Listener(ln, fiber.ListenConfig{DisableStartupMessage: true}) }()
+	t.Cleanup(func() {
+		require.NoError(t, app.Shutdown())
+		if err := <-served; err != nil && !errors.Is(err, net.ErrClosed) {
+			require.NoError(t, err)
+		}
+	})
+
+	return ln.Addr().String()
+}
+
 func TestLogRefusalsBeforeRoutingLogsBodyLimitRefusalOnce(t *testing.T) {
 	t.Parallel()
 
 	logger := &captureLogger{}
 	app := refusalApp(logger)
 
-	req := httptest.NewRequest(http.MethodPost, "/contracts", strings.NewReader(strings.Repeat("a", 64)))
+	req := httptest.NewRequest(http.MethodPost, "/contracts", strings.NewReader(strings.Repeat("a", 128)))
 	_, err := app.Test(req)
 	// fasthttp closes the connection after a pre-routing refusal; app.Test reports it.
 	require.ErrorIs(t, err, fasthttp.ErrBodyTooLarge)
@@ -61,8 +84,8 @@ func TestLogRefusalsBeforeRoutingLogsBodyLimitRefusalOnce(t *testing.T) {
 	assert.Contains(t, fields, obslog.Int("http_status_code", http.StatusRequestEntityTooLarge))
 	assert.Contains(t, fields, obslog.String("http_method", http.MethodPost))
 	assert.Contains(t, fields, obslog.String("error", fasthttp.ErrBodyTooLarge.Error()))
-	assert.Contains(t, fields, obslog.String("problem_title", "Request Entity Too Large"))
-	assert.Contains(t, fields, obslog.String("problem_detail", "body over the limit"))
+	assert.Contains(t, fields, obslog.String("problem_title", "Request Failed"))
+	assert.Contains(t, fields, obslog.String("problem_detail", "Request Entity Too Large"))
 }
 
 func TestLogRefusalsBeforeRoutingLeavesRoutedRequestsToWithHTTPLogging(t *testing.T) {
@@ -82,15 +105,111 @@ func TestLogRefusalsBeforeRoutingLeavesRoutedRequestsToWithHTTPLogging(t *testin
 	assert.Contains(t, messages[0], `"POST /contracts" 200`)
 }
 
-// A connection closed before one byte (a TCP health check, a scan) still
-// reaches the server error handler; there is no request to log.
+// A request fasthttp cannot read, or resets after reading (a chunked body), is
+// refused with no headers left: the refusal is still logged, with no method,
+// path or protocol to name, and the client's bytes in neither its cause nor its problem.
+func TestLogRefusalsBeforeRoutingLogsUnreadableRequest(t *testing.T) {
+	t.Parallel()
+
+	const head = "POST /contracts HTTP/1.1\r\nHost: gw\r\nTransfer-Encoding: chunked\r\n\r\n"
+
+	noHost := "POST /v1/dict/keys/maria@example.com HTTP/1.1\r\n\r\n"
+	part := "--B\r\nMaria Silva maria@example.com\r\n\r\nv\r\n--B--\r\n"
+
+	tests := []struct {
+		name, request, wantError string
+		wantStatus               int
+	}{
+		{"chunked body over the limit", head + "80\r\n" + strings.Repeat("a", 128) + "\r\n0\r\n\r\n", fasthttp.ErrBodyTooLarge.Error(), http.StatusRequestEntityTooLarge},
+		{"malformed chunk", head + "zz\r\n", "empty hex number", http.StatusBadRequest},
+		{"head without host", noHost, fmt.Sprintf("error when reading request headers: missing required host header in request: buffer size=%d", len(noHost)), http.StatusBadRequest},
+		{"unencoded space in the query", "GET /contracts?name=Maria Silva&email=maria@example.com HTTP/1.1\r\nHost: gw\r\n\r\n", "error when reading request headers: unsupported http version", http.StatusBadRequest},
+		{"malformed multipart part", fmt.Sprintf("POST /contracts HTTP/1.1\r\nHost: gw\r\nContent-Type: multipart/form-data; boundary=B\r\nContent-Length: %d\r\n\r\n%s", len(part), part), "cannot read multipart/form-data body: malformed MIME header: missing colon", http.StatusBadRequest},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			logger := &captureLogger{}
+			app := refusalApp(logger)
+
+			conn, err := net.Dial("tcp", serveOnLoopback(t, app))
+			require.NoError(t, err)
+			defer func() { require.NoError(t, conn.Close()) }()
+
+			_, err = io.WriteString(conn, tt.request)
+			require.NoError(t, err)
+			require.NoError(t, conn.SetReadDeadline(time.Now().Add(5*time.Second)))
+
+			resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+			require.NoError(t, err)
+			require.NoError(t, resp.Body.Close())
+			require.Equal(t, tt.wantStatus, resp.StatusCode)
+
+			messages, fields := logger.snapshot()
+			require.Len(t, messages, 1)
+			assert.Contains(t, messages[0], `127.0.0.1 - - - [`)
+			assert.Contains(t, messages[0], fmt.Sprintf(`"- -" %d`, tt.wantStatus))
+			assert.Equal(t, []int{obslog.LevelWarn}, logger.levelSnapshot())
+			assert.Contains(t, fields, obslog.Int("http_status_code", tt.wantStatus))
+			assert.Contains(t, fields, obslog.String("http_method", "-"))
+			assert.Contains(t, fields, obslog.String("http_path", "-"))
+			assert.Contains(t, fields, obslog.String("error", tt.wantError))
+
+			for _, field := range fields {
+				if field.Key == "error" || strings.HasPrefix(field.Key, "problem_") {
+					assert.NotContains(t, fmt.Sprint(field.Value), "Silva", field.Key)
+					assert.NotContains(t, fmt.Sprint(field.Value), "maria@example.com", field.Key)
+				}
+			}
+		})
+	}
+}
+
+// A connection reset before its first byte (a TCP health check, a scan) reaches
+// the server error handler as a bare read error; no request to log.
 func TestLogRefusalsBeforeRoutingSkipsConnectionsWithNoRequest(t *testing.T) {
 	t.Parallel()
 
 	logger := &captureLogger{}
 	app := refusalApp(logger)
 
-	app.Server().ErrorHandler(&fasthttp.RequestCtx{}, io.ErrUnexpectedEOF)
+	accepted, handled := make(chan struct{}, 1), make(chan error, 1)
+	app.Server().ConnState = func(_ net.Conn, state fasthttp.ConnState) {
+		if state == fasthttp.StateNew {
+			accepted <- struct{}{}
+		}
+	}
+
+	hook := app.Server().ErrorHandler
+	app.Server().ErrorHandler = func(fctx *fasthttp.RequestCtx, err error) {
+		hook(fctx, err)
+		handled <- err
+	}
+
+	addr, err := net.ResolveTCPAddr("tcp", serveOnLoopback(t, app))
+	require.NoError(t, err)
+
+	conn, err := net.DialTCP("tcp", nil, addr)
+	require.NoError(t, err)
+
+	select {
+	case <-accepted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the server never accepted the connection")
+	}
+
+	require.NoError(t, conn.SetLinger(0)) // close with a reset, not a FIN
+	require.NoError(t, conn.Close())
+
+	select {
+	case err := <-handled:
+		var opErr *net.OpError
+		require.ErrorAs(t, err, &opErr)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the reset never reached the server error handler")
+	}
 
 	messages, _ := logger.snapshot()
 	assert.Empty(t, messages)
