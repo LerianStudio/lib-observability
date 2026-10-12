@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"slices"
 	"strconv"
 	"strings"
@@ -18,6 +19,7 @@ import (
 	"github.com/LerianStudio/lib-observability/v4/redaction"
 	"github.com/LerianStudio/lib-observability/v4/tracing"
 	"github.com/gofiber/fiber/v3"
+	"github.com/valyala/fasthttp"
 	"go.opentelemetry.io/otel/attribute"
 	"google.golang.org/grpc"
 )
@@ -209,7 +211,7 @@ func WithHTTPLogging(opts ...LogMiddlewareOption) fiber.Handler {
 	return func(c fiber.Ctx) error {
 		mid := buildOpts(opts...)
 
-		if isRouteExcludedFromList(c, mid.ExcludedRoutes) {
+		if c.Locals(refusedBeforeRoutingKey{}) != nil || isRouteExcludedFromList(c, mid.ExcludedRoutes) {
 			return nextWithNormalizedHTTPError(c)
 		}
 
@@ -221,69 +223,117 @@ func WithHTTPLogging(opts ...LogMiddlewareOption) fiber.Handler {
 
 		info := NewRequestInfo(c, false)
 
-		requestID := c.Get(headerID)
-		ctx := c.Context()
+		logger := requestLogger(mid.Logger, info.TraceID)
 
-		logger := mid.Logger.
-			With(obslog.String(headerID, info.TraceID)).
-			With(obslog.String("message_prefix", requestID+constant.LoggerDefaultSeparator))
-
-		ctx = observability.ContextWithLogger(ctx, logger)
+		ctx := observability.ContextWithLogger(c.Context(), logger)
 		ctx, recordedCause := observability.ContextWithErrorCause(ctx)
 		c.SetContext(ctx)
+
+		// A panic unwinds past the code below: log it as the 500 the outer
+		// recover middleware will render, then hand the panic on to it.
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				info.FinishRequestInfo(&ResponseMetricsWrapper{
+					Context:    c,
+					StatusCode: fiber.StatusInternalServerError,
+					Size:       unknownResponseBodySize,
+				})
+				writeAccessLine(c, logger, info, fmt.Errorf("panic: %v", recovered))
+				panic(recovered)
+			}
+		}()
 
 		returnedErr := c.Next()
 		statusCode, chainErr, handlerErr := resolveHTTPResponse(c, returnedErr)
 
-		rw := ResponseMetricsWrapper{
+		info.FinishRequestInfo(&ResponseMetricsWrapper{
 			Context:    c,
 			StatusCode: statusCode,
 			Size:       responseBodySize(c),
-		}
-
-		info.FinishRequestInfo(&rw)
-
-		fields := []obslog.Field{
-			obslog.Int("http_status_code", info.Status),
-			obslog.String("http_method", info.Method),
-			obslog.String("http_path", info.URI),
-			obslog.Int("http_latency_ms", int(info.Duration.Milliseconds())),
-		}
-
-		// Resolved from the context as it stands AFTER c.Next(), not from the
-		// one captured above: the tenant is attested by a route-level
-		// middleware running behind the consumer's auth handler, so it does
-		// not exist yet when this middleware binds its request logger. The
-		// resolver reads the request AttrBag and OTel baggage, both of which
-		// that middleware writes through c.SetContext - so the access log
-		// agrees with the span attribute rather than reporting a second,
-		// separately derived notion of tenant. Absent tenant yields "", and
-		// no field is appended: an empty tenant.id would read as a real
-		// dimension to every log backend.
-		if tenantID := resolveTenantIDForTelemetry(c.Context()); tenantID != "" {
-			fields = append(fields, obslog.String(constant.AttrKeyTenantID, tenantID))
-		}
-
-		var errorText string
-
-		if cause := cmp.Or(handlerErr, recordedCause()); cause != nil {
-			// tracing.ErrorMessage, not obslog.Err(cause) storing the raw
-			// error: the access log's error text must match what the span
-			// records - same Bearer/Basic redaction, same length cap - and
-			// must never hand a raw error straight to a log sink that a
-			// different backend might stringify unguarded.
-			errorText = tracing.ErrorMessage(cause)
-			fields = append(fields, obslog.String("error", errorText))
-		}
-
-		if info.Status >= fiber.StatusBadRequest {
-			fields = append(fields, problemFields(c, errorText)...)
-		}
-
-		logger.With(fields).Log(c.Context(), httpAccessLogLevel(info.Status), info.CLFString())
+		})
+		writeAccessLine(c, logger, info, cmp.Or(handlerErr, recordedCause()))
 
 		return chainErr
 	}
+}
+
+// refusedBeforeRoutingKey marks a request fasthttp refused before routing.
+type refusedBeforeRoutingKey struct{}
+
+// LogRefusalsBeforeRouting writes the access line of a request Fiber refuses
+// before routing (a body over BodyLimit, an unreadable request), which its
+// ErrorHandler renders after the Use chain ran with nothing decided. Call it
+// once after fiber.New, before serving, with WithHTTPLogging's options.
+func LogRefusalsBeforeRouting(app *fiber.App, opts ...LogMiddlewareOption) {
+	server := app.Server()
+	render := server.ErrorHandler
+	base := buildOpts(opts...).Logger
+
+	server.ErrorHandler = func(fctx *fasthttp.RequestCtx, err error) {
+		fctx.SetUserValue(refusedBeforeRoutingKey{}, true)
+		render(fctx, err)
+
+		// No request was read (a TCP health check, a scan): no request to log.
+		if len(fctx.Request.Header.RawHeaders()) == 0 {
+			return
+		}
+
+		c := app.AcquireCtx(fctx)
+		defer app.ReleaseCtx(c)
+
+		setRequestHeaderID(c)
+
+		info := NewRequestInfo(c, false)
+		info.FinishRequestInfo(&ResponseMetricsWrapper{
+			Context:    c,
+			StatusCode: c.Response().StatusCode(),
+			Size:       responseBodySize(c),
+		})
+		// No route was resolved: name what the client called, owned past the pooled ctx.
+		info.URI = sanitizeLogValue(strings.Clone(c.Path()))
+		writeAccessLine(c, requestLogger(base, info.TraceID), info, err)
+	}
+}
+
+func requestLogger(logger obslog.Logger, requestID string) obslog.Logger {
+	return logger.
+		With(obslog.String(headerID, requestID)).
+		With(obslog.String("message_prefix", requestID+constant.LoggerDefaultSeparator))
+}
+
+// writeAccessLine logs the access line of a finished request. cause, when
+// non-nil, is the error behind the status.
+func writeAccessLine(c fiber.Ctx, logger obslog.Logger, info *RequestInfo, cause error) {
+	fields := []obslog.Field{
+		obslog.Int("http_status_code", info.Status),
+		obslog.String("http_method", info.Method),
+		obslog.String("http_path", info.URI),
+		obslog.Int("http_latency_ms", int(info.Duration.Milliseconds())),
+	}
+
+	// Read from the context as it stands now, where route middleware attested
+	// the tenant; no tenant appends no field, never an empty tenant.id.
+	if tenantID := resolveTenantIDForTelemetry(c.Context()); tenantID != "" {
+		fields = append(fields, obslog.String(constant.AttrKeyTenantID, tenantID))
+	}
+
+	var errorText string
+
+	if cause != nil {
+		// tracing.ErrorMessage, not obslog.Err(cause) storing the raw
+		// error: the access log's error text must match what the span
+		// records - same Bearer/Basic redaction, same length cap - and
+		// must never hand a raw error straight to a log sink that a
+		// different backend might stringify unguarded.
+		errorText = tracing.ErrorMessage(cause)
+		fields = append(fields, obslog.String("error", errorText))
+	}
+
+	if info.Status >= fiber.StatusBadRequest {
+		fields = append(fields, problemFields(c, errorText)...)
+	}
+
+	logger.With(fields).Log(c.Context(), httpAccessLogLevel(info.Status), info.CLFString())
 }
 
 const (
