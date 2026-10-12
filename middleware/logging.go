@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	observability "github.com/LerianStudio/lib-observability/v4"
@@ -130,7 +131,9 @@ func buildOpts(opts ...LogMiddlewareOption) *logMiddleware {
 //
 // The URI field is resolved from Fiber's route match state. Callers that
 // construct it before c.Next() must invoke FinishRequestInfo after the
-// downstream handler completes to finalize the route template.
+// downstream handler completes: a matched route logs its template; an
+// unmatched request keeps a segment only when it is a literal of a route the
+// app registered, every other segment is "*", never the query.
 // The second argument is retained for source compatibility and has no effect.
 func NewRequestInfo(c fiber.Ctx, _ bool) *RequestInfo {
 	now := time.Now()
@@ -199,6 +202,53 @@ func (r *RequestInfo) FinishRequestInfo(rw *ResponseMetricsWrapper) {
 	r.Status = rw.StatusCode
 	r.Size = rw.Size
 	r.URI = resolvedHTTPRoute(rw.Context)
+
+	// Unmatched (a refusal before routing, a 404): the path's shape, query never.
+	if rw.Context != nil && !rw.Context.Matched() {
+		r.URI = pathShape(rw.Context)
+	}
+}
+
+// routeLiterals caches, per *fiber.App, the static segments of its registered routes.
+var routeLiterals sync.Map
+
+// pathShape keeps a segment of the request path only when it is a literal of a
+// route the app registered; every other one (an id, a token, a Pix key) is "*".
+// Join returns a string owned past the pooled request.
+func pathShape(c fiber.Ctx) string {
+	literals := appRouteLiterals(c.App())
+	segments := strings.Split(c.Path(), "/")
+
+	for i, segment := range segments {
+		if _, literal := literals[segment]; segment != "" && !literal {
+			segments[i] = "*"
+		}
+	}
+
+	return strings.Join(segments, "/")
+}
+
+// appRouteLiterals builds app's set on first use; a route registered later is
+// masked, the safe direction.
+func appRouteLiterals(app *fiber.App) map[string]struct{} {
+	if cached, ok := routeLiterals.Load(app); ok {
+		literals, _ := cached.(map[string]struct{})
+		return literals
+	}
+
+	literals := map[string]struct{}{}
+
+	for _, route := range app.GetRoutes() {
+		for segment := range strings.SplitSeq(route.Path, "/") {
+			if segment != "" && !strings.ContainsAny(segment, ":*+") {
+				literals[segment] = struct{}{}
+			}
+		}
+	}
+
+	routeLiterals.Store(app, literals)
+
+	return literals
 }
 
 // WithHTTPLogging logs Fiber HTTP access requests.
@@ -229,19 +279,10 @@ func WithHTTPLogging(opts ...LogMiddlewareOption) fiber.Handler {
 		ctx, recordedCause := observability.ContextWithErrorCause(ctx)
 		c.SetContext(ctx)
 
-		// A panic unwinds past the code below: log it as the 500 the outer
-		// recover middleware will render, then hand the panic on to it.
-		defer func() {
-			if recovered := recover(); recovered != nil {
-				info.FinishRequestInfo(&ResponseMetricsWrapper{
-					Context:    c,
-					StatusCode: fiber.StatusInternalServerError,
-					Size:       unknownResponseBodySize,
-				})
-				writeAccessLine(c, logger, info, fmt.Errorf("panic: %v", recovered))
-				panic(recovered)
-			}
-		}()
+		defer finishOnPanic(func(statusCode int, cause error) {
+			info.FinishRequestInfo(&ResponseMetricsWrapper{Context: c, StatusCode: statusCode, Size: unknownResponseBodySize})
+			writeAccessLine(c, logger, info, cause)
+		})
 
 		returnedErr := c.Next()
 		statusCode, chainErr, handlerErr := resolveHTTPResponse(c, returnedErr)
@@ -289,9 +330,16 @@ func LogRefusalsBeforeRouting(app *fiber.App, opts ...LogMiddlewareOption) {
 			StatusCode: c.Response().StatusCode(),
 			Size:       responseBodySize(c),
 		})
-		// No route was resolved: name what the client called, owned past the pooled ctx.
-		info.URI = sanitizeLogValue(strings.Clone(c.Path()))
 		writeAccessLine(c, requestLogger(base, info.TraceID), info, err)
+	}
+}
+
+// finishOnPanic, deferred, finishes a request whose handler panicked as the
+// 500 the outer recover middleware will render, then hands the panic on to it.
+func finishOnPanic(finish func(statusCode int, cause error)) {
+	if recovered := recover(); recovered != nil {
+		finish(fiber.StatusInternalServerError, fmt.Errorf("panic: %v", recovered))
+		panic(recovered)
 	}
 }
 
