@@ -38,8 +38,7 @@ func TestWithTelemetrySkipsRequestRefusedBeforeRouting(t *testing.T) {
 
 // Services mount recover OUTSIDE telemetry, so a panic unwinds through it.
 func TestWithTelemetryEndsPanickingRequestAsServerErrorAndRepanics(t *testing.T) {
-	t.Parallel()
-
+	// Starts the process-wide metrics collector: stays sequential.
 	tel, reader, spanExp := newTelemetryHarness(t)
 
 	var outerRecovered any

@@ -97,24 +97,35 @@ func TestLogRefusalsBeforeRoutingSkipsConnectionsWithNoRequest(t *testing.T) {
 }
 
 // A global middleware (a rate limiter mounted with Use) refuses before any
-// route matches: the line names what the client called, query dropped.
-func TestWithHTTPLoggingNamesRawPathOfRefusalBeforeAnyRoute(t *testing.T) {
+// route matches: the line names the endpoint by its shape, values as "*".
+func TestWithHTTPLoggingNamesPathShapeOfRefusalBeforeAnyRoute(t *testing.T) {
 	t.Parallel()
 
-	logger := &captureLogger{}
-	app := fiber.New()
-	app.Use(WithHTTPLogging(WithCustomLogger(logger)))
-	app.Use(func(fiber.Ctx) error { return fiber.ErrTooManyRequests })
-	app.Get("/v1/orders/:id", func(c fiber.Ctx) error { return c.SendStatus(http.StatusOK) })
+	tests := []struct{ target, wantPath string }{
+		{"/v1/orders/12345?page=2", "/v1/orders/*"},
+		{"/v1/dict/keys/holder@example.com", "/v1/dict/keys/*"},
+		{"/reset/Zx9qT2rLmW8vK3pN", "/reset/*"},
+	}
 
-	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/v1/orders/12345?page=2", nil))
-	require.NoError(t, err)
-	defer func() { require.NoError(t, resp.Body.Close()) }()
+	for _, tt := range tests {
+		t.Run(tt.target, func(t *testing.T) {
+			t.Parallel()
 
-	require.Equal(t, http.StatusTooManyRequests, resp.StatusCode)
+			logger := &captureLogger{}
+			app := fiber.New()
+			app.Use(WithHTTPLogging(WithCustomLogger(logger)))
+			app.Use(func(fiber.Ctx) error { return fiber.ErrTooManyRequests })
 
-	messages, fields := logger.snapshot()
-	require.Len(t, messages, 1)
-	assert.Contains(t, messages[0], `"GET /v1/orders/12345" 429`)
-	assert.Contains(t, fields, obslog.String("http_path", "/v1/orders/12345"))
+			resp, err := app.Test(httptest.NewRequest(http.MethodGet, tt.target, nil))
+			require.NoError(t, err)
+			defer func() { require.NoError(t, resp.Body.Close()) }()
+
+			require.Equal(t, http.StatusTooManyRequests, resp.StatusCode)
+
+			messages, fields := logger.snapshot()
+			require.Len(t, messages, 1)
+			assert.Contains(t, messages[0], `"GET `+tt.wantPath+`" 429`)
+			assert.Contains(t, fields, obslog.String("http_path", tt.wantPath))
+		})
+	}
 }

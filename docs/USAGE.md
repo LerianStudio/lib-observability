@@ -139,7 +139,7 @@ logger, err := zap.New(zap.Config{
 
 Emite: `http.server.request.duration` (s) e `http.server.active_requests`.
 
-Nome do span SERVER, `url.path` e métricas usam somente o template da rota resolvido depois do handler (ex.: `/v1/accounts/:id`); requests sem rota usam `/{unmatched}` e `http.route` fica ausente. Na linha de acesso, rota casada loga o template; request sem rota (um 404, uma recusa de middleware global como rate limiter) loga o path cru, para nomear o endpoint que o cliente chamou. A query string nunca é retida. `X-Tenant-Id` não entra em logs, spans nem labels das métricas HTTP.
+Nome do span SERVER, `url.path` e métricas usam somente o template da rota resolvido depois do handler (ex.: `/v1/accounts/:id`); requests sem rota usam `/{unmatched}` e `http.route` fica ausente. Na linha de acesso, rota casada loga o template; request sem rota (um 404, uma recusa de middleware global como rate limiter) loga o formato do path, literais de rota mantidos e valores como `*` (`/v1/dict/keys/*`), para nomear o endpoint que o cliente chamou sem id, token ou chave Pix. A query string nunca é retida. `X-Tenant-Id` não entra em logs, spans nem labels das métricas HTTP.
 
 ```go
 import "github.com/LerianStudio/lib-observability/v4/middleware"

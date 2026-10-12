@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -131,7 +132,7 @@ func buildOpts(opts ...LogMiddlewareOption) *logMiddleware {
 // The URI field is resolved from Fiber's route match state. Callers that
 // construct it before c.Next() must invoke FinishRequestInfo after the
 // downstream handler completes: a matched route logs its template, an
-// unmatched request its raw path, the query never.
+// unmatched request its path's shape (values as "*"), the query never.
 // The second argument is retained for source compatibility and has no effect.
 func NewRequestInfo(c fiber.Ctx, _ bool) *RequestInfo {
 	now := time.Now()
@@ -201,11 +202,26 @@ func (r *RequestInfo) FinishRequestInfo(rw *ResponseMetricsWrapper) {
 	r.Size = rw.Size
 	r.URI = resolvedHTTPRoute(rw.Context)
 
-	// Unmatched (a refusal before routing, a 404): the raw path, query never,
-	// owned since the line may outlive the pooled request buffer.
+	// Unmatched (a refusal before routing, a 404): the path's shape, query never.
 	if rw.Context != nil && !rw.Context.Matched() {
-		r.URI = sanitizeLogValue(strings.Clone(rw.Context.Path()))
+		r.URI = pathShape(rw.Context.Path())
 	}
+}
+
+// routeLiteral matches a path segment that names a resource, never a value.
+var routeLiteral = regexp.MustCompile(`^(?:[a-z][a-z_-]*|v[0-9]+)$`)
+
+// pathShape keeps a path's route literals and writes every other segment (an
+// id, a token, a Pix key) as "*". Join returns a string owned past the request.
+func pathShape(path string) string {
+	segments := strings.Split(path, "/")
+	for i, segment := range segments {
+		if segment != "" && !routeLiteral.MatchString(segment) {
+			segments[i] = "*"
+		}
+	}
+
+	return strings.Join(segments, "/")
 }
 
 // WithHTTPLogging logs Fiber HTTP access requests.

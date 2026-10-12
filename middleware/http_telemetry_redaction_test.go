@@ -75,7 +75,7 @@ func TestSetSpanAttributeForParam_HTTPParameter_RedactsSensitiveValue(t *testing
 	}
 }
 
-func TestHTTPMiddleware_AdversarialRequest_TemplateOnTelemetryNoQueryOnLog(t *testing.T) {
+func TestHTTPMiddleware_AdversarialRequest_EmitsNoPathOrQueryValues(t *testing.T) {
 	// WithTelemetry starts the process-wide runtime metrics collector, so this
 	// test must remain sequential under the repository's global-state rule.
 	const (
@@ -93,7 +93,7 @@ func TestHTTPMiddleware_AdversarialRequest_TemplateOnTelemetryNoQueryOnLog(t *te
 		registerRoute   bool
 		wantStatus      int
 		wantRoute       string
-		wantLogPath     string // an unmatched request is logged by its raw path, query dropped
+		wantLogPath     string // an unmatched request is logged by its path's shape
 		wantMetricRoute bool
 	}{
 		{
@@ -111,7 +111,7 @@ func TestHTTPMiddleware_AdversarialRequest_TemplateOnTelemetryNoQueryOnLog(t *te
 			registerRoute:   false,
 			wantStatus:      http.StatusNotFound,
 			wantRoute:       unmatchedRoute,
-			wantLogPath:     "/scanner/" + dynamicContract,
+			wantLogPath:     "/scanner/*",
 			wantMetricRoute: false,
 		},
 	}
@@ -143,11 +143,8 @@ func TestHTTPMiddleware_AdversarialRequest_TemplateOnTelemetryNoQueryOnLog(t *te
 			require.Len(t, messages, 1)
 			assert.Contains(t, messages[0], "GET "+test.wantLogPath+`"`)
 			assert.Contains(t, fields, obslog.String("http_path", test.wantLogPath))
-			logForbidden := []string{afterCursor, throughCursor, unauthenticatedTenant, "after", "through"}
-			if test.wantLogPath == routeTemplate {
-				logForbidden = append(logForbidden, dynamicContract)
-			}
-			assertLogHasNoForbiddenHTTPData(t, messages, fields, logForbidden...)
+			assertLogHasNoForbiddenHTTPData(t, messages, fields,
+				dynamicContract, afterCursor, throughCursor, unauthenticatedTenant, "after", "through")
 
 			spans := spanExporter.GetSpans()
 			require.Len(t, spans, 1)
