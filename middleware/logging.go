@@ -130,7 +130,8 @@ func buildOpts(opts ...LogMiddlewareOption) *logMiddleware {
 //
 // The URI field is resolved from Fiber's route match state. Callers that
 // construct it before c.Next() must invoke FinishRequestInfo after the
-// downstream handler completes to finalize the route template.
+// downstream handler completes: a matched route logs its template, an
+// unmatched request its raw path, the query never.
 // The second argument is retained for source compatibility and has no effect.
 func NewRequestInfo(c fiber.Ctx, _ bool) *RequestInfo {
 	now := time.Now()
@@ -198,22 +199,13 @@ func (r *RequestInfo) FinishRequestInfo(rw *ResponseMetricsWrapper) {
 
 	r.Status = rw.StatusCode
 	r.Size = rw.Size
-	r.URI = accessLogPath(rw.Context)
-}
+	r.URI = resolvedHTTPRoute(rw.Context)
 
-// accessLogPath names a matched request by its route template and an unmatched
-// one (a refusal before routing, a 404) by the raw path it called, query dropped.
-func accessLogPath(c fiber.Ctx) string {
-	if c == nil {
-		return unmatchedRouteTemplate
+	// Unmatched (a refusal before routing, a 404): the raw path, query never,
+	// owned since the line may outlive the pooled request buffer.
+	if rw.Context != nil && !rw.Context.Matched() {
+		r.URI = sanitizeLogValue(strings.Clone(rw.Context.Path()))
 	}
-
-	if route, matched := routeAttribute(c); matched {
-		return route
-	}
-
-	// Owned: the line may outlive the pooled request buffer.
-	return sanitizeLogValue(strings.Clone(c.Path()))
 }
 
 // WithHTTPLogging logs Fiber HTTP access requests.

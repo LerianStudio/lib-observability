@@ -971,22 +971,18 @@ func isNilSpan(span trace.Span) bool {
 // maxSpanErrorLength is the maximum length for error messages written to span status/events.
 const maxSpanErrorLength = 1024
 
-// spanErrorElision joins the head and tail of a message cut to maxSpanErrorLength.
-const spanErrorElision = " [...] "
-
 // credentialSchemePattern matches one or more Bearer or Basic scheme words and the credential after them.
 var credentialSchemePattern = regexp.MustCompile(`(?i)\b((?:bearer|basic)(?:\s+(?:bearer|basic))*)\s+\S+`)
 
 // sanitizeSpanMessage sanitizes an error message for span output:
 // - Redacts the credential after every Bearer or Basic scheme word, keeping the word
-// - Truncates to a safe maximum length, keeping head and tail: the innermost
-//   cause of a wrapped chain sits at its end
+// - Truncates to a safe maximum length, keeping head and tail (where a chain's root cause sits)
 func sanitizeSpanMessage(msg string) string {
 	msg = credentialSchemePattern.ReplaceAllString(msg, "${1} [REDACTED]")
 
 	if len(msg) > maxSpanErrorLength {
-		keep := (maxSpanErrorLength - len(spanErrorElision)) / 2
-		msg = strings.ToValidUTF8(msg[:keep], "") + spanErrorElision + strings.ToValidUTF8(msg[len(msg)-keep:], "")
+		keep := (maxSpanErrorLength - len(" [...] ")) / 2
+		msg = strings.ToValidUTF8(msg[:keep], "") + " [...] " + strings.ToValidUTF8(msg[len(msg)-keep:], "")
 	}
 
 	return msg

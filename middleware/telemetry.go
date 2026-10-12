@@ -438,8 +438,7 @@ func (tm *TelemetryMiddleware) withTelemetry(
 
 		// Fiber's pre-routing pass renders its status after this chain;
 		// LogRefusalsBeforeRouting logs it, telemetry records no false 200.
-		if c.Locals(refusedBeforeRoutingKey{}) != nil ||
-			(len(excludedRoutes) > 0 && isRouteExcludedFromList(c, excludedRoutes)) {
+		if c.Locals(refusedBeforeRoutingKey{}) != nil || isRouteExcludedFromList(c, excludedRoutes) {
 			return nextWithNormalizedHTTPError(c)
 		}
 
