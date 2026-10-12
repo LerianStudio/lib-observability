@@ -229,19 +229,10 @@ func WithHTTPLogging(opts ...LogMiddlewareOption) fiber.Handler {
 		ctx, recordedCause := observability.ContextWithErrorCause(ctx)
 		c.SetContext(ctx)
 
-		// A panic unwinds past the code below: log it as the 500 the outer
-		// recover middleware will render, then hand the panic on to it.
-		defer func() {
-			if recovered := recover(); recovered != nil {
-				info.FinishRequestInfo(&ResponseMetricsWrapper{
-					Context:    c,
-					StatusCode: fiber.StatusInternalServerError,
-					Size:       unknownResponseBodySize,
-				})
-				writeAccessLine(c, logger, info, fmt.Errorf("panic: %v", recovered))
-				panic(recovered)
-			}
-		}()
+		defer finishOnPanic(func(statusCode int, cause error) {
+			info.FinishRequestInfo(&ResponseMetricsWrapper{Context: c, StatusCode: statusCode, Size: unknownResponseBodySize})
+			writeAccessLine(c, logger, info, cause)
+		})
 
 		returnedErr := c.Next()
 		statusCode, chainErr, handlerErr := resolveHTTPResponse(c, returnedErr)
@@ -292,6 +283,15 @@ func LogRefusalsBeforeRouting(app *fiber.App, opts ...LogMiddlewareOption) {
 		// No route was resolved: name what the client called, owned past the pooled ctx.
 		info.URI = sanitizeLogValue(strings.Clone(c.Path()))
 		writeAccessLine(c, requestLogger(base, info.TraceID), info, err)
+	}
+}
+
+// finishOnPanic, deferred, finishes a request whose handler panicked as the
+// 500 the outer recover middleware will render, then hands the panic on to it.
+func finishOnPanic(finish func(statusCode int, cause error)) {
+	if recovered := recover(); recovered != nil {
+		finish(fiber.StatusInternalServerError, fmt.Errorf("panic: %v", recovered))
+		panic(recovered)
 	}
 }
 

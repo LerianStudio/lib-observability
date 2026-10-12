@@ -436,7 +436,10 @@ func (tm *TelemetryMiddleware) withTelemetry(
 			return nextWithNormalizedHTTPError(c)
 		}
 
-		if len(excludedRoutes) > 0 && isRouteExcludedFromList(c, excludedRoutes) {
+		// Fiber's pre-routing pass renders its status after this chain;
+		// LogRefusalsBeforeRouting logs it, telemetry records no false 200.
+		if c.Locals(refusedBeforeRoutingKey{}) != nil ||
+			(len(excludedRoutes) > 0 && isRouteExcludedFromList(c, excludedRoutes)) {
 			return nextWithNormalizedHTTPError(c)
 		}
 
@@ -469,14 +472,19 @@ func (tm *TelemetryMiddleware) withTelemetry(
 		activeDone := trackActiveRequest(c.Context(), instruments.activeRequests, method)
 		defer activeDone()
 
-		if effectiveTelemetry.TracerProvider == nil {
-			returnedErr := c.Next()
-			statusCode, chainErr, _ := resolveHTTPResponse(c, returnedErr)
-
+		recordMetrics := func(statusCode int) {
 			durationSeconds := time.Since(requestStart).Seconds()
 
 			recordHTTPServerDuration(c, instruments.duration, method, durationSeconds, statusCode)
 			recordAuthenticatedTenantHTTPMetrics(c, instruments, durationSeconds, statusCode)
+		}
+
+		if effectiveTelemetry.TracerProvider == nil {
+			defer finishOnPanic(func(statusCode int, _ error) { recordMetrics(statusCode) })
+
+			returnedErr := c.Next()
+			statusCode, chainErr, _ := resolveHTTPResponse(c, returnedErr)
+			recordMetrics(statusCode)
 
 			return chainErr
 		}
@@ -538,23 +546,24 @@ func (tm *TelemetryMiddleware) withTelemetry(
 			}
 		}
 
+		finish := func(statusCode int, handlerErr error) {
+			applyTelemetrySpanAttributes(span, c, statusCode, telemetryRequestAttrs{
+				method:         method,
+				methodOriginal: methodOriginal,
+				methodReplaced: methodReplaced,
+				protocol:       protocol,
+				hostname:       hostname,
+				userAgent:      userAgent,
+				handlerErr:     handlerErr,
+			})
+			recordMetrics(statusCode)
+		}
+		// Deferred after endState.End, so it finalizes the span before End runs.
+		defer finishOnPanic(finish)
+
 		returnedErr := c.Next()
 		statusCode, chainErr, handlerErr := resolveHTTPResponse(c, returnedErr)
-
-		applyTelemetrySpanAttributes(span, c, statusCode, telemetryRequestAttrs{
-			method:         method,
-			methodOriginal: methodOriginal,
-			methodReplaced: methodReplaced,
-			protocol:       protocol,
-			hostname:       hostname,
-			userAgent:      userAgent,
-			handlerErr:     handlerErr,
-		})
-
-		durationSeconds := time.Since(requestStart).Seconds()
-
-		recordHTTPServerDuration(c, instruments.duration, method, durationSeconds, statusCode)
-		recordAuthenticatedTenantHTTPMetrics(c, instruments, durationSeconds, statusCode)
+		finish(statusCode, handlerErr)
 
 		return chainErr
 	}
