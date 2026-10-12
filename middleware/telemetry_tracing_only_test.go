@@ -334,7 +334,7 @@ func TestWithTracingOnly_ExcludedRouteRecordsNothing(t *testing.T) {
 	assert.Empty(t, metricNames, "an excluded route must produce no metric")
 }
 
-// TestWithTracingOnly_EndTracingSpansKeepsTheOwnedSpan mirrors the owned-flag
+// TestWithTracingOnly_EndTracingSpansKeepsTheOwnedSpan mirrors the owned-span
 // contract for the tracing-only handler: with EndTracingSpans also registered,
 // the span is still ended exactly once and still carries the post-c.Next
 // finalization (route-template name and http.route), which a premature end by

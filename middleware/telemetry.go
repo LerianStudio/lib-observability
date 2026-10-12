@@ -14,7 +14,6 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	observability "github.com/LerianStudio/lib-observability/v4"
@@ -214,57 +213,9 @@ const (
 // ErrContextNotFound is returned when a required Fiber context is nil.
 var ErrContextNotFound = errors.New("fiber context not found")
 
-type spanEndStateKey struct{}
-
-type spanEndState struct {
-	span trace.Span
-	// once guarantees End() is idempotent. It is retained (not superseded by
-	// owned) because it still protects the foreign/handler-created span on the
-	// HTTP and gRPC fallback paths (where owned==false and the span may be
-	// ended both by a defer and by the End middleware). owned resolves ordering
-	// (which middleware ends the span, and that it happens after finalization);
-	// once resolves double-end.
-	once sync.Once
-	// owned marks the span as exclusively finalized/ended by the middleware
-	// that created it (WithTelemetry). When set, EndTracingSpans must NOT end
-	// it: the owning middleware ends it via its own deferred End() AFTER
-	// applying the route template name and post-c.Next() attributes. This
-	// removes the ordering hazard where a separately-registered EndTracingSpans
-	// unwinds first (Fiber LIFO) and ends the span before finalization,
-	// silently discarding http.route/status/error.type and the span rename -
-	// measured: the span ends up named "GET" instead of "GET /orders/:id".
-	owned bool
-}
-
-func newSpanEndState(span trace.Span) *spanEndState {
-	return &spanEndState{span: span}
-}
-
-func (s *spanEndState) End() {
-	if s == nil || s.span == nil {
-		return
-	}
-
-	s.once.Do(func() { s.span.End() })
-}
-
-func contextWithSpanEndState(ctx context.Context, state *spanEndState) context.Context {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-
-	return context.WithValue(ctx, spanEndStateKey{}, state)
-}
-
-func spanEndStateFromContext(ctx context.Context) *spanEndState {
-	if ctx == nil {
-		return nil
-	}
-
-	state, _ := ctx.Value(spanEndStateKey{}).(*spanEndState)
-
-	return state
-}
+// ownedSpanKey marks a request context whose server span WithTelemetry ends
+// itself, after renaming and finalizing it; EndTracingSpans leaves it alone.
+type ownedSpanKey struct{}
 
 // TelemetryMiddleware wraps Fiber HTTP handlers with tracing and metrics setup.
 type TelemetryMiddleware struct {
@@ -362,7 +313,7 @@ func (tm *TelemetryMiddleware) WithTelemetry(tl *tracing.Telemetry, excludedRout
 // correlation-id request header echoed on the response, the identity-filtered
 // server span (named by the route template once routing resolves, carrying the
 // HTTP semantic-convention attributes and status), the excluded-route skip
-// list, and the tracer / metric-factory / span-end-state context wiring that
+// list, and the tracer / metric-factory / owned-span context wiring that
 // downstream handlers and EndTracingSpans depend on.
 //
 // It records none of the middleware's own metrics, even when the Telemetry has
@@ -528,18 +479,12 @@ func (tm *TelemetryMiddleware) withTelemetry(
 		spanStartCtx := identityFilteredSpanStartContext(traceCtx)
 		_, span := tracer.Start(spanStartCtx, spanName, trace.WithSpanKind(trace.SpanKindServer))
 		ctx = trace.ContextWithSpan(traceCtx, span)
-		endState := newSpanEndState(span)
-		// WithTelemetry owns this span's lifecycle: it is the sole ender (via the
-		// defer below, which fires on return AFTER applyTelemetrySpanAttributes
-		// has renamed and finalized the span). EndTracingSpans, if also
-		// registered, detects the owned flag and does NOT end it.
-		endState.owned = true
 
-		defer endState.End()
+		defer span.End()
 
 		ctx = observability.ContextWithTracer(ctx, effectiveTelemetry.ServiceTracer())
 		ctx = observability.ContextWithMetricFactory(ctx, effectiveTelemetry.MetricsFactory)
-		ctx = contextWithSpanEndState(ctx, endState)
+		ctx = context.WithValue(ctx, ownedSpanKey{}, true)
 		c.SetContext(ctx)
 
 		// The collector emits process-wide CPU and memory gauges through the
@@ -563,7 +508,7 @@ func (tm *TelemetryMiddleware) withTelemetry(
 			})
 			recordMetrics(statusCode)
 		}
-		// Deferred after endState.End, so it finalizes the span before End runs.
+		// Deferred after span.End, so it finalizes the span before End runs.
 		defer finishOnPanic(finish)
 
 		returnedErr := c.Next()
@@ -913,14 +858,9 @@ func endRequestSpan(c fiber.Ctx, originalCtx context.Context, cause error) {
 		endCtx = originalCtx
 	}
 
-	if state := spanEndStateFromContext(endCtx); state != nil {
-		// WithTelemetry ends the span it owns after renaming and finalizing it;
-		// ending it here could, under Fiber's LIFO unwinding, run ahead of that.
-		if !state.owned {
-			tracing.HandleSpanError(state.span, "", cause)
-			state.End()
-		}
-
+	// WithTelemetry ends its own span after finalizing it; ending it here could,
+	// under Fiber's LIFO unwinding, run ahead of that finalization.
+	if endCtx != nil && endCtx.Value(ownedSpanKey{}) != nil {
 		return
 	}
 
