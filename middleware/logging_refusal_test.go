@@ -95,3 +95,26 @@ func TestLogRefusalsBeforeRoutingSkipsConnectionsWithNoRequest(t *testing.T) {
 	messages, _ := logger.snapshot()
 	assert.Empty(t, messages)
 }
+
+// A global middleware (a rate limiter mounted with Use) refuses before any
+// route matches: the line names what the client called, query dropped.
+func TestWithHTTPLoggingNamesRawPathOfRefusalBeforeAnyRoute(t *testing.T) {
+	t.Parallel()
+
+	logger := &captureLogger{}
+	app := fiber.New()
+	app.Use(WithHTTPLogging(WithCustomLogger(logger)))
+	app.Use(func(fiber.Ctx) error { return fiber.ErrTooManyRequests })
+	app.Get("/v1/orders/:id", func(c fiber.Ctx) error { return c.SendStatus(http.StatusOK) })
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/v1/orders/12345?page=2", nil))
+	require.NoError(t, err)
+	defer func() { require.NoError(t, resp.Body.Close()) }()
+
+	require.Equal(t, http.StatusTooManyRequests, resp.StatusCode)
+
+	messages, fields := logger.snapshot()
+	require.Len(t, messages, 1)
+	assert.Contains(t, messages[0], `"GET /v1/orders/12345" 429`)
+	assert.Contains(t, fields, obslog.String("http_path", "/v1/orders/12345"))
+}

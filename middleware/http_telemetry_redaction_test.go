@@ -93,6 +93,7 @@ func TestHTTPMiddleware_AdversarialRequest_EmitsOnlyRouteTemplate(t *testing.T) 
 		registerRoute   bool
 		wantStatus      int
 		wantRoute       string
+		wantLogPath     string // an unmatched request is logged by its raw path, query dropped
 		wantMetricRoute bool
 	}{
 		{
@@ -101,6 +102,7 @@ func TestHTTPMiddleware_AdversarialRequest_EmitsOnlyRouteTemplate(t *testing.T) 
 			registerRoute:   true,
 			wantStatus:      http.StatusOK,
 			wantRoute:       routeTemplate,
+			wantLogPath:     routeTemplate,
 			wantMetricRoute: true,
 		},
 		{
@@ -109,6 +111,7 @@ func TestHTTPMiddleware_AdversarialRequest_EmitsOnlyRouteTemplate(t *testing.T) 
 			registerRoute:   false,
 			wantStatus:      http.StatusNotFound,
 			wantRoute:       unmatchedRoute,
+			wantLogPath:     "/scanner/" + dynamicContract,
 			wantMetricRoute: false,
 		},
 	}
@@ -138,10 +141,10 @@ func TestHTTPMiddleware_AdversarialRequest_EmitsOnlyRouteTemplate(t *testing.T) 
 
 			messages, fields := logger.snapshot()
 			require.Len(t, messages, 1)
-			assert.Contains(t, messages[0], "GET "+test.wantRoute)
-			assert.Contains(t, fields, obslog.String("http_path", test.wantRoute))
+			assert.Contains(t, messages[0], "GET "+test.wantLogPath+`"`)
+			assert.Contains(t, fields, obslog.String("http_path", test.wantLogPath))
 			assertLogHasNoForbiddenHTTPData(t, messages, fields,
-				dynamicContract, afterCursor, throughCursor, unauthenticatedTenant, "after", "through")
+				afterCursor, throughCursor, unauthenticatedTenant, "after", "through")
 
 			spans := spanExporter.GetSpans()
 			require.Len(t, spans, 1)

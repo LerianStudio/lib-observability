@@ -198,7 +198,22 @@ func (r *RequestInfo) FinishRequestInfo(rw *ResponseMetricsWrapper) {
 
 	r.Status = rw.StatusCode
 	r.Size = rw.Size
-	r.URI = resolvedHTTPRoute(rw.Context)
+	r.URI = accessLogPath(rw.Context)
+}
+
+// accessLogPath names a matched request by its route template and an unmatched
+// one (a refusal before routing, a 404) by the raw path it called, query dropped.
+func accessLogPath(c fiber.Ctx) string {
+	if c == nil {
+		return unmatchedRouteTemplate
+	}
+
+	if route, matched := routeAttribute(c); matched {
+		return route
+	}
+
+	// Owned: the line may outlive the pooled request buffer.
+	return sanitizeLogValue(strings.Clone(c.Path()))
 }
 
 // WithHTTPLogging logs Fiber HTTP access requests.
@@ -280,8 +295,6 @@ func LogRefusalsBeforeRouting(app *fiber.App, opts ...LogMiddlewareOption) {
 			StatusCode: c.Response().StatusCode(),
 			Size:       responseBodySize(c),
 		})
-		// No route was resolved: name what the client called, owned past the pooled ctx.
-		info.URI = sanitizeLogValue(strings.Clone(c.Path()))
 		writeAccessLine(c, requestLogger(base, info.TraceID), info, err)
 	}
 }
