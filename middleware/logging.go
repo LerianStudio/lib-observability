@@ -7,10 +7,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	observability "github.com/LerianStudio/lib-observability/v4"
@@ -131,8 +131,9 @@ func buildOpts(opts ...LogMiddlewareOption) *logMiddleware {
 //
 // The URI field is resolved from Fiber's route match state. Callers that
 // construct it before c.Next() must invoke FinishRequestInfo after the
-// downstream handler completes: a matched route logs its template, an
-// unmatched request its path's shape (values as "*"), the query never.
+// downstream handler completes: a matched route logs its template; an
+// unmatched request keeps a segment only when it is a literal of a route the
+// app registered, every other segment is "*", never the query.
 // The second argument is retained for source compatibility and has no effect.
 func NewRequestInfo(c fiber.Ctx, _ bool) *RequestInfo {
 	now := time.Now()
@@ -204,24 +205,50 @@ func (r *RequestInfo) FinishRequestInfo(rw *ResponseMetricsWrapper) {
 
 	// Unmatched (a refusal before routing, a 404): the path's shape, query never.
 	if rw.Context != nil && !rw.Context.Matched() {
-		r.URI = pathShape(rw.Context.Path())
+		r.URI = pathShape(rw.Context)
 	}
 }
 
-// routeLiteral matches a path segment that names a resource, never a value.
-var routeLiteral = regexp.MustCompile(`^(?:[a-z][a-z_-]*|v[0-9]+)$`)
+// routeLiterals caches, per *fiber.App, the static segments of its registered routes.
+var routeLiterals sync.Map
 
-// pathShape keeps a path's route literals and writes every other segment (an
-// id, a token, a Pix key) as "*". Join returns a string owned past the request.
-func pathShape(path string) string {
-	segments := strings.Split(path, "/")
+// pathShape keeps a segment of the request path only when it is a literal of a
+// route the app registered; every other one (an id, a token, a Pix key) is "*".
+// Join returns a string owned past the pooled request.
+func pathShape(c fiber.Ctx) string {
+	literals := appRouteLiterals(c.App())
+	segments := strings.Split(c.Path(), "/")
+
 	for i, segment := range segments {
-		if segment != "" && !routeLiteral.MatchString(segment) {
+		if _, literal := literals[segment]; segment != "" && !literal {
 			segments[i] = "*"
 		}
 	}
 
 	return strings.Join(segments, "/")
+}
+
+// appRouteLiterals builds app's set on first use; a route registered later is
+// masked, the safe direction.
+func appRouteLiterals(app *fiber.App) map[string]struct{} {
+	if cached, ok := routeLiterals.Load(app); ok {
+		literals, _ := cached.(map[string]struct{})
+		return literals
+	}
+
+	literals := map[string]struct{}{}
+
+	for _, route := range app.GetRoutes() {
+		for segment := range strings.SplitSeq(route.Path, "/") {
+			if segment != "" && !strings.ContainsAny(segment, ":*+") {
+				literals[segment] = struct{}{}
+			}
+		}
+	}
+
+	routeLiterals.Store(app, literals)
+
+	return literals
 }
 
 // WithHTTPLogging logs Fiber HTTP access requests.

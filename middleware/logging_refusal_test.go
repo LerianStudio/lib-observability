@@ -105,6 +105,7 @@ func TestWithHTTPLoggingNamesPathShapeOfRefusalBeforeAnyRoute(t *testing.T) {
 		{"/v1/orders/12345?page=2", "/v1/orders/*"},
 		{"/v1/dict/keys/holder@example.com", "/v1/dict/keys/*"},
 		{"/reset/Zx9qT2rLmW8vK3pN", "/reset/*"},
+		{"/reset/secret", "/reset/*"},
 	}
 
 	for _, tt := range tests {
@@ -115,6 +116,11 @@ func TestWithHTTPLoggingNamesPathShapeOfRefusalBeforeAnyRoute(t *testing.T) {
 			app := fiber.New()
 			app.Use(WithHTTPLogging(WithCustomLogger(logger)))
 			app.Use(func(fiber.Ctx) error { return fiber.ErrTooManyRequests })
+
+			ok := func(c fiber.Ctx) error { return c.SendStatus(http.StatusOK) }
+			app.Get("/v1/orders/:id", ok)
+			app.Get("/v1/dict/keys/:key", ok)
+			app.Post("/reset/:token", ok)
 
 			resp, err := app.Test(httptest.NewRequest(http.MethodGet, tt.target, nil))
 			require.NoError(t, err)

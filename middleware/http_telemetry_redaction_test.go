@@ -111,7 +111,7 @@ func TestHTTPMiddleware_AdversarialRequest_EmitsNoPathOrQueryValues(t *testing.T
 			registerRoute:   false,
 			wantStatus:      http.StatusNotFound,
 			wantRoute:       unmatchedRoute,
-			wantLogPath:     "/scanner/*",
+			wantLogPath:     "/*/*", // "scanner" is no registered route's literal
 			wantMetricRoute: false,
 		},
 	}
