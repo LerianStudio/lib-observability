@@ -140,6 +140,7 @@ func TestLogRefusalsBeforeRoutingLogsUnreadableRequest(t *testing.T) {
 
 			_, err = io.WriteString(conn, tt.request)
 			require.NoError(t, err)
+			require.NoError(t, conn.SetReadDeadline(time.Now().Add(5*time.Second)))
 
 			resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
 			require.NoError(t, err)
