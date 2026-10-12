@@ -883,41 +883,44 @@ func classifyHTTPErrorType(statusCode int) string {
 	return ""
 }
 
-// EndTracingSpans is a middleware that ends the tracing spans.
+// EndTracingSpans is a middleware that ends the tracing spans, as failed when
+// the chain panics, before the panic reaches the outer recover middleware.
 func (tm *TelemetryMiddleware) EndTracingSpans(c fiber.Ctx) error {
 	if c == nil {
 		return ErrContextNotFound
 	}
 
 	originalCtx := c.Context()
-	err := normalizeHTTPHandlerError(c.Next())
 
+	defer finishOnPanic(func(_ int, cause error) { endRequestSpan(c, originalCtx, cause) })
+
+	err := normalizeHTTPHandlerError(c.Next())
+	endRequestSpan(c, originalCtx, nil)
+
+	return err
+}
+
+// endRequestSpan ends the span in c's context; a non-nil cause fails it first.
+func endRequestSpan(c fiber.Ctx, originalCtx context.Context, cause error) {
 	endCtx := c.Context()
 	if endCtx == nil {
 		endCtx = originalCtx
 	}
 
 	if state := spanEndStateFromContext(endCtx); state != nil {
-		// A span owned by WithTelemetry is finalized and ended by WithTelemetry
-		// itself (after it applies the route template name and post-c.Next
-		// attributes). Ending it here would be a no-op at best and, due to
-		// Fiber's LIFO unwinding, could race ahead of that finalization and
-		// discard the rename/attributes. Return early and let the owning
-		// middleware end it.
-		if state.owned {
-			return err
+		// WithTelemetry ends the span it owns after renaming and finalizing it;
+		// ending it here could, under Fiber's LIFO unwinding, run ahead of that.
+		if !state.owned {
+			tracing.HandleSpanError(state.span, "", cause)
+			state.End()
 		}
 
-		state.End()
-
-		return err
+		return
 	}
 
-	if endCtx != nil {
-		trace.SpanFromContext(endCtx).End()
-	}
-
-	return err
+	span := trace.SpanFromContext(endCtx)
+	tracing.HandleSpanError(span, "", cause)
+	span.End()
 }
 
 // setRequestHeaderID ensures the Fiber request carries a unique correlation ID header.
