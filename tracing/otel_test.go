@@ -5,9 +5,11 @@ package tracing
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	observability "github.com/LerianStudio/lib-observability/v4"
 	constant "github.com/LerianStudio/lib-observability/v4/constants"
@@ -2116,4 +2118,20 @@ func TestSanitizeSpanMessage_RedactsSchemeCredentials(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The innermost cause of a wrapped chain sits at its end; the cap keeps it.
+func TestErrorMessage_KeepsHeadAndTailOfLongChain(t *testing.T) {
+	t.Parallel()
+
+	root := errors.New("tenant db refused: ç")
+	err := fmt.Errorf("create contract: %w", fmt.Errorf("%s: %w", strings.Repeat("ç", 1000), root))
+
+	got := ErrorMessage(err)
+
+	assert.LessOrEqual(t, len(got), maxSpanErrorLength)
+	assert.True(t, utf8.ValidString(got))
+	assert.True(t, strings.HasPrefix(got, "create contract: ç"), got)
+	assert.True(t, strings.HasSuffix(got, ": "+root.Error()), got)
+	assert.Contains(t, got, "ç [...] ç")
 }
