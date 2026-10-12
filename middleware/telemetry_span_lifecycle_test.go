@@ -138,7 +138,7 @@ func TestSpanLifecycle_MiddlewareOrderings(t *testing.T) {
 		app, rec := telemetryTestApp(t, func(app *fiber.App, mid *TelemetryMiddleware, tel *tracing.Telemetry) {
 			app.Use(mid.WithTelemetry(tel))
 			// EndTracingSpans as the last (innermost) handler unwinds FIRST
-			// under LIFO — the exact hazard the owned flag neutralizes.
+			// under LIFO — the exact hazard the owned-span mark neutralizes.
 			app.Get(route, mid.EndTracingSpans, handler)
 		})
 
@@ -185,7 +185,7 @@ func TestSpanLifecycle_MiddlewareOrderings(t *testing.T) {
 		app, rec := telemetryTestApp(t, func(app *fiber.App, mid *TelemetryMiddleware, tel *tracing.Telemetry) {
 			// Pathological order: EndTracingSpans is the OUTERMOST middleware, so
 			// it unwinds LAST — after WithTelemetry has finalized and ended its
-			// own owned span. EndTracingSpans must find the owned state and skip
+			// own span. EndTracingSpans must find the owned-span mark and skip
 			// it (no double-end, no lost finalization).
 			app.Use(mid.EndTracingSpans)
 			app.Use(mid.WithTelemetry(tel))
