@@ -20,9 +20,9 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
-// Fiber runs the Use chain before rendering a pre-routing 413; telemetry must
-// not record that pass as a 200 on /{unmatched}.
-func TestWithTelemetrySkipsRequestRefusedBeforeRouting(t *testing.T) {
+// Fiber runs the Use chain before rendering a pre-routing 413: no span for that
+// pass, and the duration metric counts the 413 itself, without a route.
+func TestWithTelemetryCountsRequestRefusedBeforeRoutingWithoutSpan(t *testing.T) {
 	t.Parallel()
 
 	tel, reader, spanExp := newTelemetryHarness(t)
@@ -36,7 +36,21 @@ func TestWithTelemetrySkipsRequestRefusedBeforeRouting(t *testing.T) {
 	require.ErrorIs(t, err, fasthttp.ErrBodyTooLarge)
 
 	assert.Empty(t, spanExp.GetSpans())
-	assert.Nil(t, findDurationHistogram(t, reader))
+
+	dp := findDurationHistogram(t, reader)
+	require.NotNil(t, dp, "the refusal must be counted")
+	assert.EqualValues(t, 1, dp.Count)
+
+	status, ok := dp.Attributes.Value(attribute.Key("http.response.status_code"))
+	require.True(t, ok)
+	assert.EqualValues(t, http.StatusRequestEntityTooLarge, status.AsInt64())
+
+	method, ok := dp.Attributes.Value(attribute.Key("http.request.method"))
+	require.True(t, ok)
+	assert.Equal(t, http.MethodPost, method.AsString())
+
+	_, hasRoute := dp.Attributes.Value(attribute.Key("http.route"))
+	assert.False(t, hasRoute)
 }
 
 // Services mount recover OUTSIDE telemetry, so a panic unwinds through it.

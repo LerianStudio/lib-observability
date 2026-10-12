@@ -23,6 +23,7 @@ import (
 	"github.com/gofiber/fiber/v3"
 	"github.com/valyala/fasthttp"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 	"google.golang.org/grpc"
 )
 
@@ -302,6 +303,9 @@ func WithHTTPLogging(opts ...LogMiddlewareOption) fiber.Handler {
 // refusedBeforeRoutingKey marks a request fasthttp refused before routing.
 type refusedBeforeRoutingKey struct{}
 
+// refusedBeforeRouting is that mark; WithTelemetry leaves its duration histogram in it.
+type refusedBeforeRouting struct{ duration metric.Float64Histogram }
+
 // refusalCause keeps a pre-routing refusal's error chain but ends its text at
 // the first quote: fasthttp and net/textproto quote the client's bytes with %q.
 type refusalCause struct{ err error }
@@ -326,8 +330,10 @@ func LogRefusalsBeforeRouting(app *fiber.App, opts ...LogMiddlewareOption) {
 	base := buildOpts(opts...).Logger
 
 	server.ErrorHandler = func(fctx *fasthttp.RequestCtx, err error) {
-		fctx.SetUserValue(refusedBeforeRoutingKey{}, true)
+		refusal := &refusedBeforeRouting{}
+		fctx.SetUserValue(refusedBeforeRoutingKey{}, refusal)
 
+		start := time.Now()
 		cause := refusalCause{err: err}
 		render(fctx, cause)
 
@@ -355,6 +361,8 @@ func LogRefusalsBeforeRouting(app *fiber.App, opts ...LogMiddlewareOption) {
 			info.Method, info.URI, info.Protocol = "-", "-", "-"
 		}
 
+		method, _, _ := normalizeHTTPMethod(info.Method)
+		recordHTTPServerDuration(c, refusal.duration, method, time.Since(start).Seconds(), info.Status)
 		writeAccessLine(c, requestLogger(base, info.TraceID), info, cause)
 	}
 }
