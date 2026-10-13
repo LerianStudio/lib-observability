@@ -1057,16 +1057,13 @@ var credentialSchemePattern = regexp.MustCompile(`(?i)\b((?:bearer|basic)(?:\s+(
 
 // sanitizeSpanMessage sanitizes an error message for span output:
 // - Redacts the credential after every Bearer or Basic scheme word, keeping the word
-// - Truncates to a safe maximum length
+// - Truncates to a safe maximum length, keeping head and tail (where a chain's root cause sits)
 func sanitizeSpanMessage(msg string) string {
 	msg = credentialSchemePattern.ReplaceAllString(msg, "${1} [REDACTED]")
 
 	if len(msg) > maxSpanErrorLength {
-		msg = msg[:maxSpanErrorLength]
-		// Ensure valid UTF-8 after truncation
-		if !utf8.ValidString(msg) {
-			msg = strings.ToValidUTF8(msg, "")
-		}
+		keep := (maxSpanErrorLength - len(" [...] ")) / 2
+		msg = strings.ToValidUTF8(msg[:keep], "") + " [...] " + strings.ToValidUTF8(msg[len(msg)-keep:], "")
 	}
 
 	return msg

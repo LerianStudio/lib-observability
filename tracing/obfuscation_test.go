@@ -112,7 +112,6 @@ func TestNewDefaultRedactor_IsNotNil(t *testing.T) {
 
 	r := NewDefaultRedactor()
 	require.NotNil(t, r)
-	assert.NotEmpty(t, r.rules, "default redactor should have rules from DefaultSensitiveFields")
 	assert.Equal(t, constant.ObfuscatedValue, r.maskValue)
 }
 

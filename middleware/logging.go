@@ -1,18 +1,29 @@
 package middleware
 
 import (
+	"bytes"
+	"cmp"
 	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	observability "github.com/LerianStudio/lib-observability/v4"
 	constant "github.com/LerianStudio/lib-observability/v4/constants"
 	"github.com/LerianStudio/lib-observability/v4/grpcmiddleware"
 	obslog "github.com/LerianStudio/lib-observability/v4/log"
+	"github.com/LerianStudio/lib-observability/v4/redaction"
 	"github.com/LerianStudio/lib-observability/v4/tracing"
 	"github.com/gofiber/fiber/v3"
+	"github.com/valyala/fasthttp"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 	"google.golang.org/grpc"
 )
 
@@ -122,7 +133,9 @@ func buildOpts(opts ...LogMiddlewareOption) *logMiddleware {
 //
 // The URI field is resolved from Fiber's route match state. Callers that
 // construct it before c.Next() must invoke FinishRequestInfo after the
-// downstream handler completes to finalize the route template.
+// downstream handler completes: a matched route logs its template; an
+// unmatched request keeps a segment only when it is a literal of a route the
+// app registered, every other segment is "*", never the query.
 // The second argument is retained for source compatibility and has no effect.
 func NewRequestInfo(c fiber.Ctx, _ bool) *RequestInfo {
 	now := time.Now()
@@ -191,6 +204,53 @@ func (r *RequestInfo) FinishRequestInfo(rw *ResponseMetricsWrapper) {
 	r.Status = rw.StatusCode
 	r.Size = rw.Size
 	r.URI = resolvedHTTPRoute(rw.Context)
+
+	// Unmatched (a refusal before routing, a 404): the path's shape, query never.
+	if rw.Context != nil && !rw.Context.Matched() {
+		r.URI = pathShape(rw.Context)
+	}
+}
+
+// routeLiterals caches, per *fiber.App, the static segments of its registered routes.
+var routeLiterals sync.Map
+
+// pathShape keeps a segment of the request path only when it is a literal of a
+// route the app registered; every other one (an id, a token, a Pix key) is "*".
+// Join returns a string owned past the pooled request.
+func pathShape(c fiber.Ctx) string {
+	literals := appRouteLiterals(c.App())
+	segments := strings.Split(c.Path(), "/")
+
+	for i, segment := range segments {
+		if _, literal := literals[segment]; segment != "" && !literal {
+			segments[i] = "*"
+		}
+	}
+
+	return strings.Join(segments, "/")
+}
+
+// appRouteLiterals builds app's set on first use; a route registered later is
+// masked, the safe direction.
+func appRouteLiterals(app *fiber.App) map[string]struct{} {
+	if cached, ok := routeLiterals.Load(app); ok {
+		literals, _ := cached.(map[string]struct{})
+		return literals
+	}
+
+	literals := map[string]struct{}{}
+
+	for _, route := range app.GetRoutes() {
+		for segment := range strings.SplitSeq(route.Path, "/") {
+			if segment != "" && !strings.ContainsAny(segment, ":*+") {
+				literals[segment] = struct{}{}
+			}
+		}
+	}
+
+	routeLiterals.Store(app, literals)
+
+	return literals
 }
 
 // WithHTTPLogging logs Fiber HTTP access requests.
@@ -203,7 +263,7 @@ func WithHTTPLogging(opts ...LogMiddlewareOption) fiber.Handler {
 	return func(c fiber.Ctx) error {
 		mid := buildOpts(opts...)
 
-		if isRouteExcludedFromList(c, mid.ExcludedRoutes) {
+		if c.Locals(refusedBeforeRoutingKey{}) != nil || isRouteExcludedFromList(c, mid.ExcludedRoutes) {
 			return nextWithNormalizedHTTPError(c)
 		}
 
@@ -215,61 +275,286 @@ func WithHTTPLogging(opts ...LogMiddlewareOption) fiber.Handler {
 
 		info := NewRequestInfo(c, false)
 
-		requestID := c.Get(headerID)
-		ctx := c.Context()
+		logger := requestLogger(mid.Logger, info.TraceID)
 
-		logger := mid.Logger.
-			With(obslog.String(headerID, info.TraceID)).
-			With(obslog.String("message_prefix", requestID+constant.LoggerDefaultSeparator))
-
-		ctx = observability.ContextWithLogger(ctx, logger)
+		ctx := observability.ContextWithLogger(c.Context(), logger)
+		ctx, recordedCause := observability.ContextWithErrorCause(ctx)
 		c.SetContext(ctx)
+
+		defer finishOnPanic(func(statusCode int, cause error) {
+			info.FinishRequestInfo(&ResponseMetricsWrapper{Context: c, StatusCode: statusCode, Size: unknownResponseBodySize})
+			writeAccessLine(c, logger, info, cause)
+		})
 
 		returnedErr := c.Next()
 		statusCode, chainErr, handlerErr := resolveHTTPResponse(c, returnedErr)
 
-		rw := ResponseMetricsWrapper{
+		info.FinishRequestInfo(&ResponseMetricsWrapper{
 			Context:    c,
 			StatusCode: statusCode,
 			Size:       responseBodySize(c),
-		}
-
-		info.FinishRequestInfo(&rw)
-
-		fields := []obslog.Field{
-			obslog.Int("http_status_code", info.Status),
-			obslog.String("http_method", info.Method),
-			obslog.String("http_path", info.URI),
-			obslog.Int("http_latency_ms", int(info.Duration.Milliseconds())),
-		}
-
-		// Resolved from the context as it stands AFTER c.Next(), not from the
-		// one captured above: the tenant is attested by a route-level
-		// middleware running behind the consumer's auth handler, so it does
-		// not exist yet when this middleware binds its request logger. The
-		// resolver reads the request AttrBag and OTel baggage, both of which
-		// that middleware writes through c.SetContext - so the access log
-		// agrees with the span attribute rather than reporting a second,
-		// separately derived notion of tenant. Absent tenant yields "", and
-		// no field is appended: an empty tenant.id would read as a real
-		// dimension to every log backend.
-		if tenantID := resolveTenantIDForTelemetry(c.Context()); tenantID != "" {
-			fields = append(fields, obslog.String(constant.AttrKeyTenantID, tenantID))
-		}
-
-		if handlerErr != nil {
-			// tracing.ErrorMessage, not obslog.Err(handlerErr) storing the raw
-			// error: the access log's error text must match what the span
-			// records - same Bearer/Basic redaction, same length cap - and
-			// must never hand a raw error straight to a log sink that a
-			// different backend might stringify unguarded.
-			fields = append(fields, obslog.String("error", tracing.ErrorMessage(handlerErr)))
-		}
-
-		logger.With(fields).Log(c.Context(), httpAccessLogLevel(info.Status), info.CLFString())
+		})
+		writeAccessLine(c, logger, info, cmp.Or(handlerErr, recordedCause()))
 
 		return chainErr
 	}
+}
+
+// refusedBeforeRoutingKey marks a request fasthttp refused before routing.
+type refusedBeforeRoutingKey struct{}
+
+// refusedBeforeRouting is that mark; WithTelemetry leaves its duration histogram in it.
+type refusedBeforeRouting struct{ duration metric.Float64Histogram }
+
+// refusalCause keeps a pre-routing refusal's error chain but ends its text at
+// the first quote: fasthttp and net/textproto quote the client's bytes with %q.
+type refusalCause struct{ err error }
+
+func (r refusalCause) Error() string {
+	rule, _, _ := strings.Cut(r.err.Error(), `"`)
+
+	return strings.TrimRight(rule, " :")
+}
+
+func (r refusalCause) Unwrap() error { return r.err }
+
+// LogRefusalsBeforeRouting writes the access line of a request Fiber refuses
+// before routing (a body over BodyLimit, an unreadable request), which its
+// ErrorHandler renders after the Use chain ran with nothing decided. Call it
+// once after fiber.New, before serving, with WithHTTPLogging's options. The
+// ErrorHandler and the line get the cause cut where fasthttp quotes the client's bytes.
+func LogRefusalsBeforeRouting(app *fiber.App, opts ...LogMiddlewareOption) {
+	server := app.Server()
+	server.SecureErrorLogMessage = true
+	render := server.ErrorHandler
+	base := buildOpts(opts...).Logger
+
+	server.ErrorHandler = func(fctx *fasthttp.RequestCtx, err error) {
+		refusal := &refusedBeforeRouting{}
+		fctx.SetUserValue(refusedBeforeRoutingKey{}, refusal)
+
+		start := time.Now()
+		cause := refusalCause{err: err}
+		render(fctx, cause)
+
+		// fasthttp hands over the bare read error when the connection sent no byte
+		// (a reset, ReadTimeout): no request to log. A body the network cut off looks the same.
+		if _, nothingRead := err.(*net.OpError); nothingRead { //nolint:errorlint // only the bare error means nothing was read
+			return
+		}
+
+		c := app.AcquireCtx(fctx)
+		defer app.ReleaseCtx(c)
+
+		setRequestHeaderID(c)
+
+		info := NewRequestInfo(c, false)
+		info.FinishRequestInfo(&ResponseMetricsWrapper{
+			Context:    c,
+			StatusCode: c.Response().StatusCode(),
+			Size:       responseBodySize(c),
+		})
+
+		// A request fasthttp could not read, or reset after reading, has no headers
+		// and reads as its defaults (GET / HTTP/1.1), never what the client sent.
+		if len(fctx.Request.Header.RawHeaders()) == 0 {
+			info.Method, info.URI, info.Protocol = "-", "-", "-"
+		}
+
+		method, _, _ := normalizeHTTPMethod(info.Method)
+		recordHTTPServerDuration(c, refusal.duration, method, time.Since(start).Seconds(), info.Status)
+		writeAccessLine(c, requestLogger(base, info.TraceID), info, cause)
+	}
+}
+
+// finishOnPanic, deferred, finishes a request whose handler panicked as the
+// 500 the outer recover middleware will render, then hands the panic on to it.
+func finishOnPanic(finish func(statusCode int, cause error)) {
+	if recovered := recover(); recovered != nil {
+		finish(fiber.StatusInternalServerError, fmt.Errorf("panic: %v", recovered))
+		panic(recovered)
+	}
+}
+
+func requestLogger(logger obslog.Logger, requestID string) obslog.Logger {
+	return logger.
+		With(obslog.String(headerID, requestID)).
+		With(obslog.String("message_prefix", requestID+constant.LoggerDefaultSeparator))
+}
+
+// writeAccessLine logs the access line of a finished request. cause, when
+// non-nil, is the error behind the status.
+func writeAccessLine(c fiber.Ctx, logger obslog.Logger, info *RequestInfo, cause error) {
+	fields := []obslog.Field{
+		obslog.Int("http_status_code", info.Status),
+		obslog.String("http_method", info.Method),
+		obslog.String("http_path", info.URI),
+		obslog.Int("http_latency_ms", int(info.Duration.Milliseconds())),
+	}
+
+	// Read from the context as it stands now, where route middleware attested
+	// the tenant; no tenant appends no field, never an empty tenant.id.
+	if tenantID := resolveTenantIDForTelemetry(c.Context()); tenantID != "" {
+		fields = append(fields, obslog.String(constant.AttrKeyTenantID, tenantID))
+	}
+
+	var errorText string
+
+	if cause != nil {
+		// tracing.ErrorMessage, not obslog.Err(cause) storing the raw
+		// error: the access log's error text must match what the span
+		// records - same Bearer/Basic redaction, same length cap - and
+		// must never hand a raw error straight to a log sink that a
+		// different backend might stringify unguarded.
+		errorText = tracing.ErrorMessage(cause)
+		fields = append(fields, obslog.String("error", errorText))
+	}
+
+	if info.Status >= fiber.StatusBadRequest {
+		fields = append(fields, problemFields(c, errorText)...)
+	}
+
+	logger.With(fields).Log(c.Context(), httpAccessLogLevel(info.Status), info.CLFString())
+}
+
+const (
+	maxProblemBodyBytes = 8 << 10
+	maxProblemValueLen  = 128
+	maxProblemInputLen  = 64
+	maxProblemErrors    = 10
+)
+
+// problemBody declares only what the access line may log. Code is raw because
+// lib-commons writes the HTTP status there as a number, Huma-style bodies a string.
+type problemBody struct {
+	Code    json.RawMessage `json:"code"`
+	Title   string          `json:"title"`
+	Detail  string          `json:"detail"`
+	Message string          `json:"message"`
+	Errors  []struct {
+		Location string          `json:"location"`
+		Message  string          `json:"message"`
+		Value    json.RawMessage `json:"value"`
+	} `json:"errors"`
+}
+
+// problemFields reads the reason a refused request was given from the body
+// the client received. A stream, an encoded, an oversized or an undecodable
+// body adds nothing, nor does text that repeats the line's error field.
+func problemFields(c fiber.Ctx, errorText string) []obslog.Field {
+	response := c.Response()
+	if response.IsBodyStream() || len(response.Header.ContentEncoding()) > 0 {
+		return nil
+	}
+
+	body := response.Body()
+	if len(body) == 0 || len(body) > maxProblemBodyBytes {
+		return nil
+	}
+
+	// A JSON-shaped body goes through the struct whatever its label, so the
+	// mask on a sensitive location cannot be bypassed through problem_text.
+	mediaType, _, _ := strings.Cut(string(response.Header.ContentType()), ";")
+	trimmed := bytes.TrimSpace(body)
+	jsonShaped := strings.HasSuffix(strings.ToLower(strings.TrimSpace(mediaType)), "json") ||
+		bytes.HasPrefix(trimmed, []byte("{")) || bytes.HasPrefix(trimmed, []byte("["))
+
+	if !jsonShaped {
+		text := problemValue(string(body))
+		if text == problemValue(errorText) {
+			return nil
+		}
+
+		return []obslog.Field{obslog.String("problem_text", text)}
+	}
+
+	var problem problemBody
+	if err := json.Unmarshal(body, &problem); err != nil {
+		return nil
+	}
+
+	var fields []obslog.Field
+
+	add := func(key, value string) {
+		if value != "" {
+			fields = append(fields, obslog.String(key, problemValue(value)))
+		}
+	}
+
+	add("problem_code", rawJSONText(problem.Code))
+	add("problem_title", problem.Title)
+
+	if detail := cmp.Or(problem.Detail, problem.Message); detail != problem.Title {
+		add("problem_detail", detail)
+	}
+
+	if len(problem.Errors) == 0 {
+		return fields
+	}
+
+	kept := problem.Errors[:min(len(problem.Errors), maxProblemErrors)]
+	entries := make([]string, 0, len(kept))
+
+	for _, detail := range kept {
+		entries = append(entries, problemError(detail.Location, detail.Message, detail.Value))
+	}
+
+	fields = append(fields, obslog.Any("problem_errors", entries))
+
+	if dropped := len(problem.Errors) - len(kept); dropped > 0 {
+		fields = append(fields, obslog.Int("problem_errors_dropped", dropped))
+	}
+
+	return fields
+}
+
+// problemError renders one errors[] entry as "<location>: <message> value=<raw JSON>".
+func problemError(location, message string, value json.RawMessage) string {
+	segments := strings.FieldsFunc(location, func(r rune) bool { return r == '.' || r == '[' || r == ']' })
+	// Any segment naming a redacted field masks: body.holder.email, header.Authorization.
+	masked := slices.ContainsFunc(segments, func(segment string) bool { return redaction.IsSensitiveField(segment) })
+
+	// Cut at ": " drops Huma's quoted parse error, which echoes the masked input.
+	if masked {
+		message, _, _ = strings.Cut(message, ": ")
+	}
+
+	entry := problemValue(location + ": " + message)
+
+	switch {
+	case len(value) == 0 || len(segments) < 2 || value[0] == '{' || value[0] == '[':
+		// Absent; a bare root (body, query) whose value is the raw request; or a
+		// container whose keys the mask cannot see.
+		return entry
+	case masked:
+		return entry + " value=[REDACTED]"
+	default:
+		return entry + " value=" + clip(problemValue(string(value)), maxProblemInputLen)
+	}
+}
+
+// problemValue applies the error field's redaction and the line's sanitizing, then the cap.
+func problemValue(raw string) string {
+	return clip(sanitizeLogValue(tracing.ErrorMessage(errors.New(raw))), maxProblemValueLen)
+}
+
+// clip cuts s to at most n bytes without splitting a rune.
+func clip(s string, n int) string {
+	if len(s) > n {
+		s = strings.ToValidUTF8(s[:n], "")
+	}
+
+	return s
+}
+
+// rawJSONText renders a JSON string as its text and any other JSON value as written.
+func rawJSONText(raw json.RawMessage) string {
+	var text string
+	if json.Unmarshal(raw, &text) == nil {
+		return text
+	}
+
+	return string(raw)
 }
 
 func responseBodySize(c fiber.Ctx) int {

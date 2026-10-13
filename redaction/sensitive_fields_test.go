@@ -193,6 +193,10 @@ func TestIsSensitiveFieldExtraMatchesPlural(t *testing.T) {
 	assert.True(t, IsSensitiveField("tenant_secrets", "tenant_secret"))
 	assert.False(t, IsSensitiveField("tenants", "organization"))
 
+	// An extra name folds its plural only on the noun the field names, its last token.
+	assert.True(t, IsSensitiveField("user_documents", "document"))
+	assert.False(t, IsSensitiveField("documents_count", "document"))
+
 	// Extra names spelled in camelCase, dotted or dashed form match their plural.
 	assert.True(t, IsSensitiveField("ledgerIds", "ledgerId"))
 	assert.True(t, IsSensitiveField("user.names", "user.name"))
@@ -202,4 +206,71 @@ func TestIsSensitiveFieldExtraMatchesPlural(t *testing.T) {
 	assert.False(t, IsSensitiveField("ledgerIdentity", "ledgerId"))
 	assert.False(t, IsSensitiveField("user.nameservers", "user.name"))
 	assert.False(t, IsSensitiveField("ledgerIds", "ledgerName"))
+}
+
+// TestIsSensitiveFieldDecidedList pins the product decision: request
+// identifiers (CPF, CNPJ, client_id, idempotency key, IP) log in clear;
+// names, phone, address, bank data and Pix keys are masked, Portuguese included.
+func TestIsSensitiveFieldDecidedList(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		field string
+		want  bool
+	}{
+		{field: "client_id", want: false},
+		{field: "clientId", want: false},
+		{field: "idempotency_key", want: false},
+		{field: "idempotencyKey", want: false},
+		{field: "Idempotency-Key", want: false},
+		{field: "idempotency_key_digest", want: false},
+		{field: "ip_address", want: false},
+		{field: "ipAddress", want: false},
+		{field: "cpf", want: false},
+		{field: "cnpj", want: false},
+		{field: "matricula", want: false},
+		{field: "numero_contrato", want: false},
+		{field: "fund_tax_id", want: false},
+		{field: "administratorTaxId", want: false},
+		{field: "service_name", want: false},
+		{field: "agentName", want: false}, // a collection agent's slug, not a person
+		{field: "tipo_conta", want: false},
+		{field: "tipo_chave_pix", want: false},
+		{field: "nome_fantasia_ausente", want: false},
+		{field: "nome_trabalhador", want: true},
+		{field: "nomeTrabalhador", want: true},
+		{field: "nome_mae", want: true},
+		{field: "motherName", want: true},
+		{field: "full_name", want: true},
+		{field: "firstName", want: true},
+		{field: "last_name", want: true},
+		{field: "accountHolderName", want: true},
+		{field: "assignedOfficerName", want: true},
+		{field: "email", want: true},
+		{field: "telefone", want: true},
+		{field: "telefone_celular", want: true},
+		{field: "contatos", want: true},
+		{field: "endereco", want: true},
+		{field: "logradouro", want: true},
+		{field: "cep", want: true},
+		{field: "banco", want: true},
+		{field: "agencia", want: true},
+		{field: "conta_digito", want: true},
+		{field: "chave_pix", want: true},
+		{field: "authorization", want: true},
+		{field: "password", want: true},
+		{field: "senha", want: true},
+		{field: "novaSenha", want: true},
+		{field: "partition_key", want: true},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.field, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, IsSensitiveField(tt.field))
+		})
+	}
+
+	// A caller's extra name still masks a name the default list keeps clear.
+	assert.True(t, IsSensitiveField("client_ip_address", "client_ip"))
 }

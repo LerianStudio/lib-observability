@@ -13,6 +13,7 @@ var defaultSensitiveFields = []string{
 	"newpassword",
 	"oldpassword",
 	"passwordsalt",
+	"senha",
 	"token",
 	"secret",
 	"key",
@@ -33,8 +34,6 @@ var defaultSensitiveFields = []string{
 	"cookie",
 	"private_key",
 	"privatekey",
-	"clientid",
-	"client_id",
 	"clientsecret",
 	"client_secret",
 	"passwd",
@@ -64,9 +63,6 @@ var defaultSensitiveFields = []string{
 	"card_expiry",
 	"date_of_birth",
 	"dob",
-	"tax_id",
-	"taxid",
-	"tin",
 	"national_id",
 	"sort_code",
 	"bsb",
@@ -89,6 +85,39 @@ var defaultSensitiveFields = []string{
 	"city",
 	"zip",
 	"postal_code",
+	"nome",
+	"full_name",
+	"first_name",
+	"last_name",
+	"holder_name",
+	"mother_name",
+	"officer_name",
+	"telefone",
+	"celular",
+	"contato",
+	"endereco",
+	"logradouro",
+	"complemento",
+	"bairro",
+	"cidade",
+	"municipio",
+	"cep",
+	"banco",
+	"agencia",
+	"conta",
+	"chave_pix",
+}
+
+// clearFields are names a default entry matches by one token that carry no
+// secret or personal data: an idempotency key, an IP, the kind of an account or
+// Pix key, a flag about a trade name. Matched on the underscore-joined tokens.
+var clearFields = map[string]bool{
+	"idempotency_key":        true,
+	"idempotency_key_digest": true,
+	"ip_address":             true,
+	"tipo_conta":             true,
+	"tipo_chave_pix":         true,
+	"nome_fantasia_ausente":  true,
 }
 
 var (
@@ -144,7 +173,6 @@ var shortSensitiveTokens = map[string]bool{
 	"bic":  true,
 	"bsb":  true,
 	"dob":  true,
-	"tin":  true,
 	"jwt":  true,
 	"zip":  true,
 	"city": true,
@@ -203,18 +231,9 @@ func normalizeFieldName(fieldName string) string {
 	return strings.ToLower(b.String())
 }
 
-// singularizeTokens folds a single trailing "s" off every token whose singular
-// could still match something, appends those singulars to tokens, and returns
-// the rejoined singular spelling of the whole name. It returns "" when no fold
-// applies -- the common case, which then costs no second matching pass.
-//
-// Only one trailing "s" is folded, so "es" and "ies" plurals ("addresses",
-// "cities") are out of scope, and the original tokens are kept alongside the
-// folded ones so "address", "status", "class", "bus" and "pass" keep their own
-// verdict. A fold is kept only when its singular is a token of some default
-// field, which is lossless: a plural can only match a pattern whose own tokens
-// include that singular. Callers passing extra field names fold everything,
-// since those names are not in the default vocabulary.
+// singularizeTokens folds one trailing "s" off each token whose singular is a default-field
+// token, and off the last token (the noun the field names) for any caller extra name too,
+// keeping the original tokens beside the folds. It returns "" when nothing folds.
 func singularizeTokens(tokens []string, foldAll bool) ([]string, string) {
 	known := sensitiveFieldTokens()
 
@@ -226,7 +245,7 @@ func singularizeTokens(tokens []string, foldAll bool) ([]string, string) {
 		}
 
 		singular := token[:len(token)-1]
-		if !foldAll && !known[singular] {
+		if !known[singular] && (!foldAll || i != len(tokens)-1) {
 			continue
 		}
 
@@ -322,7 +341,9 @@ func IsSensitiveField(fieldName string, extra ...string) bool {
 		}
 	}
 
-	tokens, singular := singularizeTokens(splitTokens(normalized), len(extra) > 0)
+	base := splitTokens(normalized)
+
+	tokens, singular := singularizeTokens(base, len(extra) > 0)
 	if singular != "" && m[singular] {
 		return true
 	}
@@ -338,7 +359,11 @@ func IsSensitiveField(fieldName string, extra ...string) bool {
 		candidates = append(candidates, singular)
 	}
 
-	return matchesDefaultFields(candidates, tokens) || matchesExtraFields(candidates, extra)
+	if matchesExtraFields(candidates, extra) {
+		return true
+	}
+
+	return matchesDefaultFields(candidates, tokens) && !clearFields[strings.Join(base, "_")]
 }
 
 // matchesWordBoundary checks if the pattern appears in the field with word boundaries.

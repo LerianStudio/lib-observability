@@ -4,6 +4,7 @@ package observability
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/LerianStudio/lib-observability/v4/log"
@@ -136,4 +137,22 @@ func TestContextAttributesAreCopied(t *testing.T) {
 	assert.Empty(t, AttributesFromContext(replaced))
 	assert.Nil(t, AttributesFromContext(nil))
 	assert.Same(t, ctx, ContextWithSpanAttributes(ctx))
+}
+
+func TestErrorCauseSlot(t *testing.T) {
+	t.Parallel()
+
+	RecordErrorCause(context.Background(), errors.New("no slot")) // no-op
+
+	ctx, cause := ContextWithErrorCause(context.Background())
+	require.NoError(t, cause())
+
+	RecordErrorCause(ctx, nil)
+	require.NoError(t, cause())
+
+	// A descendant context fills the slot installed above it; the first cause wins.
+	first := errors.New("first")
+	RecordErrorCause(context.WithoutCancel(ctx), first)
+	RecordErrorCause(ctx, errors.New("second"))
+	assert.Equal(t, first, cause())
 }
