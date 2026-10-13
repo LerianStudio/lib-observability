@@ -513,3 +513,28 @@ func TestWithDocumentScrubExemptKeys_ListIsCopied(t *testing.T) {
 	assert.Equal(t, spanTestControlNumber, attrs["NumCtrlIF"].AsString())
 	assert.Equal(t, redaction.DocumentPlaceholder, attrs["why"].AsString())
 }
+
+// TestDocumentScrubbing_TaxIdentifierAttributes pins that tax_id, taxid and tin,
+// which the default redactor leaves in clear by name, lose a CPF or CNPJ value
+// once document scrubbing wraps the exporter.
+func TestDocumentScrubbing_TaxIdentifierAttributes(t *testing.T) {
+	documents := map[string]string{"tax_id": spanTestCPF, "taxId": spanTestCNPJ, "taxid": "52998224725", "tin": "11444777000161"}
+
+	spans := recordSpans(t, func(tr trace.Tracer) {
+		_, span := tr.Start(context.Background(), "file")
+		for key, document := range documents {
+			span.SetAttributes(attribute.String(key, document))
+		}
+		span.End()
+	})
+
+	inner := &recordingSpanExporter{}
+	require.NoError(t, newDocumentScrubbingExporter(inner, nil).ExportSpans(context.Background(), spans))
+	require.Len(t, inner.spans, 1)
+
+	attrs := attributeMap(inner.spans[0].Attributes())
+	for key := range documents {
+		require.False(t, redaction.IsSensitiveField(key), "%q is a clear field name by default", key)
+		assert.Equal(t, redaction.DocumentPlaceholder, attrs[attribute.Key(key)].AsString(), key)
+	}
+}

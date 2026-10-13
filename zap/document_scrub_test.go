@@ -602,3 +602,28 @@ func TestScrubDocumentsExemptKeys_ConcurrentLogging(t *testing.T) {
 	assert.Equal(t, 800, strings.Count(got, `"NumCtrlIF":"`+scrubTestControlNumber+`"`))
 	assert.NotContains(t, got, scrubTestCPF)
 }
+
+// TestScrubDocuments_RedactsTaxIdentifierFields pins the split between the two
+// mechanisms: tax_id, taxid and tin are not sensitive field names (the default
+// list logs request identifiers in clear), so a CPF or CNPJ under them reaches
+// the log unless document scrubbing is on, and with it on the value is replaced
+// whatever the key.
+func TestScrubDocuments_RedactsTaxIdentifierFields(t *testing.T) {
+	keys := []string{"tax_id", "taxId", "taxid", "tin", "fund_tax_id"}
+	values := []string{scrubTestCPF, "52998224725", scrubTestCNPJ, "11444777000161"}
+
+	for _, key := range keys {
+		require.False(t, redaction.IsSensitiveField(key), "%q is a clear field name by default", key)
+
+		for _, value := range values {
+			var on, off syncBuffer
+
+			newScrubLogger(t, &on, true, "json").Info("filed", zap.String(key, value))
+			newScrubLogger(t, &off, false, "json").Info("filed", zap.String(key, value))
+
+			assert.Contains(t, on.String(), fmt.Sprintf("%q:%q", key, redaction.DocumentPlaceholder), "key %q value %q", key, value)
+			assert.NotContains(t, on.String(), value, "key %q value %q", key, value)
+			assert.Contains(t, off.String(), value, "scrubbing off leaves %q under %q", value, key)
+		}
+	}
+}
