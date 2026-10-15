@@ -234,9 +234,15 @@ func TestInstrumentDB_NeverEmitsQueryText(t *testing.T) {
 
 	const secret = "SELECT secret_column FROM pix_keys WHERE cpf = '123.456.789-00'"
 
-	rows, err := db.QueryContext(context.Background(), secret)
+	// Run under a parent span: sqlobs traces only queries that already belong to
+	// a trace, and the span side of this check needs spans to inspect.
+	ctx, parent := tp.Tracer("sqlobs-test").Start(context.Background(), "request")
+
+	rows, err := db.QueryContext(ctx, secret)
 	require.NoError(t, err)
 	require.NoError(t, rows.Close())
+
+	parent.End()
 
 	forbidden := []string{
 		"db.statement",
@@ -266,7 +272,10 @@ func TestInstrumentDB_NeverEmitsQueryText(t *testing.T) {
 
 	// Span side (otelsql captures db.query.text on spans by default; the helper
 	// MUST disable that).
-	for _, s := range spanExp.GetSpans() {
+	spans := spanExp.GetSpans()
+	require.NotEmpty(t, spans, "expected query spans under the parent span")
+
+	for _, s := range spans {
 		for _, kv := range s.Attributes {
 			key := string(kv.Key)
 			val := kv.Value.Emit()
@@ -306,6 +315,25 @@ func TestInstrumentDB_PoolRoleAttribute(t *testing.T) {
 	}
 
 	assert.True(t, found, "pool role attribute must be present when WithPoolRole is set")
+}
+
+// TestInstrumentDB_NoParentSpanRecordsMetricOnly verifies a query with no parent
+// span — a background loop or a health check — starts no trace of its own,
+// while db.client.operation.duration is still recorded.
+func TestInstrumentDB_NoParentSpanRecordsMetricOnly(t *testing.T) {
+	mp, reader, tp, spanExp := newHarness(t)
+
+	db, err := InstrumentDB(openFake(t), SystemPostgreSQL,
+		WithMeterProvider(mp),
+		WithTracerProvider(tp),
+	)
+	require.NoError(t, err)
+
+	_, err = db.ExecContext(context.Background(), "SELECT 1")
+	require.NoError(t, err)
+
+	assert.Empty(t, spanExp.GetSpans(), "a query with no parent span must not start a trace")
+	assert.NotEmpty(t, collectDurationDataPoints(t, reader), "the duration metric must still be recorded")
 }
 
 // TestInstrumentDB_NilDBReturnsError verifies the helper is nil-safe: a nil

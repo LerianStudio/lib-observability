@@ -5,6 +5,7 @@ import (
 	"reflect"
 
 	constant "github.com/LerianStudio/lib-observability/v4/constants"
+	"github.com/LerianStudio/lib-observability/v4/internal/childspan"
 	"github.com/redis/go-redis/extra/redisotel/v9"
 	"github.com/redis/go-redis/v9"
 	"go.opentelemetry.io/otel"
@@ -95,6 +96,12 @@ func newConfig(opts ...Option) config {
 	for _, opt := range opts {
 		opt(&cfg)
 	}
+
+	// Trace a command only when the context already holds a parent span, so
+	// background loops and health checks do not start one trace per command.
+	// Metrics are unaffected. Applied after the options so it also covers a
+	// provider passed through WithTracerProvider.
+	cfg.tracerProvider = childspan.RequireParent(cfg.tracerProvider)
 
 	return cfg
 }
