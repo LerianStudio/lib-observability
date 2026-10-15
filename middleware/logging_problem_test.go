@@ -280,7 +280,7 @@ func TestWithHTTPLoggingLogsProblemReasonOnRefusedRequests(t *testing.T) {
 			name:      "2xx body is never read",
 			handler:   sendBody(http.StatusOK, problemJSON, `{"code":"X","title":"T","detail":"D"}`),
 			want:      map[string]any{},
-			wantLevel: obslog.LevelInfo,
+			wantLevel: obslog.LevelDebug,
 		},
 		{
 			name:      "5xx keeps error level and carries the reason",

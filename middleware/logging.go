@@ -69,6 +69,9 @@ var defaultLogExcludedRoutes = []string{"/health", "/readyz", "/metrics"}
 type logMiddleware struct {
 	Logger         obslog.Logger
 	ExcludedRoutes []string
+
+	successLevel     int
+	clientErrorLevel int
 }
 
 // LogMiddlewareOption configures HTTP and gRPC logging middleware.
@@ -85,6 +88,37 @@ func WithCustomLogger(logger obslog.Universal) LogMiddlewareOption {
 	return func(l *logMiddleware) {
 		if !obslog.IsNil(logger) {
 			l.Logger = obslog.Adapt(logger)
+		}
+	}
+}
+
+// WithSuccessLogLevel sets the level of the HTTP access line for every
+// response with a status below 400 (1xx, 2xx and 3xx). The default is
+// obslog.LevelDebug. 4xx responses are governed by WithClientErrorLogLevel
+// and 5xx responses are always logged at obslog.LevelError.
+//
+// Without WithCustomLogger the internal logger runs at obslog.LevelInfo, so
+// successful requests only show up there with
+// WithSuccessLogLevel(obslog.LevelInfo).
+//
+// An invalid level (see obslog.LevelValid) is ignored; the last valid call wins.
+func WithSuccessLogLevel(level int) LogMiddlewareOption {
+	return func(l *logMiddleware) {
+		if obslog.LevelValid(level) {
+			l.successLevel = level
+		}
+	}
+}
+
+// WithClientErrorLogLevel sets the level of the HTTP access line for every
+// response with a status from 400 to 499. The default is obslog.LevelWarn.
+// 5xx responses are always logged at obslog.LevelError.
+//
+// An invalid level (see obslog.LevelValid) is ignored; the last valid call wins.
+func WithClientErrorLogLevel(level int) LogMiddlewareOption {
+	return func(l *logMiddleware) {
+		if obslog.LevelValid(level) {
+			l.clientErrorLevel = level
 		}
 	}
 }
@@ -118,8 +152,10 @@ func buildOpts(opts ...LogMiddlewareOption) *logMiddleware {
 		// to LevelError, so the access log would emit only 5xx responses -
 		// silently dropping every 2xx/3xx/4xx line - for any caller that
 		// doesn't supply WithCustomLogger.
-		Logger:         &obslog.GoLogger{Level: obslog.LevelInfo},
-		ExcludedRoutes: append([]string(nil), defaultLogExcludedRoutes...),
+		Logger:           &obslog.GoLogger{Level: obslog.LevelInfo},
+		ExcludedRoutes:   append([]string(nil), defaultLogExcludedRoutes...),
+		successLevel:     obslog.LevelDebug,
+		clientErrorLevel: obslog.LevelWarn,
 	}
 
 	for _, opt := range opts {
@@ -283,7 +319,7 @@ func WithHTTPLogging(opts ...LogMiddlewareOption) fiber.Handler {
 
 		defer finishOnPanic(func(statusCode int, cause error) {
 			info.FinishRequestInfo(&ResponseMetricsWrapper{Context: c, StatusCode: statusCode, Size: unknownResponseBodySize})
-			writeAccessLine(c, logger, info, cause)
+			writeAccessLine(c, mid, logger, info, cause)
 		})
 
 		returnedErr := c.Next()
@@ -294,7 +330,7 @@ func WithHTTPLogging(opts ...LogMiddlewareOption) fiber.Handler {
 			StatusCode: statusCode,
 			Size:       responseBodySize(c),
 		})
-		writeAccessLine(c, logger, info, cmp.Or(handlerErr, recordedCause()))
+		writeAccessLine(c, mid, logger, info, cmp.Or(handlerErr, recordedCause()))
 
 		return chainErr
 	}
@@ -327,7 +363,7 @@ func LogRefusalsBeforeRouting(app *fiber.App, opts ...LogMiddlewareOption) {
 	server := app.Server()
 	server.SecureErrorLogMessage = true
 	render := server.ErrorHandler
-	base := buildOpts(opts...).Logger
+	mid := buildOpts(opts...)
 
 	server.ErrorHandler = func(fctx *fasthttp.RequestCtx, err error) {
 		refusal := &refusedBeforeRouting{}
@@ -363,7 +399,7 @@ func LogRefusalsBeforeRouting(app *fiber.App, opts ...LogMiddlewareOption) {
 
 		method, _, _ := normalizeHTTPMethod(info.Method)
 		recordHTTPServerDuration(c, refusal.duration, method, time.Since(start).Seconds(), info.Status)
-		writeAccessLine(c, requestLogger(base, info.TraceID), info, cause)
+		writeAccessLine(c, mid, requestLogger(mid.Logger, info.TraceID), info, cause)
 	}
 }
 
@@ -382,9 +418,9 @@ func requestLogger(logger obslog.Logger, requestID string) obslog.Logger {
 		With(obslog.String("message_prefix", requestID+constant.LoggerDefaultSeparator))
 }
 
-// writeAccessLine logs the access line of a finished request. cause, when
-// non-nil, is the error behind the status.
-func writeAccessLine(c fiber.Ctx, logger obslog.Logger, info *RequestInfo, cause error) {
+// writeAccessLine logs the access line of a finished request at the level mid
+// configures for its status. cause, when non-nil, is the error behind the status.
+func writeAccessLine(c fiber.Ctx, mid *logMiddleware, logger obslog.Logger, info *RequestInfo, cause error) {
 	fields := []obslog.Field{
 		obslog.Int("http_status_code", info.Status),
 		obslog.String("http_method", info.Method),
@@ -414,7 +450,7 @@ func writeAccessLine(c fiber.Ctx, logger obslog.Logger, info *RequestInfo, cause
 		fields = append(fields, problemFields(c, errorText)...)
 	}
 
-	logger.With(fields).Log(c.Context(), httpAccessLogLevel(info.Status), info.CLFString())
+	logger.With(fields).Log(c.Context(), mid.accessLogLevel(info.Status), info.CLFString())
 }
 
 const (
@@ -574,14 +610,17 @@ func nextWithNormalizedHTTPError(c fiber.Ctx) error {
 	return normalizeHTTPHandlerError(c.Next())
 }
 
-func httpAccessLogLevel(statusCode int) int {
+// accessLogLevel picks the access line level for statusCode: 5xx is always
+// Error, 4xx uses the configured client-error level and anything below 400
+// uses the configured success level.
+func (l *logMiddleware) accessLogLevel(statusCode int) int {
 	switch {
 	case statusCode >= fiber.StatusInternalServerError:
 		return obslog.LevelError
 	case statusCode >= fiber.StatusBadRequest:
-		return obslog.LevelWarn
+		return l.clientErrorLevel
 	default:
-		return obslog.LevelInfo
+		return l.successLevel
 	}
 }
 
