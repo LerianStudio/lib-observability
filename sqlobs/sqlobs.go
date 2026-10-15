@@ -65,6 +65,7 @@ type config struct {
 	poolRole       PoolRole
 	dsn            string
 	extraAttrs     []attribute.KeyValue
+	spanFilter     otelsql.SpanFilter
 }
 
 // Option configures the SQL instrumentation helpers.
@@ -99,6 +100,18 @@ func WithPoolRole(role PoolRole) Option {
 		if role != "" {
 			c.poolRole = role
 		}
+	}
+}
+
+// WithSpanFilter drops the DB spans filter rejects: otelsql calls it before
+// each span and skips the span when it returns false, for example to drop
+// sql.conn.begin_tx and sql.tx.commit spans. It only removes spans; the
+// db.client.operation.duration metric is still recorded for every operation.
+// A nil filter keeps every span. The filter receives the query text and bind
+// arguments, so it must never copy them into a log, span or metric.
+func WithSpanFilter(filter otelsql.SpanFilter) Option {
+	return func(c *config) {
+		c.spanFilter = filter
 	}
 }
 
@@ -173,6 +186,16 @@ func (c config) otelsqlOptions(system System) []otelsql.Option {
 			// default, set explicitly for intent).
 			Ping:     false,
 			RowsNext: false,
+			// Rows, reset-session, prepare and connect spans usually last
+			// microseconds and say nothing a query span does not, yet they
+			// multiply the span count of every trace. Drop them; otelsql still
+			// records db.client.operation.duration for these operations.
+			// Query, exec, statement, begin, commit and rollback spans stay.
+			OmitRows:             true,
+			OmitConnResetSession: true,
+			OmitConnPrepare:      true,
+			OmitConnectorConnect: true,
+			SpanFilter:           c.spanFilter,
 		}),
 	}
 }

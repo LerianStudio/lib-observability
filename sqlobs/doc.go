@@ -24,6 +24,15 @@
 // on failures. An optional low-cardinality pool-role attribute (primary |
 // replica) can be added with WithPoolRole (ADR-002).
 //
+// Spans are kept to the operations that show where DB time went: sql.conn.query,
+// sql.conn.exec, sql.stmt.exec / sql.stmt.query, sql.conn.begin_tx,
+// sql.tx.commit and sql.tx.rollback. The sql.rows, sql.conn.reset_session,
+// sql.conn.prepare, sql.connector.connect and sql.conn.ping spans are never
+// emitted: they usually last microseconds and multiply the span count of every
+// trace. The duration metric is still recorded for every operation, including
+// the ones without a span. WithSpanFilter drops more spans, for example
+// begin/commit; it cannot bring back an omitted span or the query text.
+//
 // # PII / cardinality guardrail (docs/metrics-contract.md)
 //
 // otelsql captures db.query.text on spans by default. This package disables that
