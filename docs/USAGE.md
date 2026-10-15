@@ -154,13 +154,22 @@ O nível da linha de acesso segue a classe do status da resposta: abaixo de 400 
 ```go
 import (
     "github.com/LerianStudio/lib-observability/v4/middleware"
-    obslog "github.com/LerianStudio/lib-observability/v4/log"
 )
 
 // padrão: <400 em Debug, 4xx em Warn, 5xx em Error
 app.Use(middleware.WithHTTPLogging(middleware.WithCustomLogger(logger)))
+```
 
-// restaura sucesso em Info
+Para restaurar sucesso em Info, registre a variante configurada no lugar da
+padrão (nunca as duas: cada `WithHTTPLogging` emite a própria linha de acesso
+por request, e registrar ambas duplica o log):
+
+```go
+import (
+    "github.com/LerianStudio/lib-observability/v4/middleware"
+    obslog "github.com/LerianStudio/lib-observability/v4/log"
+)
+
 app.Use(middleware.WithHTTPLogging(
     middleware.WithCustomLogger(logger),
     middleware.WithSuccessLogLevel(obslog.LevelInfo),
