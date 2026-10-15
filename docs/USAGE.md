@@ -149,6 +149,24 @@ app.Use(tm.WithTelemetry(tel))            // registra a instrumentação HTTP
 // opcional: app.Use(tm.EndTracingSpans)  // se usar o par end-spans
 ```
 
+O nível da linha de acesso segue a classe do status da resposta: abaixo de 400 (1xx, 2xx, 3xx) loga em Debug, 4xx em Warn e 5xx sempre em Error. `WithSuccessLogLevel(level)` muda o nível dos status abaixo de 400 e `WithClientErrorLogLevel(level)` o dos 4xx; nível inválido é ignorado e a última chamada válida vence. Sem `WithCustomLogger`, o logger interno roda em Info, então a linha de um 2xx só aparece com `WithSuccessLogLevel(obslog.LevelInfo)`. As mesmas opções passadas a `LogRefusalsBeforeRouting` valem para as recusas. Sucesso fica em Debug por padrão porque duração e status já estão em `http.server.request.duration` e no span SERVER.
+
+```go
+import (
+    "github.com/LerianStudio/lib-observability/v4/middleware"
+    obslog "github.com/LerianStudio/lib-observability/v4/log"
+)
+
+// padrão: <400 em Debug, 4xx em Warn, 5xx em Error
+app.Use(middleware.WithHTTPLogging(middleware.WithCustomLogger(logger)))
+
+// restaura sucesso em Info
+app.Use(middleware.WithHTTPLogging(
+    middleware.WithCustomLogger(logger),
+    middleware.WithSuccessLogLevel(obslog.LevelInfo),
+))
+```
+
 Para métricas HTTP opt-in por tenant, use a identidade já validada no JWT. Não
 registre `WithTelemetry` junto com `WithAuthenticatedTenantHTTPMetrics`, pois o
 segundo já inclui a métrica HTTP padrão:
