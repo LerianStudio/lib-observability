@@ -707,6 +707,88 @@ func TestWithHTTPLoggingUsesStatusAwareAccessLogLevel(t *testing.T) {
 	}
 }
 
+func TestWithHTTPLoggingHonorsConfiguredAccessLogLevels(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		opts      []LogMiddlewareOption
+		status    int
+		wantLevel int
+	}{
+		{name: "success level info applies to 2xx", opts: []LogMiddlewareOption{WithSuccessLogLevel(obslog.LevelInfo)}, status: http.StatusNoContent, wantLevel: obslog.LevelInfo},
+		{name: "success level info applies to 3xx", opts: []LogMiddlewareOption{WithSuccessLogLevel(obslog.LevelInfo)}, status: http.StatusTemporaryRedirect, wantLevel: obslog.LevelInfo},
+		{name: "client error level info applies to 4xx", opts: []LogMiddlewareOption{WithClientErrorLogLevel(obslog.LevelInfo)}, status: http.StatusBadRequest, wantLevel: obslog.LevelInfo},
+		{name: "success level is not ordered against other levels", opts: []LogMiddlewareOption{WithSuccessLogLevel(obslog.LevelError)}, status: http.StatusOK, wantLevel: obslog.LevelError},
+		{name: "last valid call wins", opts: []LogMiddlewareOption{WithSuccessLogLevel(obslog.LevelError), WithSuccessLogLevel(obslog.LevelInfo)}, status: http.StatusOK, wantLevel: obslog.LevelInfo},
+		{name: "5xx stays error with success level set", opts: []LogMiddlewareOption{WithSuccessLogLevel(obslog.LevelDebug)}, status: http.StatusServiceUnavailable, wantLevel: obslog.LevelError},
+		{name: "5xx stays error with client error level set", opts: []LogMiddlewareOption{WithClientErrorLogLevel(obslog.LevelDebug)}, status: http.StatusServiceUnavailable, wantLevel: obslog.LevelError},
+		{name: "5xx stays error with both levels set", opts: []LogMiddlewareOption{WithSuccessLogLevel(obslog.LevelInfo), WithClientErrorLogLevel(obslog.LevelInfo)}, status: http.StatusServiceUnavailable, wantLevel: obslog.LevelError},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			logger := &captureLogger{}
+			app := fiber.New()
+			app.Use(WithHTTPLogging(append([]LogMiddlewareOption{WithCustomLogger(logger)}, tt.opts...)...))
+			app.Get("/status", func(c fiber.Ctx) error {
+				return c.SendStatus(tt.status)
+			})
+
+			resp, err := app.Test(httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/status", nil))
+
+			require.NoError(t, err)
+			defer func() { require.NoError(t, resp.Body.Close()) }()
+
+			require.Equal(t, tt.status, resp.StatusCode)
+
+			assert.Equal(t, []int{tt.wantLevel}, logger.levelSnapshot())
+		})
+	}
+}
+
+func TestWithHTTPLoggingIgnoresInvalidAccessLogLevels(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		status    int
+		wantLevel int
+	}{
+		{name: "2xx keeps debug", status: http.StatusOK, wantLevel: obslog.LevelDebug},
+		{name: "4xx keeps warn", status: http.StatusBadRequest, wantLevel: obslog.LevelWarn},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			logger := &captureLogger{}
+			app := fiber.New()
+			app.Use(WithHTTPLogging(
+				WithCustomLogger(logger),
+				WithSuccessLogLevel(obslog.LevelUnknown),
+				WithSuccessLogLevel(-1),
+				WithClientErrorLogLevel(42),
+			))
+			app.Get("/status", func(c fiber.Ctx) error {
+				return c.SendStatus(tt.status)
+			})
+
+			resp, err := app.Test(httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/status", nil))
+
+			require.NoError(t, err)
+			defer func() { require.NoError(t, resp.Body.Close()) }()
+
+			require.Equal(t, tt.status, resp.StatusCode)
+
+			assert.Equal(t, []int{tt.wantLevel}, logger.levelSnapshot())
+		})
+	}
+}
+
 func TestHTTPMiddlewareTypedNilErrorsFailClosedWithoutPanicking(t *testing.T) {
 	t.Parallel()
 

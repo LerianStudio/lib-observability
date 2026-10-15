@@ -24,8 +24,11 @@ import (
 
 // refusalApp mirrors the services' stack: recover outside the logger, the
 // finalizer inside it, and an ErrorHandler rendering the Fiber error's message
-// as lib-commons' FiberErrorHandler does.
-func refusalApp(logger *captureLogger) *fiber.App {
+// as lib-commons' FiberErrorHandler does. opts are appended to both logging
+// middlewares' options.
+func refusalApp(logger *captureLogger, opts ...LogMiddlewareOption) *fiber.App {
+	logOpts := append([]LogMiddlewareOption{WithCustomLogger(logger)}, opts...)
+
 	app := fiber.New(fiber.Config{
 		BodyLimit: 64,
 		ErrorHandler: func(c fiber.Ctx, err error) error {
@@ -37,9 +40,9 @@ func refusalApp(logger *captureLogger) *fiber.App {
 			return c.Status(fiberErr.Code).JSON(fiber.Map{"code": fiberErr.Code, "title": "Request Failed", "message": fiberErr.Message})
 		},
 	})
-	LogRefusalsBeforeRouting(app, WithCustomLogger(logger))
+	LogRefusalsBeforeRouting(app, logOpts...)
 	app.Use(recover.New())
-	app.Use(WithHTTPLogging(WithCustomLogger(logger)))
+	app.Use(WithHTTPLogging(logOpts...))
 	app.Use(WithHTTPErrorHandling())
 	app.Post("/contracts", func(c fiber.Ctx) error { return c.SendString("ok") })
 
@@ -86,6 +89,22 @@ func TestLogRefusalsBeforeRoutingLogsBodyLimitRefusalOnce(t *testing.T) {
 	assert.Contains(t, fields, obslog.String("error", fasthttp.ErrBodyTooLarge.Error()))
 	assert.Contains(t, fields, obslog.String("problem_title", "Request Failed"))
 	assert.Contains(t, fields, obslog.String("problem_detail", "Request Entity Too Large"))
+}
+
+func TestLogRefusalsBeforeRoutingHonorsClientErrorLogLevel(t *testing.T) {
+	t.Parallel()
+
+	logger := &captureLogger{}
+	app := refusalApp(logger, WithClientErrorLogLevel(obslog.LevelInfo))
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/contracts", strings.NewReader(strings.Repeat("a", 128)))
+	_, err := app.Test(req)
+	require.ErrorIs(t, err, fasthttp.ErrBodyTooLarge)
+
+	messages, _ := logger.snapshot()
+	require.Len(t, messages, 1)
+	assert.Contains(t, messages[0], `"POST /contracts" 413`)
+	assert.Equal(t, []int{obslog.LevelInfo}, logger.levelSnapshot())
 }
 
 func TestLogRefusalsBeforeRoutingLeavesRoutedRequestsToWithHTTPLogging(t *testing.T) {
