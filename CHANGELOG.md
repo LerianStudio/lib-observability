@@ -1,5 +1,52 @@
 # Lib-observability Changelog
 
+## [4.7.0](https://github.com/LerianStudio/lib-observability/releases/tag/v4.7.0)
+
+Features:
+- Made HTTP access log level configurable per status class. (@Ygohr)
+- Added status code to per-tenant error counters. (@gauchito91)
+- Opted in to log a coded problem detail. (@fredcamaral)
+- Logged the problem reason on refused-request access lines. (@fredcamaral)
+- Logged the full refusal and the 5xx cause on the access line. (@fredcamaral)
+- Applied the decided clear and masked field lists for redaction. (@fredcamaral)
+
+Fixes:
+- Aligned error counter labels and budgets in documentation. (@fredcamaral)
+- Counted a pre-routing refusal in the duration metric. (@fredcamaral)
+- Ended a panicking request's span in `EndTracingSpans`. (@fredcamaral)
+- Logged refusals of requests that `fasthttp` could not read. (@fredcamaral)
+- Masked every path segment that is not a registered literal. (@fredcamaral)
+- Logged the shape of an unmatched path, with values as "*". (@fredcamaral)
+- Kept the tail of an error message cut to the span cap. (@fredcamaral)
+- Named the raw path of an unmatched request on the access line. (@fredcamaral)
+- Kept telemetry true on pre-routing refusals and panics. (@fredcamaral)
+- Skipped connections that sent no request in the refusal hook. (@fredcamaral)
+- Named the raw path on a pre-routing refusal line. (@fredcamaral)
+- Logged a request that `fiber` refuses before routing. (@fredcamaral)
+- Wrote the access line of a request whose handler panics. (@fredcamaral)
+- Masked span attributes with the log path's field matcher. (@fredcamaral)
+- Made check-tests run the unit suite or fail. (@fredcamaral)
+- Folded a plural only on the last token of a field name for redaction. (@fredcamaral)
+- Never logged the value of a bare root location. (@fredcamaral)
+- Logged only the detail field of a coded problem. (@fredcamaral)
+- Limited the coded problem detail opt-in to 4xx status codes. (@fredcamaral)
+- Kept JSON arrays and distinct rendered text straight. (@fredcamaral)
+- Matched JSON media types without regard to case. (@fredcamaral)
+- Closed review lows on the access-line problem reason. (@fredcamaral)
+- Fixed buckets in seconds for `db.client.operation.duration`. (@gauchito91)
+
+Improvements:
+- Bumped `golangci-lint` to `v2.14.0`. (@fredcamaral)
+- Bumped `golang.org/x/net` to `v0.60.0`. (@fredcamaral)
+- Standardized agent compatibility policy in documentation. (@fredcamaral)
+- Dropped the nil request-context fallback in `EndTracingSpans`. (@fredcamaral)
+- Marked the owned span instead of tracking its end. (@fredcamaral)
+- Folded review triage into the access path and span cut. (@fredcamaral)
+
+[Compare changes](https://github.com/LerianStudio/lib-observability/compare/v4.6.1...v4.7.0)
+
+---
+
 ## [4.6.1](https://github.com/LerianStudio/lib-observability/releases/tag/v4.6.1)
 
 Fixes:
