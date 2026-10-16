@@ -268,6 +268,8 @@ func (tm *TelemetryMiddleware) WithTelemetryInterceptor(tl *tracing.Telemetry) g
 			methodName = info.FullMethod
 		}
 
+		ctx = withEmptyEndStateForHealthCheck(ctx, methodName)
+
 		if !opensServerSpan(effectiveTelemetry, methodName) {
 			start := time.Now()
 			resp, err := handler(ctx, req)
@@ -364,7 +366,26 @@ func (tm *TelemetryMiddleware) WithTelemetryInterceptor(tl *tracing.Telemetry) g
 // minute, usually with no trace context, so each call would otherwise be a
 // root trace of its own.
 func opensServerSpan(tl *tracing.Telemetry, fullMethod string) bool {
-	return tl.TracerProvider != nil && !strings.HasPrefix(fullMethod, grpcHealthServicePrefix)
+	return tl.TracerProvider != nil && !isGRPCHealthCheck(fullMethod)
+}
+
+// isGRPCHealthCheck reports whether fullMethod belongs to the standard gRPC
+// health service.
+func isGRPCHealthCheck(fullMethod string) bool {
+	return strings.HasPrefix(fullMethod, grpcHealthServicePrefix)
+}
+
+// withEmptyEndStateForHealthCheck stores an empty span-end state in ctx when
+// fullMethod is a health check. A health check opens no span, and the empty
+// state tells EndTracingSpansInterceptor there is nothing to end. Without it,
+// that interceptor falls back to ending trace.SpanFromContext(ctx), a span
+// that belongs to someone upstream.
+func withEmptyEndStateForHealthCheck(ctx context.Context, fullMethod string) context.Context {
+	if !isGRPCHealthCheck(fullMethod) {
+		return ctx
+	}
+
+	return contextWithSpanEndState(ctx, &spanEndState{})
 }
 
 // recordRPCDuration emits an RPC duration histogram observation (server or
