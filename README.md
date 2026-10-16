@@ -238,34 +238,39 @@ The instruments divide responsibility deliberately:
 - `lerian.http.server.requests.by_tenant` counts volume by authenticated tenant
   and normalized route.
 - `lerian.http.server.responses_4xx.by_tenant` counts HTTP 4xx responses by
-  authenticated tenant and normalized route. Exact status codes stay out of the
-  metric to prevent another cardinality multiplier.
-- `lerian.http.server.responses_5xx.by_tenant` counts HTTP 5xx responses by authenticated
-  tenant and normalized route. Dividing it by the request counter gives the
-  route-level server-error rate.
+  authenticated tenant, normalized route and exact `http.response.status_code`.
+- `lerian.http.server.responses_5xx.by_tenant` counts HTTP 5xx responses by
+  authenticated tenant, normalized route and exact `http.response.status_code`.
+  Dividing it by the request counter gives the route-level server-error rate.
 - `lerian.http.server.latency.by_tenant` provides p50/p95/p99 by authenticated
   tenant and bounded response-status class, without route or method.
-- Per-route tenant latency and exact status diagnosis belong in traces, which
-  can carry `tenant.id` without metric-series multiplication.
+- Per-route and per-method tenant latency belong in traces, which can carry
+  `tenant.id` without metric-series multiplication.
 - Global RED remains in `http.server.request.duration`; deployment collectors
   may add resource dimensions such as `client_id` without changing this contract.
 
 This split is a correctness boundary, not only a cost optimization. With the
 current 14 explicit boundaries, a Prometheus histogram costs 17 series per
 attribute set; a counter costs one. `tenant.slug` is functionally 1:1 with
-`tenant.id`, so it does not multiply the steady-state set count. The validated
-steady-state 50-tenant × 30-route scenario produces 1,500 request sets, 500
-4xx-response sets, 500 5xx-response sets, and 150 latency sets, with no
-overflow before any retained rename overlap. Putting route
-and status on one counter would instead create 9,000 sets and collapse 7,001 into
-`otel.metric.overflow`, silently losing tenant identity. This is an operational
+`tenant.id`, so it does not multiply the steady-state set count. In the
+validated steady-state 50-tenant × 30-route scenario, the request counter holds
+1,500 sets (50 × 30) and the latency histogram 150 sets (50 tenants × 3
+observed status classes, 2,550 series), with no overflow before any retained
+rename overlap. The error counters do not record the cartesian product
+(50 × 30 × 6 codes = 9,000 sets): a set exists only once a tenant fails on a
+route with a code. Measured on 2026-09-30 across the SaaS fleet,
+`responses_4xx.by_tenant` held 9 sets against 86 on the request counter. The
+ledger's 44 observed route+code pairs across 6 tenants bound each error counter
+at 264 sets; four times the tenants gives 264 × 4 = 1,056, under the 2,000
+default. This is an operational
 budget, not a universal guarantee: each adopter must recalculate authenticated
 tenants, normalized routes, and retained tenant-slug versions, then keep each
 instrument below the effective limit.
 The default is 2,000; applications can override it with
 `NewTelemetryWithOptions(cfg, WithMetricCardinalityLimit(limit))`. The SDK reserves one attribute set for
-overflow. For a counter, budget
-`normalized routes × (tenants + retained rename versions) <= limit - 1`.
+overflow. For the request counter, budget
+`normalized routes × (tenants + retained rename versions) <= limit - 1`; for an
+error counter, replace normalized routes with observed route+code pairs.
 At the default limit, 30 routes and 50 tenants leave room for at most 16 retained
 full-route rename versions; the 17th can overflow. Count the stable
 unmatched-route fallback as a normalized route. Size the configured limit
