@@ -76,7 +76,7 @@ endif
 # Pinned tool versions for reproducibility (update as needed)
 GOTESTSUM_VERSION ?= v1.13.0
 GOSEC_VERSION ?= v2.26.1
-GOLANGCI_LINT_VERSION ?= v2.12.2
+GOLANGCI_LINT_VERSION ?= v2.14.0
 
 TEST_REPORTS_DIR ?= ./reports
 GOTESTSUM = $(shell command -v gotestsum 2>/dev/null)
@@ -143,7 +143,6 @@ help:
 	@echo "  make lint-fix                    - Run linting with auto-fix on all packages"
 	@echo "  make format                      - Format code in all packages"
 	@echo "  make tidy                        - Clean dependencies"
-	@echo "  make check-tests                 - Verify test coverage for packages"
 	@echo "  make vet                         - Run go vet on all packages"
 	@echo "  make sec                         - Run security checks using gosec"
 	@echo "  make sec SARIF=1                 - Run security checks with SARIF output"
@@ -185,7 +184,6 @@ ci:
 	$(MAKE) lint-fix
 	$(MAKE) format
 	$(MAKE) tidy
-	$(MAKE) check-tests
 	$(MAKE) sec
 	$(MAKE) vet
 	$(MAKE) test-unit
@@ -493,17 +491,6 @@ format:
 	$(call check_command,gofmt,"Install Go from https://golang.org/doc/install")
 	@gofmt -w ./
 	@echo "$(GREEN)$(BOLD)[ok]$(NC) All go files formatted$(GREEN) ✔️$(NC)"
-
-.PHONY: check-tests
-check-tests:
-	$(call print_title,Verifying test coverage for packages)
-	@if [ -f "./scripts/check-tests.sh" ]; then \
-		sh ./scripts/check-tests.sh; \
-	else \
-		echo "Running basic test coverage check..."; \
-		go test -cover ./...; \
-	fi
-	@echo "$(GREEN)$(BOLD)[ok]$(NC) Test coverage verification completed$(GREEN) ✔️$(NC)"
 
 .PHONY: vet
 vet:

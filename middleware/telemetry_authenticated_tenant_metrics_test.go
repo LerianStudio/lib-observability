@@ -115,7 +115,8 @@ func TestAuthenticatedTenantHTTPMetrics_RecordsExplicitlyAttestedIdentity(t *tes
 	assert.EqualValues(t, 1, errorDP.Value)
 	assert.Equal(t, canonicalTenantID(tenantID), mustAttrValue(t, errorDP.Attributes, constant.AttrKeyTenantID))
 	assert.Equal(t, "/api/users/:id", mustAttrValue(t, errorDP.Attributes, "http.route"))
-	assertExactAttributeKeys(t, errorDP.Attributes, constant.AttrKeyTenantID, "http.route")
+	assertExactAttributeKeys(t, errorDP.Attributes, constant.AttrKeyTenantID, "http.route",
+		"http.response.status_code")
 	assert.Nil(t, findInt64SumByName(t, reader, "lerian.http.server.errors.by_tenant"),
 		"the unreleased legacy name must not be emitted alongside responses_5xx")
 	assert.Nil(t, findInt64SumByName(t, reader, authenticatedTenantHTTPServerResponses4xxMetric))
@@ -312,7 +313,7 @@ func TestAuthenticatedTenantHTTPMetrics_Responses5xxCounterOmitsOtherStatusClass
 		mustAttrValue(t, responses4xx.DataPoints[0].Attributes, constant.AttrKeyTenantID))
 	assert.Equal(t, "/missing", mustAttrValue(t, responses4xx.DataPoints[0].Attributes, "http.route"))
 	assertExactAttributeKeys(t, responses4xx.DataPoints[0].Attributes,
-		constant.AttrKeyTenantID, "http.route")
+		constant.AttrKeyTenantID, "http.route", "http.response.status_code")
 }
 
 func TestAuthenticatedTenantHTTPMetrics_Responses4xxCounterOmitsOtherStatusClasses(t *testing.T) {
@@ -682,10 +683,15 @@ func TestAuthenticatedTenantLatency_AttributeSetIsFrozen(t *testing.T) {
 // attribute set to tenant.id x http.route, with tenant.name as the sole optional
 // exception because it is functionally 1:1 with tenant.id. Every other label divides the tenant
 // ceiling - floor((cardinality limit - 1) / normalized routes) - by that label's
-// cardinality. Adding http.response.status_code here would have produced 9000
-// attribute sets for 50 tenants x 30 routes against a default limit of 2000,
-// silently dropping tenants from per-tenant filtering. Recalculate the budget in
-// docs/metrics-contract.md before changing this.
+// cardinality, so the request counter and the latency histogram stay frozen at
+// the keys asserted below.
+//
+// The error counters are the documented exception: they carry
+// http.response.status_code because a set only exists once a tenant actually
+// fails on a route with a code, and that is sparse (9 live sets across the SaaS
+// fleet on 2026-09-30, worst case 264 for the ledger). The cartesian 50 x 30 x 6
+// = 9000 never materializes. Recalculate the budget in docs/metrics-contract.md
+// before widening any of these sets further.
 func TestAuthenticatedTenantCounters_AttributeSetIsFrozen(t *testing.T) {
 	tel, reader := newMetricsHarness(t)
 	tenantID := uuid.New()
@@ -719,14 +725,38 @@ func TestAuthenticatedTenantCounters_AttributeSetIsFrozen(t *testing.T) {
 		require.NoError(t, resp.Body.Close())
 	}
 
+	baseKeys := []string{constant.AttrKeyTenantID, constant.AttrKeyTenantName, "http.route"}
+	// The error counters add the exact code, so their frozen set is one key wider
+	// than the request counter's.
+	errorKeys := append(append([]string{}, baseKeys...), "http.response.status_code")
+
 	tests := []struct {
-		name       string
-		metricName string
-		wantValue  int64
+		name         string
+		metricName   string
+		wantValue    int64
+		wantAttrKeys []string
+		wantStatus   int64
 	}{
-		{name: "requests", metricName: authenticatedTenantHTTPServerRequestsMetric, wantValue: 10},
-		{name: "responses 4xx", metricName: authenticatedTenantHTTPServerResponses4xxMetric, wantValue: 3},
-		{name: "responses 5xx", metricName: authenticatedTenantHTTPServerResponses5xxMetric, wantValue: 2},
+		{
+			name:         "requests",
+			metricName:   authenticatedTenantHTTPServerRequestsMetric,
+			wantValue:    10,
+			wantAttrKeys: baseKeys,
+		},
+		{
+			name:         "responses 4xx",
+			metricName:   authenticatedTenantHTTPServerResponses4xxMetric,
+			wantValue:    3,
+			wantAttrKeys: errorKeys,
+			wantStatus:   404,
+		},
+		{
+			name:         "responses 5xx",
+			metricName:   authenticatedTenantHTTPServerResponses5xxMetric,
+			wantValue:    2,
+			wantAttrKeys: errorKeys,
+			wantStatus:   503,
+		},
 	}
 
 	for _, tt := range tests {
@@ -736,13 +766,18 @@ func TestAuthenticatedTenantCounters_AttributeSetIsFrozen(t *testing.T) {
 			require.Len(t, counter.DataPoints, 1)
 			dataPoint := counter.DataPoints[0]
 			assert.Equal(t, tt.wantValue, dataPoint.Value)
-			require.Equal(t, 3, dataPoint.Attributes.Len())
+			require.Equal(t, len(tt.wantAttrKeys), dataPoint.Attributes.Len())
+			if tt.wantStatus != 0 {
+				statusValue, ok := dataPoint.Attributes.Value(
+					attribute.Key("http.response.status_code"))
+				require.True(t, ok, "expected attribute http.response.status_code")
+				assert.Equal(t, tt.wantStatus, statusValue.AsInt64())
+			}
 			assert.Equal(t, canonicalTenantID(tenantID),
 				mustAttrValue(t, dataPoint.Attributes, constant.AttrKeyTenantID))
 			assert.Equal(t, "jeff", mustAttrValue(t, dataPoint.Attributes, constant.AttrKeyTenantName))
 			assert.Equal(t, "/orders/:outcome", mustAttrValue(t, dataPoint.Attributes, "http.route"))
-			assertExactAttributeKeys(t, dataPoint.Attributes,
-				constant.AttrKeyTenantID, constant.AttrKeyTenantName, "http.route")
+			assertExactAttributeKeys(t, dataPoint.Attributes, tt.wantAttrKeys...)
 		})
 	}
 }
@@ -763,11 +798,23 @@ func TestAuthenticatedTenantCounters_UnmatchedRouteUsesBoundedFallback(t *testin
 	require.NoError(t, err)
 	require.NoError(t, resp.Body.Close())
 
-	for _, metricName := range []string{
-		authenticatedTenantHTTPServerRequestsMetric,
-		authenticatedTenantHTTPServerResponses4xxMetric,
+	for _, tc := range []struct {
+		metricName string
+		attrKeys   []string
+	}{
+		{
+			metricName: authenticatedTenantHTTPServerRequestsMetric,
+			attrKeys:   []string{constant.AttrKeyTenantID, "http.route"},
+		},
+		{
+			// The error counters carry the exact code; the request counter does not.
+			metricName: authenticatedTenantHTTPServerResponses4xxMetric,
+			attrKeys: []string{
+				constant.AttrKeyTenantID, "http.route", "http.response.status_code",
+			},
+		},
 	} {
-		counter := findInt64SumByName(t, reader, metricName)
+		counter := findInt64SumByName(t, reader, tc.metricName)
 		require.NotNil(t, counter)
 		require.Len(t, counter.DataPoints, 1)
 		dataPoint := counter.DataPoints[0]
@@ -775,7 +822,7 @@ func TestAuthenticatedTenantCounters_UnmatchedRouteUsesBoundedFallback(t *testin
 		assert.Equal(t, canonicalTenantID(tenantID),
 			mustAttrValue(t, dataPoint.Attributes, constant.AttrKeyTenantID))
 		assert.Equal(t, unmatchedRouteTemplate, mustAttrValue(t, dataPoint.Attributes, "http.route"))
-		assertExactAttributeKeys(t, dataPoint.Attributes, constant.AttrKeyTenantID, "http.route")
+		assertExactAttributeKeys(t, dataPoint.Attributes, tc.attrKeys...)
 	}
 }
 

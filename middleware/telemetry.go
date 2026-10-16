@@ -14,7 +14,6 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	observability "github.com/LerianStudio/lib-observability/v4"
@@ -43,13 +42,17 @@ const authenticatedTenantHTTPServerRequestsMetric = "lerian.http.server.requests
 // authenticatedTenantHTTPServerResponses5xxMetric is an opt-in per-tenant
 // counter for requests resulting in HTTP 5xx responses. Keeping failures in a
 // separate instrument preserves route-level error rates without multiplying the
-// request counter by status values.
+// request counter by status values: the exact status code rides on this
+// instrument and on its 4xx sibling, never on the request counter.
 const authenticatedTenantHTTPServerResponses5xxMetric = "lerian.http.server.responses_5xx.by_tenant"
 
 // authenticatedTenantHTTPServerResponses4xxMetric is an opt-in per-tenant
-// counter for requests resulting in HTTP 4xx responses. It deliberately carries
-// only tenant and route; exact status-code diagnosis remains a trace-level
-// question so the metric cannot multiply by every possible 4xx code.
+// counter for requests resulting in HTTP 4xx responses. It carries tenant,
+// route and the exact status code: 4xx sets are sparse in practice (a tenant
+// only produces a series on the routes it actually fails, with the codes it
+// actually receives), so the code dimension costs tens of sets rather than the
+// cartesian product. See the error-counter note on
+// recordAuthenticatedTenantHTTPMetrics for the measured numbers.
 const authenticatedTenantHTTPServerResponses4xxMetric = "lerian.http.server.responses_4xx.by_tenant"
 
 // authenticatedTenantHTTPServerLatencyMetric is an opt-in per-tenant latency
@@ -210,57 +213,9 @@ const (
 // ErrContextNotFound is returned when a required Fiber context is nil.
 var ErrContextNotFound = errors.New("fiber context not found")
 
-type spanEndStateKey struct{}
-
-type spanEndState struct {
-	span trace.Span
-	// once guarantees End() is idempotent. It is retained (not superseded by
-	// owned) because it still protects the foreign/handler-created span on the
-	// HTTP and gRPC fallback paths (where owned==false and the span may be
-	// ended both by a defer and by the End middleware). owned resolves ordering
-	// (which middleware ends the span, and that it happens after finalization);
-	// once resolves double-end.
-	once sync.Once
-	// owned marks the span as exclusively finalized/ended by the middleware
-	// that created it (WithTelemetry). When set, EndTracingSpans must NOT end
-	// it: the owning middleware ends it via its own deferred End() AFTER
-	// applying the route template name and post-c.Next() attributes. This
-	// removes the ordering hazard where a separately-registered EndTracingSpans
-	// unwinds first (Fiber LIFO) and ends the span before finalization,
-	// silently discarding http.route/status/error.type and the span rename -
-	// measured: the span ends up named "GET" instead of "GET /orders/:id".
-	owned bool
-}
-
-func newSpanEndState(span trace.Span) *spanEndState {
-	return &spanEndState{span: span}
-}
-
-func (s *spanEndState) End() {
-	if s == nil || s.span == nil {
-		return
-	}
-
-	s.once.Do(func() { s.span.End() })
-}
-
-func contextWithSpanEndState(ctx context.Context, state *spanEndState) context.Context {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-
-	return context.WithValue(ctx, spanEndStateKey{}, state)
-}
-
-func spanEndStateFromContext(ctx context.Context) *spanEndState {
-	if ctx == nil {
-		return nil
-	}
-
-	state, _ := ctx.Value(spanEndStateKey{}).(*spanEndState)
-
-	return state
-}
+// ownedSpanKey marks a request context whose server span WithTelemetry ends
+// itself, after renaming and finalizing it; EndTracingSpans leaves it alone.
+type ownedSpanKey struct{}
 
 // TelemetryMiddleware wraps Fiber HTTP handlers with tracing and metrics setup.
 type TelemetryMiddleware struct {
@@ -358,7 +313,7 @@ func (tm *TelemetryMiddleware) WithTelemetry(tl *tracing.Telemetry, excludedRout
 // correlation-id request header echoed on the response, the identity-filtered
 // server span (named by the route template once routing resolves, carrying the
 // HTTP semantic-convention attributes and status), the excluded-route skip
-// list, and the tracer / metric-factory / span-end-state context wiring that
+// list, and the tracer / metric-factory / owned-span context wiring that
 // downstream handlers and EndTracingSpans depend on.
 //
 // It records none of the middleware's own metrics, even when the Telemetry has
@@ -432,7 +387,15 @@ func (tm *TelemetryMiddleware) withTelemetry(
 			return nextWithNormalizedHTTPError(c)
 		}
 
-		if len(excludedRoutes) > 0 && isRouteExcludedFromList(c, excludedRoutes) {
+		if isRouteExcludedFromList(c, excludedRoutes) {
+			return nextWithNormalizedHTTPError(c)
+		}
+
+		// Fiber's pre-routing pass renders its status after this chain, so
+		// LogRefusalsBeforeRouting records it, with no span and no false 200.
+		if refusal, refused := c.Locals(refusedBeforeRoutingKey{}).(*refusedBeforeRouting); refused {
+			refusal.duration = instruments.duration
+
 			return nextWithNormalizedHTTPError(c)
 		}
 
@@ -465,14 +428,19 @@ func (tm *TelemetryMiddleware) withTelemetry(
 		activeDone := trackActiveRequest(c.Context(), instruments.activeRequests, method)
 		defer activeDone()
 
-		if effectiveTelemetry.TracerProvider == nil {
-			returnedErr := c.Next()
-			statusCode, chainErr, _ := resolveHTTPResponse(c, returnedErr)
-
+		recordMetrics := func(statusCode int) {
 			durationSeconds := time.Since(requestStart).Seconds()
 
 			recordHTTPServerDuration(c, instruments.duration, method, durationSeconds, statusCode)
 			recordAuthenticatedTenantHTTPMetrics(c, instruments, durationSeconds, statusCode)
+		}
+
+		if effectiveTelemetry.TracerProvider == nil {
+			defer finishOnPanic(func(statusCode int, _ error) { recordMetrics(statusCode) })
+
+			returnedErr := c.Next()
+			statusCode, chainErr, _ := resolveHTTPResponse(c, returnedErr)
+			recordMetrics(statusCode)
 
 			return chainErr
 		}
@@ -511,18 +479,12 @@ func (tm *TelemetryMiddleware) withTelemetry(
 		spanStartCtx := identityFilteredSpanStartContext(traceCtx)
 		_, span := tracer.Start(spanStartCtx, spanName, trace.WithSpanKind(trace.SpanKindServer))
 		ctx = trace.ContextWithSpan(traceCtx, span)
-		endState := newSpanEndState(span)
-		// WithTelemetry owns this span's lifecycle: it is the sole ender (via the
-		// defer below, which fires on return AFTER applyTelemetrySpanAttributes
-		// has renamed and finalized the span). EndTracingSpans, if also
-		// registered, detects the owned flag and does NOT end it.
-		endState.owned = true
 
-		defer endState.End()
+		defer span.End()
 
 		ctx = observability.ContextWithTracer(ctx, effectiveTelemetry.ServiceTracer())
 		ctx = observability.ContextWithMetricFactory(ctx, effectiveTelemetry.MetricsFactory)
-		ctx = contextWithSpanEndState(ctx, endState)
+		ctx = context.WithValue(ctx, ownedSpanKey{}, true)
 		c.SetContext(ctx)
 
 		// The collector emits process-wide CPU and memory gauges through the
@@ -534,23 +496,24 @@ func (tm *TelemetryMiddleware) withTelemetry(
 			}
 		}
 
+		finish := func(statusCode int, handlerErr error) {
+			applyTelemetrySpanAttributes(span, c, statusCode, telemetryRequestAttrs{
+				method:         method,
+				methodOriginal: methodOriginal,
+				methodReplaced: methodReplaced,
+				protocol:       protocol,
+				hostname:       hostname,
+				userAgent:      userAgent,
+				handlerErr:     handlerErr,
+			})
+			recordMetrics(statusCode)
+		}
+		// Deferred after span.End, so it finalizes the span before End runs.
+		defer finishOnPanic(finish)
+
 		returnedErr := c.Next()
 		statusCode, chainErr, handlerErr := resolveHTTPResponse(c, returnedErr)
-
-		applyTelemetrySpanAttributes(span, c, statusCode, telemetryRequestAttrs{
-			method:         method,
-			methodOriginal: methodOriginal,
-			methodReplaced: methodReplaced,
-			protocol:       protocol,
-			hostname:       hostname,
-			userAgent:      userAgent,
-			handlerErr:     handlerErr,
-		})
-
-		durationSeconds := time.Since(requestStart).Seconds()
-
-		recordHTTPServerDuration(c, instruments.duration, method, durationSeconds, statusCode)
-		recordAuthenticatedTenantHTTPMetrics(c, instruments, durationSeconds, statusCode)
+		finish(statusCode, handlerErr)
 
 		return chainErr
 	}
@@ -734,12 +697,27 @@ func recordHTTPServerDuration(
 // the request context. Transport-controlled identity sources (headers, baggage,
 // gRPC metadata, AttrBag, span attributes) are intentionally ignored.
 //
-// The request, 4xx-response, and 5xx-error counters carry only tenant and route.
-// Separate instruments keep each at 1,500 attribute sets in the documented
-// 50-tenant, 30-route scenario; adding status to one counter would create 9,000 sets and
-// overflow the OTel SDK's default 2,000-set limit. The latency histogram carries
-// only tenant and a bounded status class. Method, exact per-route status, and
-// per-route latency remain trace-level questions.
+// The request counter carries only tenant and route, because almost every
+// request it counts is a success and a status dimension there would multiply
+// the highest-volume instrument for nothing. The 4xx and 5xx counters carry
+// tenant, route AND the exact status code, which is what turns "this tenant saw
+// 931 client errors" into the actionable "931 of them were 400 on one route" -
+// a 409 retry storm and a malformed payload are different incidents and the
+// on-call needs them apart.
+//
+// THE CARTESIAN PRODUCT IS NOT WHAT GETS RECORDED. A set only exists once a
+// tenant actually fails on a route with a code, and real traffic is sparse:
+// measured 2026-09-30 across the SaaS fleet, 4xx_by_tenant held 9 sets from 3
+// tenants (6 routes, 2 routes, 1 route), against 86 sets on the request counter.
+// Adding the code multiplies only what is already sparse - the ledger's 44
+// observed route+code pairs across 6 tenants bound the worst case at 264 sets;
+// four times the tenants is 1,056, under the OTel SDK's 2,000-set default.
+// Tenants here are customers, so that count grows in years.
+//
+// The latency histogram still carries only tenant and a bounded status class:
+// each label there multiplies by explicit_boundary_count+3, so it is the one
+// instrument where the exact code would be expensive. Method and per-route
+// latency remain trace-level questions.
 func recordAuthenticatedTenantHTTPMetrics(
 	c fiber.Ctx,
 	instruments httpServerInstruments,
@@ -775,12 +753,20 @@ func recordAuthenticatedTenantHTTPMetrics(
 		instruments.tenantRequests.Add(ctx, 1, metric.WithAttributes(routeAttrs...))
 	}
 
+	// The error counters get the exact code; the request counter above does not.
+	// errorAttrs is built once and shared because at most one of the two
+	// branches below fires for a given response.
+	errorAttrs := append(
+		append([]attribute.KeyValue{}, routeAttrs...),
+		attribute.Int("http.response.status_code", statusCode),
+	)
+
 	if instruments.tenant5xx != nil && isHTTPServerError(statusCode) {
-		instruments.tenant5xx.Add(ctx, 1, metric.WithAttributes(routeAttrs...))
+		instruments.tenant5xx.Add(ctx, 1, metric.WithAttributes(errorAttrs...))
 	}
 
 	if instruments.tenant4xx != nil && isHTTPClientError(statusCode) {
-		instruments.tenant4xx.Add(ctx, 1, metric.WithAttributes(routeAttrs...))
+		instruments.tenant4xx.Add(ctx, 1, metric.WithAttributes(errorAttrs...))
 	}
 
 	if instruments.tenantLatency != nil {
@@ -848,41 +834,34 @@ func classifyHTTPErrorType(statusCode int) string {
 	return ""
 }
 
-// EndTracingSpans is a middleware that ends the tracing spans.
+// EndTracingSpans is a middleware that ends the tracing spans, as failed when
+// the chain panics, before the panic reaches the outer recover middleware.
 func (tm *TelemetryMiddleware) EndTracingSpans(c fiber.Ctx) error {
 	if c == nil {
 		return ErrContextNotFound
 	}
 
-	originalCtx := c.Context()
+	defer finishOnPanic(func(_ int, cause error) { endRequestSpan(c, cause) })
+
 	err := normalizeHTTPHandlerError(c.Next())
-
-	endCtx := c.Context()
-	if endCtx == nil {
-		endCtx = originalCtx
-	}
-
-	if state := spanEndStateFromContext(endCtx); state != nil {
-		// A span owned by WithTelemetry is finalized and ended by WithTelemetry
-		// itself (after it applies the route template name and post-c.Next
-		// attributes). Ending it here would be a no-op at best and, due to
-		// Fiber's LIFO unwinding, could race ahead of that finalization and
-		// discard the rename/attributes. Return early and let the owning
-		// middleware end it.
-		if state.owned {
-			return err
-		}
-
-		state.End()
-
-		return err
-	}
-
-	if endCtx != nil {
-		trace.SpanFromContext(endCtx).End()
-	}
+	endRequestSpan(c, nil)
 
 	return err
+}
+
+// endRequestSpan ends the span in c's context; a non-nil cause fails it first.
+func endRequestSpan(c fiber.Ctx, cause error) {
+	endCtx := c.Context()
+
+	// WithTelemetry ends its own span after finalizing it; ending it here could,
+	// under Fiber's LIFO unwinding, run ahead of that finalization.
+	if endCtx != nil && endCtx.Value(ownedSpanKey{}) != nil {
+		return
+	}
+
+	span := trace.SpanFromContext(endCtx)
+	tracing.HandleSpanError(span, "", cause)
+	span.End()
 }
 
 // setRequestHeaderID ensures the Fiber request carries a unique correlation ID header.

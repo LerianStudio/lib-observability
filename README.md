@@ -171,7 +171,13 @@ defer span.End()
 
 ## HTTP server telemetry safety
 
-`WithHTTPLogging` and `WithTelemetry` resolve the matched Fiber route only after the downstream handler returns. Access logs, server span names, and `url.path` therefore use the route template (for example, `/v1/contracts/:contract_id`) and omit the query string entirely. Unmatched traffic uses the stable `/{unmatched}` fallback; `http.route` remains absent, as required by OpenTelemetry.
+`WithHTTPLogging` and `WithTelemetry` resolve the matched Fiber route only after the downstream handler returns. Access logs, server span names, and `url.path` therefore use the route template (for example, `/v1/contracts/:contract_id`) and omit the query string entirely. On spans and metrics, unmatched traffic uses the stable `/{unmatched}` fallback; `http.route` remains absent, as required by OpenTelemetry. The access line of an unmatched request (a 404, a refusal by a global middleware such as a rate limiter) carries the path's shape instead: it keeps a segment only when it is a literal of a route the app registered; every other segment is `*` (`/v1/dict/keys/*`); never the query. It names the endpoint the client called without an id, a token or a Pix key. A request Fiber refuses before routing (a body over `BodyLimit`, a malformed request) is logged once by `LogRefusalsBeforeRouting(app, opts...)`, called after `fiber.New`, with that same shape; with `LogRefusalsBeforeRouting` installed, `WithTelemetry` records no span for it and counts it in `http.server.request.duration` with its status and no `http.route` (a method Fiber does not know never reaches the chain, so it is not counted); without it, that refusal counts as a 200. A request fasthttp could not read or discarded (a malformed head, a chunked body) logs `-` as method, path and protocol. The cause on the line, and the error the `ErrorHandler` renders, end before the first quote, where fasthttp quotes the client's bytes. A connection that sends no byte (reset, or silent until `ReadTimeout`), or whose body stalls past `ReadTimeout`, logs nothing. A handler panic is logged and traced as a 500 (a span `EndTracingSpans` ends is marked failed), and the panic still reaches the service's recover middleware.
+
+On a 4xx/5xx, the access line also carries the reason the client was given, read from a buffered response body of at most 8 KiB: `problem_code` (a string or a number, so the lib-commons `{code, title, message}` envelope decodes too), `problem_title`, `problem_detail` (`detail`, else `message`, at every status; omitted when it repeats the title), `problem_errors` (`"<location>: <message> value=<raw JSON>"`, at most 10, plus `problem_errors_dropped`) from a JSON body, or `problem_text` from any other body, unless the `error` field already carries that text. Every value is capped at 128 bytes and an echoed `value` at 64; an object or array `value` is never logged. A location that names a field `redaction.IsSensitiveField` masks (`body.holder.email`, `header.Authorization`) logs `value=[REDACTED]` and keeps its message only up to the first `": "`, which drops Huma's quoted parse error. A body starting with `{` or `[` is decoded as JSON whatever its content type, so that mask cannot be bypassed through `problem_text`. Client input therefore reaches this line (a CPF in a `value` or `detail` is logged in clear): services must never interpolate names, e-mail, phone, address, bank data or secrets into a `detail` or a plain-text body. A streamed, encoded (`Content-Encoding`), oversized or undecodable body adds nothing, and a refusal returned as an error is only seen once it is rendered inside the middleware's scope (`WithHTTPErrorHandling`).
+
+A 5xx body hides its cause by design. `WithHTTPLogging` installs a slot (`observability.ContextWithErrorCause`) before running the chain; code that renders the 5xx calls `observability.RecordErrorCause(ctx, err)`, and when the chain returns no error the first recorded cause fills the line's `error` field, with that field's redaction and 1 KiB cap (a longer message keeps its head and its tail, where a wrapped chain's innermost cause sits, joined by ` [...] `). Without a slot, `RecordErrorCause` does nothing.
+
+The access line's level follows the response's status class: below 400 (1xx, 2xx, 3xx) it logs at Debug, a 4xx at Warn, and a 5xx always at Error. `WithSuccessLogLevel(level)` changes the level for statuses below 400 and `WithClientErrorLogLevel(level)` the one for 4xx; an invalid level is ignored and the last valid call wins. To restore the previous behavior for successful requests, pass `middleware.WithSuccessLogLevel(obslog.LevelInfo)`. Without `WithCustomLogger`, the internal logger runs at Info, so a 2xx line only shows up there with that option. The same options passed to `LogRefusalsBeforeRouting` apply to refusals. Successful requests default to Debug because their duration and status are already recorded in `http.server.request.duration` and on the server span.
 
 `httpobs.NewHandler` gives the stdlib `net/http` path the same guarantee, with no opt-out. It resolves the route the same way — after the downstream handler returns, from `r.Pattern` — and rewrites `url.path` to the route template: a request to `/users/42` is exported as `url.path` = `http.route` = `/users/{id}`, and traffic matching no route as `url.path` = `/{unmatched}` with `http.route` absent. An id, a CPF, or an account number in an inbound path therefore never leaves the process, and a scanner cannot inflate the attribute's cardinality.
 
@@ -232,34 +238,39 @@ The instruments divide responsibility deliberately:
 - `lerian.http.server.requests.by_tenant` counts volume by authenticated tenant
   and normalized route.
 - `lerian.http.server.responses_4xx.by_tenant` counts HTTP 4xx responses by
-  authenticated tenant and normalized route. Exact status codes stay out of the
-  metric to prevent another cardinality multiplier.
-- `lerian.http.server.responses_5xx.by_tenant` counts HTTP 5xx responses by authenticated
-  tenant and normalized route. Dividing it by the request counter gives the
-  route-level server-error rate.
+  authenticated tenant, normalized route and exact `http.response.status_code`.
+- `lerian.http.server.responses_5xx.by_tenant` counts HTTP 5xx responses by
+  authenticated tenant, normalized route and exact `http.response.status_code`.
+  Dividing it by the request counter gives the route-level server-error rate.
 - `lerian.http.server.latency.by_tenant` provides p50/p95/p99 by authenticated
   tenant and bounded response-status class, without route or method.
-- Per-route tenant latency and exact status diagnosis belong in traces, which
-  can carry `tenant.id` without metric-series multiplication.
+- Per-route and per-method tenant latency belong in traces, which can carry
+  `tenant.id` without metric-series multiplication.
 - Global RED remains in `http.server.request.duration`; deployment collectors
   may add resource dimensions such as `client_id` without changing this contract.
 
 This split is a correctness boundary, not only a cost optimization. With the
 current 14 explicit boundaries, a Prometheus histogram costs 17 series per
 attribute set; a counter costs one. `tenant.slug` is functionally 1:1 with
-`tenant.id`, so it does not multiply the steady-state set count. The validated
-steady-state 50-tenant × 30-route scenario produces 1,500 request sets, 500
-4xx-response sets, 500 5xx-response sets, and 150 latency sets, with no
-overflow before any retained rename overlap. Putting route
-and status on one counter would instead create 9,000 sets and collapse 7,001 into
-`otel.metric.overflow`, silently losing tenant identity. This is an operational
+`tenant.id`, so it does not multiply the steady-state set count. In the
+validated steady-state 50-tenant × 30-route scenario, the request counter holds
+1,500 sets (50 × 30) and the latency histogram 150 sets (50 tenants × 3
+observed status classes, 2,550 series), with no overflow before any retained
+rename overlap. The error counters do not record the cartesian product
+(50 × 30 × 6 codes = 9,000 sets): a set exists only once a tenant fails on a
+route with a code. Measured on 2026-09-30 across the SaaS fleet,
+`responses_4xx.by_tenant` held 9 sets against 86 on the request counter. The
+ledger's 44 observed route+code pairs across 6 tenants bound each error counter
+at 264 sets; four times the tenants gives 264 × 4 = 1,056, under the 2,000
+default. This is an operational
 budget, not a universal guarantee: each adopter must recalculate authenticated
 tenants, normalized routes, and retained tenant-slug versions, then keep each
 instrument below the effective limit.
 The default is 2,000; applications can override it with
 `NewTelemetryWithOptions(cfg, WithMetricCardinalityLimit(limit))`. The SDK reserves one attribute set for
-overflow. For a counter, budget
-`normalized routes × (tenants + retained rename versions) <= limit - 1`.
+overflow. For the request counter, budget
+`normalized routes × (tenants + retained rename versions) <= limit - 1`; for an
+error counter, replace normalized routes with observed route+code pairs.
 At the default limit, 30 routes and 50 tenants leave room for at most 16 retained
 full-route rename versions; the 17th can overflow. Count the stable
 unmatched-route fallback as a normalized route. Size the configured limit

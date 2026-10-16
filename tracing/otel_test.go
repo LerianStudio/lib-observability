@@ -5,9 +5,11 @@ package tracing
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	observability "github.com/LerianStudio/lib-observability/v4"
 	constant "github.com/LerianStudio/lib-observability/v4/constants"
@@ -1619,6 +1621,36 @@ func TestRedactingAttrBagSpanProcessor_OnStart_TenantFromBaggage(t *testing.T) {
 		"request AttrBag must override baggage even through the redacting processor")
 }
 
+// The span masks by the log path's matcher (redaction.IsSensitiveField), not by
+// exact name, so a compound PII name never reaches a span in clear.
+func TestRedactingAttrBagSpanProcessor_OnStart_MasksCompoundSensitiveNames(t *testing.T) {
+	t.Parallel()
+
+	p := RedactingAttrBagSpanProcessor{Redactor: NewDefaultRedactor()}
+	exporter := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithSpanProcessor(p),
+		sdktrace.WithSyncer(exporter),
+	)
+	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
+
+	ctx := observability.ContextWithSpanAttributes(context.Background(),
+		attribute.String("app.request.nome_trabalhador", "Maria da Silva"),
+		attribute.String("app.request.customer_email", "maria@example.com"),
+		attribute.String("app.request.ip_address", "10.0.0.1"),
+	)
+	_, span := tp.Tracer("test").Start(ctx, "op")
+	span.End()
+
+	spans := exporter.GetSpans()
+	require.Len(t, spans, 1)
+
+	got := attrsToMap(spans[0].Attributes)
+	assert.Equal(t, constant.ObfuscatedValue, got["app.request.nome_trabalhador"])
+	assert.Equal(t, constant.ObfuscatedValue, got["app.request.customer_email"])
+	assert.Equal(t, "10.0.0.1", got["app.request.ip_address"], "an IP stays in clear, as on the log")
+}
+
 func TestRedactingAttrBagSpanProcessor_OnStart_WithContextAttributes(t *testing.T) {
 	t.Parallel()
 
@@ -2086,4 +2118,20 @@ func TestSanitizeSpanMessage_RedactsSchemeCredentials(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The innermost cause of a wrapped chain sits at its end; the cap keeps it.
+func TestErrorMessage_KeepsHeadAndTailOfLongChain(t *testing.T) {
+	t.Parallel()
+
+	root := errors.New("tenant db refused: ç")
+	err := fmt.Errorf("create contract: %w", fmt.Errorf("%s: %w", strings.Repeat("ç", 1000), root))
+
+	got := ErrorMessage(err)
+
+	assert.LessOrEqual(t, len(got), maxSpanErrorLength)
+	assert.True(t, utf8.ValidString(got))
+	assert.True(t, strings.HasPrefix(got, "create contract: ç"), got)
+	assert.True(t, strings.HasSuffix(got, ": "+root.Error()), got)
+	assert.Contains(t, got, "ç [...] ç")
 }

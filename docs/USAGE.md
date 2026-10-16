@@ -139,7 +139,7 @@ logger, err := zap.New(zap.Config{
 
 Emite: `http.server.request.duration` (s) e `http.server.active_requests`.
 
-Logs de acesso, nome do span SERVER e `url.path` usam somente o template da rota resolvido depois do handler (ex.: `/v1/accounts/:id`). Query string e valores nunca são retidos. Requests sem rota usam `/{unmatched}`; `http.route` fica ausente. `X-Tenant-Id` não entra em logs, spans nem labels das métricas HTTP.
+Nome do span SERVER, `url.path` e métricas usam somente o template da rota resolvido depois do handler (ex.: `/v1/accounts/:id`); requests sem rota usam `/{unmatched}` e `http.route` fica ausente. Na linha de acesso, rota casada loga o template; request sem rota (um 404, uma recusa de middleware global como rate limiter) loga o formato do path: mantém um segmento só quando ele é literal de uma rota que o app registrou; todo outro segmento é `*` (`/v1/dict/keys/*`); nunca a query. Nomeia o endpoint que o cliente chamou sem id, token ou chave Pix. A query string nunca é retida. `X-Tenant-Id` não entra em logs, spans nem labels das métricas HTTP.
 
 ```go
 import "github.com/LerianStudio/lib-observability/v4/middleware"
@@ -147,6 +147,33 @@ import "github.com/LerianStudio/lib-observability/v4/middleware"
 tm := middleware.NewTelemetryMiddleware(tel)
 app.Use(tm.WithTelemetry(tel))            // registra a instrumentação HTTP
 // opcional: app.Use(tm.EndTracingSpans)  // se usar o par end-spans
+```
+
+O nível da linha de acesso segue a classe do status da resposta: abaixo de 400 (1xx, 2xx, 3xx) loga em Debug, 4xx em Warn e 5xx sempre em Error. `WithSuccessLogLevel(level)` muda o nível dos status abaixo de 400 e `WithClientErrorLogLevel(level)` o dos 4xx; nível inválido é ignorado e a última chamada válida vence. Sem `WithCustomLogger`, o logger interno roda em Info, então a linha de um 2xx só aparece com `WithSuccessLogLevel(obslog.LevelInfo)`. As mesmas opções passadas a `LogRefusalsBeforeRouting` valem para as recusas. Sucesso fica em Debug por padrão porque duração e status já estão em `http.server.request.duration` e no span SERVER.
+
+```go
+import (
+    "github.com/LerianStudio/lib-observability/v4/middleware"
+)
+
+// padrão: <400 em Debug, 4xx em Warn, 5xx em Error
+app.Use(middleware.WithHTTPLogging(middleware.WithCustomLogger(logger)))
+```
+
+Para restaurar sucesso em Info, registre a variante configurada no lugar da
+padrão (nunca as duas: cada `WithHTTPLogging` emite a própria linha de acesso
+por request, e registrar ambas duplica o log):
+
+```go
+import (
+    "github.com/LerianStudio/lib-observability/v4/middleware"
+    obslog "github.com/LerianStudio/lib-observability/v4/log"
+)
+
+app.Use(middleware.WithHTTPLogging(
+    middleware.WithCustomLogger(logger),
+    middleware.WithSuccessLogLevel(obslog.LevelInfo),
+))
 ```
 
 Para métricas HTTP opt-in por tenant, use a identidade já validada no JWT. Não
