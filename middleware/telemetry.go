@@ -710,14 +710,14 @@ func recordHTTPServerDuration(
 // measured 2026-09-30 across the SaaS fleet, 4xx_by_tenant held 9 sets from 3
 // tenants (6 routes, 2 routes, 1 route), against 86 sets on the request counter.
 // Adding the code multiplies only what is already sparse - the ledger's 44
-// observed route+code pairs across 6 tenants bound the worst case at 264 sets,
-// and doubling the tenant count twice still lands under half the OTel SDK's
-// 2,000-set default. Tenants here are customers, so that count grows in years.
+// observed route+code pairs across 6 tenants bound the worst case at 264 sets;
+// four times the tenants is 1,056, under the OTel SDK's 2,000-set default.
+// Tenants here are customers, so that count grows in years.
 //
 // The latency histogram still carries only tenant and a bounded status class:
-// each label there multiplies by bucket_count+2, so it is the one instrument
-// where the exact code would be expensive. Method and per-route latency remain
-// trace-level questions.
+// each label there multiplies by explicit_boundary_count+3, so it is the one
+// instrument where the exact code would be expensive. Method and per-route
+// latency remain trace-level questions.
 func recordAuthenticatedTenantHTTPMetrics(
 	c fiber.Ctx,
 	instruments httpServerInstruments,
