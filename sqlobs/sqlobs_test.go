@@ -272,10 +272,12 @@ func TestInstrumentDB_NeverEmitsQueryText(t *testing.T) {
 
 	// Span side (otelsql captures db.query.text on spans by default; the helper
 	// MUST disable that).
-	spans := spanExp.GetSpans()
-	require.NotEmpty(t, spans, "expected query spans under the parent span")
+	// The parent span is exported too, so a non-empty list alone would pass
+	// with no query span to inspect.
+	require.Contains(t, spanNames(spanExp), string(otelsql.MethodConnQuery),
+		"expected a query span under the parent span")
 
-	for _, s := range spans {
+	for _, s := range spanExp.GetSpans() {
 		for _, kv := range s.Attributes {
 			key := string(kv.Key)
 			val := kv.Value.Emit()
