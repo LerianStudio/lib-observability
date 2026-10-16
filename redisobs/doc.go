@@ -25,6 +25,36 @@
 // redisotel emits db.client.operation.duration (seconds) and command spans with
 // db.system=redis. No connection is created by this package.
 //
+// To keep trace size down, command and pipeline spans carry no caller
+// attributes (code.function, code.filepath, code.lineno), and no "redis.dial"
+// span is opened per new pool connection. A failed dial still marks the command
+// span as an error. Spans still carry server.address, server.port and
+// db.connection_string; redisotel offers no option to drop the last one.
+// WithCommandFilter skips spans for chosen commands; AUTH and HELLO with
+// credentials are always skipped.
+//
+// # Spans need a parent span
+//
+// A command is traced only when its context already holds a valid parent span:
+// one started by the request middleware or by the caller, or a remote parent
+// extracted from incoming headers. A command with no parent — a background loop,
+// a poller, a health check — records no span. On its own it would become a
+// separate trace several times per second, even when there is no work, and the
+// duration metric already covers it. Metrics are recorded either way.
+//
+// To trace a background job, start a span around each unit of work and pass
+// its context to the commands. Start it only once there is work to do: a span
+// per empty poll brings back the traces this rule removes.
+//
+//	ctx, span := tracer.Start(ctx, "worker.process_batch")
+//	defer span.End()
+//
+//	err := client.Get(ctx, key).Err()
+//
+// The rule lives in the TracerProvider this package hands to redisotel, not in a
+// sampler, so OTEL_TRACES_SAMPLER and spans from other instrumentation are
+// unaffected.
+//
 // # PII / cardinality guardrail (docs/metrics-contract.md)
 //
 // redisotel attaches db.statement — the raw command including the key and, for

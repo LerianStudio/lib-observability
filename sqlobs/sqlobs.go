@@ -7,6 +7,7 @@ import (
 	"errors"
 
 	constant "github.com/LerianStudio/lib-observability/v4/constants"
+	"github.com/LerianStudio/lib-observability/v4/internal/childspan"
 	"github.com/XSAM/otelsql"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -65,6 +66,7 @@ type config struct {
 	poolRole       PoolRole
 	dsn            string
 	extraAttrs     []attribute.KeyValue
+	spanFilter     otelsql.SpanFilter
 }
 
 // Option configures the SQL instrumentation helpers.
@@ -102,6 +104,18 @@ func WithPoolRole(role PoolRole) Option {
 	}
 }
 
+// WithSpanFilter drops the DB spans filter rejects: otelsql calls it before
+// each span and skips the span when it returns false, for example to drop
+// sql.conn.begin_tx and sql.tx.commit spans. It only removes spans; the
+// db.client.operation.duration metric is still recorded for every operation.
+// A nil filter keeps every span. The filter receives the query text and bind
+// arguments, so it must never copy them into a log, span or metric.
+func WithSpanFilter(filter otelsql.SpanFilter) Option {
+	return func(c *config) {
+		c.spanFilter = filter
+	}
+}
+
 // WithDSN supplies the data source name used to re-open the connection through
 // the instrumented driver when instrumenting an existing *sql.DB via
 // InstrumentDB. A *sql.DB does not expose its DSN, so it must be provided here.
@@ -135,6 +149,12 @@ func newConfig(opts ...Option) config {
 	for _, opt := range opts {
 		opt(&cfg)
 	}
+
+	// Trace a query only when the context already holds a parent span, so
+	// background loops and health checks do not start one trace per query.
+	// Metrics are unaffected. Applied after the options so it also covers a
+	// provider passed through WithTracerProvider.
+	cfg.tracerProvider = childspan.RequireParent(cfg.tracerProvider)
 
 	return cfg
 }
@@ -173,6 +193,16 @@ func (c config) otelsqlOptions(system System) []otelsql.Option {
 			// default, set explicitly for intent).
 			Ping:     false,
 			RowsNext: false,
+			// Rows, reset-session, prepare and connect spans usually last
+			// microseconds and say nothing a query span does not, yet they
+			// multiply the span count of every trace. Drop them; otelsql still
+			// records db.client.operation.duration for these operations.
+			// Query, exec, statement, begin, commit and rollback spans stay.
+			OmitRows:             true,
+			OmitConnResetSession: true,
+			OmitConnPrepare:      true,
+			OmitConnectorConnect: true,
+			SpanFilter:           c.spanFilter,
 		}),
 	}
 }

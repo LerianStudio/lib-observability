@@ -18,12 +18,17 @@ import (
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // poolStatMetric is one of the ASYNCHRONOUS pool-stat instruments redisotel
 // registers on the meter. Asserted by name so the test fails loudly if the
 // upstream namespace ever drifts.
 const poolStatMetric = "db.client.connections.usage"
+
+// commandDurationMetric is the histogram redisotel records once per command,
+// in milliseconds, independently of the command span.
+const commandDurationMetric = "db.client.connections.use_time"
 
 // newRedisHarness builds real OTel SDK providers plus an in-memory span exporter
 // so the test can assert on the spans redisotel produces without an external
@@ -39,6 +44,22 @@ func newRedisHarness(t *testing.T) (*sdkmetric.MeterProvider, *sdktrace.TracerPr
 	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
 
 	return mp, tp, spanExp
+}
+
+// requestContext returns a context carrying a started parent span, standing in
+// for the request a command runs under: redisobs traces only commands that
+// already belong to a trace. The parent ends at cleanup, after the test's
+// assertions, so it is never among the exported spans a test inspects.
+func requestContext(t *testing.T, tp trace.TracerProvider) context.Context {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	t.Cleanup(cancel)
+
+	ctx, parent := tp.Tracer("redisobs-test").Start(ctx, "request")
+	t.Cleanup(func() { parent.End() })
+
+	return ctx
 }
 
 // newUnreachableClient returns a go-redis UniversalClient pointed at an address
@@ -59,7 +80,8 @@ func newUnreachableClient(t *testing.T) redis.UniversalClient {
 }
 
 // TestInstrument_AppliesHooksAndCreatesSpan verifies the helper wires tracing so
-// a command produces a redis span, and does so without error.
+// a command running under a parent span produces a redis span, and does so
+// without error.
 func TestInstrument_AppliesHooksAndCreatesSpan(t *testing.T) {
 	mp, tp, spanExp := newRedisHarness(t)
 
@@ -68,8 +90,7 @@ func TestInstrument_AppliesHooksAndCreatesSpan(t *testing.T) {
 	err := Instrument(client, WithMeterProvider(mp), WithTracerProvider(tp))
 	require.NoError(t, err)
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
+	ctx := requestContext(t, tp)
 
 	// The command will fail to connect; we only care that a span was produced.
 	_ = client.Get(ctx, "some-key").Err()
@@ -89,8 +110,7 @@ func TestInstrument_NeverEmitsCommandOrKeyAsAttribute(t *testing.T) {
 
 	require.NoError(t, Instrument(client, WithTracerProvider(tp)))
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
+	ctx := requestContext(t, tp)
 
 	const secretKey = "pix:key:123.456.789-00"
 	const secretVal = "super-secret-token"
@@ -115,6 +135,26 @@ func TestInstrument_NeverEmitsCommandOrKeyAsAttribute(t *testing.T) {
 			assert.NotContains(t, val, "123.456.789-00", "span attribute leaked PII: %s=%s", key, val)
 		}
 	}
+}
+
+// TestInstrument_NoParentSpanRecordsMetricOnly verifies a command with no parent
+// span — a background loop or a ping health check — starts no trace of its own,
+// while the command duration metric is still recorded.
+func TestInstrument_NoParentSpanRecordsMetricOnly(t *testing.T) {
+	mp, reader := newCollectingHarness(t)
+	_, tp, spanExp := newRedisHarness(t)
+
+	client := newUnreachableClient(t)
+
+	require.NoError(t, Instrument(client, WithMeterProvider(mp), WithTracerProvider(tp)))
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	_ = client.Get(ctx, "some-key").Err()
+
+	assert.Empty(t, spanExp.GetSpans(), "a command with no parent span must not start a trace")
+	assert.True(t, metricPresent(reader, commandDurationMetric), "the command duration metric must still be recorded")
 }
 
 // TestInstrument_NilClientReturnsError verifies the helper is nil-safe.
@@ -279,8 +319,7 @@ func TestSetup_NeverEmitsCommandOrKeyAsAttribute(t *testing.T) {
 
 	t.Cleanup(func() { _ = cleanup() })
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
+	ctx := requestContext(t, tp)
 
 	const secretKey = "pix:key:123.456.789-00"
 
@@ -344,8 +383,7 @@ func TestSetup_MetricsFailureLeavesNoTracingHook(t *testing.T) {
 
 	t.Cleanup(func() { _ = cleanup() })
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
+	ctx := requestContext(t, tp)
 
 	_ = client.Get(ctx, "some-key").Err()
 
@@ -365,9 +403,7 @@ func TestSetup_MetricsFailureLeavesNoTracingHook(t *testing.T) {
 
 	_ = client.Get(ctx, "another-key").Err()
 
-	// redisotel installs a dial hook as well as a process hook, so a command
-	// against an unreachable address emits both a "redis.dial" and a command
-	// span. Count the command span only: a leftover hook from the failed attempt
+	// Count the command span only: a leftover hook from the failed attempt
 	// shows up as a SECOND one of these.
 	var commandSpans int
 
@@ -379,4 +415,156 @@ func TestSetup_MetricsFailureLeavesNoTracingHook(t *testing.T) {
 
 	assert.Equal(t, 1, commandSpans,
 		"exactly one command span; two means the failed attempt left a tracing hook installed")
+}
+
+// startParentSpan returns a context that carries an open span, so every redis
+// span a test triggers is a child span, the way it is in a real request. The
+// parent ends at test cleanup, after the assertions have read the exporter.
+func startParentSpan(t *testing.T, tp *sdktrace.TracerProvider) context.Context {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, parent := tp.Tracer("redisobs_test").Start(ctx, "parent")
+
+	t.Cleanup(func() {
+		parent.End()
+		cancel()
+	})
+
+	return ctx
+}
+
+// spanNames lists the names of the spans exported so far.
+func spanNames(spanExp *tracetest.InMemoryExporter) []string {
+	spans := spanExp.GetSpans()
+	names := make([]string, 0, len(spans))
+
+	for _, s := range spans {
+		names = append(names, s.Name)
+	}
+
+	return names
+}
+
+// TestInstrument_OmitsCallerAttributes guards trace cost: redisotel adds
+// code.function, code.filepath and code.lineno to every command and pipeline
+// span unless told not to. The helper must turn that off.
+func TestInstrument_OmitsCallerAttributes(t *testing.T) {
+	t.Parallel()
+
+	_, tp, spanExp := newRedisHarness(t)
+	client := newUnreachableClient(t)
+
+	require.NoError(t, Instrument(client, WithTracerProvider(tp)))
+
+	ctx := startParentSpan(t, tp)
+
+	_ = client.Get(ctx, "some-key").Err()
+
+	pipe := client.Pipeline()
+	pipe.Get(ctx, "some-key")
+	_, _ = pipe.Exec(ctx)
+
+	spans := spanExp.GetSpans()
+	require.Contains(t, spanNames(spanExp), "get", "expected a command span")
+	require.Contains(t, spanNames(spanExp), "redis.pipeline get", "expected a pipeline span")
+
+	for _, s := range spans {
+		for _, kv := range s.Attributes {
+			assert.NotContains(t, []string{"code.function", "code.filepath", "code.lineno"}, string(kv.Key),
+				"span %q carries caller attribute %s", s.Name, kv.Key)
+		}
+	}
+}
+
+// TestInstrument_OmitsDialSpans guards trace cost: redisotel opens a
+// "redis.dial" span for every new pool connection unless told not to. The
+// command span must still be there.
+func TestInstrument_OmitsDialSpans(t *testing.T) {
+	t.Parallel()
+
+	_, tp, spanExp := newRedisHarness(t)
+	client := newUnreachableClient(t)
+
+	require.NoError(t, Instrument(client, WithTracerProvider(tp)))
+
+	ctx := startParentSpan(t, tp)
+
+	// The address is unreachable, so the command forces a dial attempt.
+	_ = client.Get(ctx, "some-key").Err()
+
+	names := spanNames(spanExp)
+	require.Contains(t, names, "get", "expected a command span")
+	assert.NotContains(t, names, "redis.dial", "dial spans must not be emitted")
+}
+
+// TestWithCommandFilter checks that a caller's filter skips the commands it
+// matches, and that AUTH and HELLO-with-credentials stay skipped whatever the
+// caller's filter returns: redisotel's own WithCommandFilter REPLACES its
+// default credential filter, so redisobs must keep applying it.
+func TestWithCommandFilter(t *testing.T) {
+	t.Parallel()
+
+	keepEverything := func(redis.Cmder) bool { return false }
+	skipPing := func(cmd redis.Cmder) bool { return cmd.Name() == "ping" }
+
+	tests := []struct {
+		name        string
+		filter      func(redis.Cmder) bool
+		commands    [][]any
+		wantSpans   []string
+		wantNoSpans []string
+	}{
+		{
+			name:        "skips the commands the filter matches",
+			filter:      skipPing,
+			commands:    [][]any{{"ping"}, {"get", "some-key"}},
+			wantSpans:   []string{"get"},
+			wantNoSpans: []string{"ping"},
+		},
+		{
+			name:   "keeps credential commands skipped when the filter keeps everything",
+			filter: keepEverything,
+			commands: [][]any{
+				{"auth", "secret"},
+				{"hello", 3, "auth", "user", "secret"},
+				{"get", "some-key"},
+			},
+			wantSpans:   []string{"get"},
+			wantNoSpans: []string{"auth", "hello"},
+		},
+		{
+			name:        "nil filter keeps the default",
+			filter:      nil,
+			commands:    [][]any{{"auth", "secret"}, {"ping"}},
+			wantSpans:   []string{"ping"},
+			wantNoSpans: []string{"auth"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, tp, spanExp := newRedisHarness(t)
+			client := newUnreachableClient(t)
+
+			require.NoError(t, Instrument(client, WithTracerProvider(tp), WithCommandFilter(tt.filter)))
+
+			ctx := startParentSpan(t, tp)
+
+			for _, args := range tt.commands {
+				_ = client.Do(ctx, args...).Err()
+			}
+
+			names := spanNames(spanExp)
+			for _, want := range tt.wantSpans {
+				assert.Contains(t, names, want)
+			}
+
+			for _, unwanted := range tt.wantNoSpans {
+				assert.NotContains(t, names, unwanted)
+			}
+		})
+	}
 }

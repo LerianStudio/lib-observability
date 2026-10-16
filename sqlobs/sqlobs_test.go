@@ -9,6 +9,7 @@ import (
 	"io"
 	"testing"
 
+	"github.com/XSAM/otelsql"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/attribute"
@@ -73,6 +74,22 @@ func (*fakeTx) Rollback() error { return nil }
 func init() {
 	sql.Register("sqlobs-fake", fakeDriver{})
 }
+
+// noisyConnector backs a *sql.DB whose driver has a connector and whose
+// connections reset their session, so database/sql runs the two operations the
+// plain fake skips: sql.connector.connect and sql.conn.reset_session.
+type noisyConnector struct{}
+
+func (noisyConnector) Connect(context.Context) (driver.Conn, error) { return &resettingConn{}, nil }
+func (noisyConnector) Driver() driver.Driver                        { return noisyDriver{} }
+
+type noisyDriver struct{ fakeDriver }
+
+func (noisyDriver) OpenConnector(string) (driver.Connector, error) { return noisyConnector{}, nil }
+
+type resettingConn struct{ fakeConn }
+
+func (*resettingConn) ResetSession(context.Context) error { return nil }
 
 // --- Harness ------------------------------------------------------------------
 
@@ -217,9 +234,15 @@ func TestInstrumentDB_NeverEmitsQueryText(t *testing.T) {
 
 	const secret = "SELECT secret_column FROM pix_keys WHERE cpf = '123.456.789-00'"
 
-	rows, err := db.QueryContext(context.Background(), secret)
+	// Run under a parent span: sqlobs traces only queries that already belong to
+	// a trace, and the span side of this check needs spans to inspect.
+	ctx, parent := tp.Tracer("sqlobs-test").Start(context.Background(), "request")
+
+	rows, err := db.QueryContext(ctx, secret)
 	require.NoError(t, err)
 	require.NoError(t, rows.Close())
+
+	parent.End()
 
 	forbidden := []string{
 		"db.statement",
@@ -249,6 +272,11 @@ func TestInstrumentDB_NeverEmitsQueryText(t *testing.T) {
 
 	// Span side (otelsql captures db.query.text on spans by default; the helper
 	// MUST disable that).
+	// The parent span is exported too, so a non-empty list alone would pass
+	// with no query span to inspect.
+	require.Contains(t, spanNames(spanExp), string(otelsql.MethodConnQuery),
+		"expected a query span under the parent span")
+
 	for _, s := range spanExp.GetSpans() {
 		for _, kv := range s.Attributes {
 			key := string(kv.Key)
@@ -289,6 +317,25 @@ func TestInstrumentDB_PoolRoleAttribute(t *testing.T) {
 	}
 
 	assert.True(t, found, "pool role attribute must be present when WithPoolRole is set")
+}
+
+// TestInstrumentDB_NoParentSpanRecordsMetricOnly verifies a query with no parent
+// span — a background loop or a health check — starts no trace of its own,
+// while db.client.operation.duration is still recorded.
+func TestInstrumentDB_NoParentSpanRecordsMetricOnly(t *testing.T) {
+	mp, reader, tp, spanExp := newHarness(t)
+
+	db, err := InstrumentDB(openFake(t), SystemPostgreSQL,
+		WithMeterProvider(mp),
+		WithTracerProvider(tp),
+	)
+	require.NoError(t, err)
+
+	_, err = db.ExecContext(context.Background(), "SELECT 1")
+	require.NoError(t, err)
+
+	assert.Empty(t, spanExp.GetSpans(), "a query with no parent span must not start a trace")
+	assert.NotEmpty(t, collectDurationDataPoints(t, reader), "the duration metric must still be recorded")
 }
 
 // TestInstrumentDB_NilDBReturnsError verifies the helper is nil-safe: a nil
@@ -351,4 +398,145 @@ func TestRegisterDBStatsMetrics_EmitsPoolMetrics(t *testing.T) {
 	}
 
 	assert.True(t, hasPoolMetric, "expected db.sql.connection.* pool metrics, got: %v", names)
+}
+
+// omittedSpans are the span kinds sqlobs never exports: they last microseconds
+// and repeat what the query span already says.
+var omittedSpans = []otelsql.Method{
+	otelsql.MethodRows,
+	otelsql.MethodConnResetSession,
+	otelsql.MethodConnPrepare,
+	otelsql.MethodConnectorConnect,
+}
+
+// keptSpans are the span kinds a trace still needs to show where DB time went.
+var keptSpans = []otelsql.Method{
+	otelsql.MethodConnQuery,
+	otelsql.MethodConnExec,
+	otelsql.MethodStmtExec,
+	otelsql.MethodConnBeginTx,
+	otelsql.MethodTxCommit,
+}
+
+// instrumentNoisy instruments a pool over the noisy fake driver, wired to the
+// harness providers plus any extra options.
+func instrumentNoisy(t *testing.T, mp *sdkmetric.MeterProvider, tp *sdktrace.TracerProvider, opts ...Option) *sql.DB {
+	t.Helper()
+
+	raw := sql.OpenDB(noisyConnector{})
+	t.Cleanup(func() { _ = raw.Close() })
+
+	opts = append([]Option{WithMeterProvider(mp), WithTracerProvider(tp)}, opts...)
+
+	db, err := InstrumentDB(raw, SystemPostgreSQL, opts...)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	return db
+}
+
+// runEveryOperation drives every operation otelsql instruments — connect,
+// query and its rows, exec on a reused (session-reset) connection, prepare and
+// statement exec, begin and commit — under one parent span, the way a request
+// handler would.
+func runEveryOperation(t *testing.T, db *sql.DB, tp *sdktrace.TracerProvider) {
+	t.Helper()
+
+	ctx, parent := tp.Tracer("sqlobs-test").Start(context.Background(), "request")
+	defer parent.End()
+
+	rows, err := db.QueryContext(ctx, "SELECT 1")
+	require.NoError(t, err)
+	require.NoError(t, rows.Close())
+
+	_, err = db.ExecContext(ctx, "UPDATE accounts SET balance = 0")
+	require.NoError(t, err)
+
+	stmt, err := db.PrepareContext(ctx, "INSERT INTO accounts VALUES (1)")
+	require.NoError(t, err)
+
+	_, err = stmt.ExecContext(ctx)
+	require.NoError(t, err)
+	require.NoError(t, stmt.Close())
+
+	tx, err := db.BeginTx(ctx, nil)
+	require.NoError(t, err)
+	require.NoError(t, tx.Commit())
+}
+
+func spanNames(spanExp *tracetest.InMemoryExporter) []string {
+	var names []string
+
+	for _, s := range spanExp.GetSpans() {
+		names = append(names, s.Name)
+	}
+
+	return names
+}
+
+// operationNames returns the db.operation.name of every duration data point.
+func operationNames(t *testing.T, reader *sdkmetric.ManualReader) []string {
+	t.Helper()
+
+	var names []string
+
+	for _, dp := range collectDurationDataPoints(t, reader) {
+		op, _ := attrString(dp.Attributes, "db.operation.name")
+		names = append(names, op)
+	}
+
+	return names
+}
+
+// TestInstrumentDB_OmitsNoiseSpans verifies rows, reset-session, prepare and
+// connect spans are not exported, while query, exec, statement, begin and
+// commit spans still are.
+func TestInstrumentDB_OmitsNoiseSpans(t *testing.T) {
+	mp, _, tp, spanExp := newHarness(t)
+
+	runEveryOperation(t, instrumentNoisy(t, mp, tp), tp)
+
+	names := spanNames(spanExp)
+
+	for _, method := range omittedSpans {
+		assert.NotContains(t, names, string(method), "span %q must be omitted", method)
+	}
+
+	for _, method := range keptSpans {
+		assert.Contains(t, names, string(method), "span %q must still be exported", method)
+	}
+}
+
+// TestInstrumentDB_OmittedSpansKeepTheirMetric verifies otelsql still records
+// db.client.operation.duration for the operations whose span is omitted. It
+// also proves the workload really ran those operations, so the missing spans in
+// TestInstrumentDB_OmitsNoiseSpans come from the omit options, not the fake.
+func TestInstrumentDB_OmittedSpansKeepTheirMetric(t *testing.T) {
+	mp, reader, tp, _ := newHarness(t)
+
+	runEveryOperation(t, instrumentNoisy(t, mp, tp), tp)
+
+	ops := operationNames(t, reader)
+
+	for _, method := range omittedSpans {
+		assert.Contains(t, ops, string(method), "duration metric for %q must still be recorded", method)
+	}
+}
+
+// TestWithSpanFilter_DropsRejectedSpans verifies a caller filter removes the
+// spans it rejects, keeps the others, and leaves the duration metric alone.
+func TestWithSpanFilter_DropsRejectedSpans(t *testing.T) {
+	mp, reader, tp, spanExp := newHarness(t)
+
+	dropTxSpans := func(_ context.Context, method otelsql.Method, _ string, _ []driver.NamedValue) bool {
+		return method != otelsql.MethodConnBeginTx && method != otelsql.MethodTxCommit
+	}
+
+	runEveryOperation(t, instrumentNoisy(t, mp, tp, WithSpanFilter(dropTxSpans)), tp)
+
+	names := spanNames(spanExp)
+	assert.NotContains(t, names, string(otelsql.MethodConnBeginTx))
+	assert.NotContains(t, names, string(otelsql.MethodTxCommit))
+	assert.Contains(t, names, string(otelsql.MethodConnQuery))
+	assert.Contains(t, operationNames(t, reader), string(otelsql.MethodTxCommit))
 }

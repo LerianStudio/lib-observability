@@ -53,6 +53,10 @@ const (
 // rpcSystemGRPC is the rpc.system attribute value for gRPC calls.
 const rpcSystemGRPC = "grpc"
 
+// grpcHealthServicePrefix is the full-method prefix of the standard gRPC
+// health service, grpc.health.v1.Health (Check, Watch, List).
+const grpcHealthServicePrefix = "/grpc.health.v1.Health/"
+
 // metadataID is the gRPC metadata key that carries the request context identifier.
 const metadataID = "metadata_id"
 
@@ -203,6 +207,9 @@ func (tm *TelemetryMiddleware) collectMetrics(_ context.Context) error {
 
 // WithTelemetryInterceptor is a gRPC interceptor that adds tracing to the context.
 //
+// Methods of the standard gRPC health service (/grpc.health.v1.Health/) get no
+// span: they still record rpc.server.duration, exactly as when tracing is off.
+//
 // When the effective Telemetry has a non-nil MeterProvider AND a non-nil
 // MetricsFactory, the interceptor also records the rpc.server.duration
 // (Float64 seconds) histogram for every call, independently of whether tracing
@@ -261,7 +268,9 @@ func (tm *TelemetryMiddleware) WithTelemetryInterceptor(tl *tracing.Telemetry) g
 			methodName = info.FullMethod
 		}
 
-		if effectiveTelemetry.TracerProvider == nil {
+		ctx = withEmptyEndStateForHealthCheck(ctx, methodName)
+
+		if !opensServerSpan(effectiveTelemetry, methodName) {
 			start := time.Now()
 			resp, err := handler(ctx, req)
 			err = NormalizeGRPCError(err)
@@ -349,6 +358,34 @@ func (tm *TelemetryMiddleware) WithTelemetryInterceptor(tl *tracing.Telemetry) g
 
 		return resp, err
 	}
+}
+
+// opensServerSpan reports whether WithTelemetryInterceptor opens a server span
+// for fullMethod: tracing must be on, and the method must not belong to the
+// standard gRPC health service. Probes call a health check many times a
+// minute, usually with no trace context, so each call would otherwise be a
+// root trace of its own.
+func opensServerSpan(tl *tracing.Telemetry, fullMethod string) bool {
+	return tl.TracerProvider != nil && !isGRPCHealthCheck(fullMethod)
+}
+
+// isGRPCHealthCheck reports whether fullMethod belongs to the standard gRPC
+// health service.
+func isGRPCHealthCheck(fullMethod string) bool {
+	return strings.HasPrefix(fullMethod, grpcHealthServicePrefix)
+}
+
+// withEmptyEndStateForHealthCheck stores an empty span-end state in ctx when
+// fullMethod is a health check. A health check opens no span, and the empty
+// state tells EndTracingSpansInterceptor there is nothing to end. Without it,
+// that interceptor falls back to ending trace.SpanFromContext(ctx), a span
+// that belongs to someone upstream.
+func withEmptyEndStateForHealthCheck(ctx context.Context, fullMethod string) context.Context {
+	if !isGRPCHealthCheck(fullMethod) {
+		return ctx
+	}
+
+	return contextWithSpanEndState(ctx, &spanEndState{})
 }
 
 // recordRPCDuration emits an RPC duration histogram observation (server or
