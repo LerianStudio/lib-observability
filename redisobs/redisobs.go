@@ -38,6 +38,7 @@ type config struct {
 	meterProvider  metric.MeterProvider
 	tracerProvider trace.TracerProvider
 	extraAttrs     []attribute.KeyValue
+	commandFilter  func(cmd redis.Cmder) bool
 }
 
 // Option configures the redis instrumentation helper.
@@ -69,6 +70,19 @@ func WithTracerProvider(tp trace.TracerProvider) Option {
 func WithAttributes(attrs ...attribute.KeyValue) Option {
 	return func(c *config) {
 		c.extraAttrs = append(c.extraAttrs, attrs...)
+	}
+}
+
+// WithCommandFilter skips the span of every single command for which filter
+// returns true. AUTH and HELLO with credentials stay skipped whatever filter
+// returns: redisotel.DefaultCommandFilter always runs first, so a filter can
+// never put credential-bearing commands back on spans. Pipelines keep
+// redisotel's default pipeline filter. A nil filter is ignored.
+func WithCommandFilter(filter func(cmd redis.Cmder) bool) Option {
+	return func(c *config) {
+		if filter != nil {
+			c.commandFilter = filter
+		}
 	}
 }
 
@@ -165,12 +179,36 @@ func instrument(client redis.UniversalClient, closeChan chan struct{}, opts ...O
 		// command / key / value (db.statement) to spans. redisotel enables it by
 		// default.
 		redisotel.WithDBStatement(false),
+		// TRACE COST: redisotel walks the call stack on every command and
+		// pipeline to add code.function, code.filepath and code.lineno. They
+		// repeat on every redis span of a trace, and the parent span already
+		// names the calling code.
+		redisotel.WithCallerEnabled(false),
+		// TRACE COST: no "redis.dial" span per new pool connection. A failed
+		// dial still marks the command span as an error, and connection churn
+		// stays visible in the db.client.connections.* metrics.
+		redisotel.WithDialFilter(true),
 	}
 	if len(commonAttrs) > 0 {
 		tracingOpts = append(tracingOpts, redisotel.WithAttributes(commonAttrs...))
 	}
 
+	if cfg.commandFilter != nil {
+		tracingOpts = append(tracingOpts, redisotel.WithCommandFilter(filterCredentialsFirst(cfg.commandFilter)))
+	}
+
 	return redisotel.InstrumentTracing(client, tracingOpts...)
+}
+
+// filterCredentialsFirst returns a filter that skips what
+// redisotel.DefaultCommandFilter skips (AUTH, HELLO with credentials) and then
+// what filter skips. redisotel.WithCommandFilter REPLACES its default filter
+// instead of adding to it, so passing a caller's filter straight through would
+// put credential-bearing commands back on spans.
+func filterCredentialsFirst(filter func(cmd redis.Cmder) bool) func(cmd redis.Cmder) bool {
+	return func(cmd redis.Cmder) bool {
+		return redisotel.DefaultCommandFilter(cmd) || filter(cmd)
+	}
 }
 
 // System returns the db.system value redisotel emits for both Redis and Valkey.

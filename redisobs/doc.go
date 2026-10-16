@@ -25,6 +25,14 @@
 // redisotel emits db.client.operation.duration (seconds) and command spans with
 // db.system=redis. No connection is created by this package.
 //
+// To keep trace size down, command and pipeline spans carry no caller
+// attributes (code.function, code.filepath, code.lineno), and no "redis.dial"
+// span is opened per new pool connection. A failed dial still marks the command
+// span as an error. Spans still carry server.address, server.port and
+// db.connection_string; redisotel offers no option to drop the last one.
+// WithCommandFilter skips spans for chosen commands; AUTH and HELLO with
+// credentials are always skipped.
+//
 // # PII / cardinality guardrail (docs/metrics-contract.md)
 //
 // redisotel attaches db.statement — the raw command including the key and, for
