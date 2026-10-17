@@ -7,8 +7,10 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"errors"
+	"sync/atomic"
 	"testing"
 
+	"github.com/XSAM/otelsql"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
@@ -256,4 +258,147 @@ func TestSetupOpen_InstrumentsAndRegistersPoolStats(t *testing.T) {
 	assert.Equal(t, "mysql", system)
 
 	assert.Contains(t, collectMetricNames(t, reader), connectionOpenMetric)
+}
+
+// pinnedConnector stands in for a configured driver connector (pgx's carries the
+// endpoint and OnNotice): Connect dials its own target, while its Driver is the
+// generic driver whose DSN reopen would lose that configuration.
+type pinnedConnector struct {
+	connects *atomic.Int32
+	opens    *atomic.Int32
+}
+
+func newPinnedConnector() pinnedConnector {
+	return pinnedConnector{connects: new(atomic.Int32), opens: new(atomic.Int32)}
+}
+
+func (c pinnedConnector) Connect(context.Context) (driver.Conn, error) {
+	c.connects.Add(1)
+
+	return &fakeConn{}, nil
+}
+
+func (c pinnedConnector) Driver() driver.Driver { return genericDriver{opens: c.opens} }
+
+type genericDriver struct{ opens *atomic.Int32 }
+
+func (d genericDriver) Open(string) (driver.Conn, error) {
+	d.opens.Add(1)
+
+	return nil, errors.New("genericDriver: reopened by DSN, connector configuration lost")
+}
+
+// TestSetupConnector_DialsThroughSuppliedConnector proves the connector stays
+// authoritative: every connection comes from its Connect, never from a DSN
+// reopen through its Driver, not even when WithDSN names another target.
+func TestSetupConnector_DialsThroughSuppliedConnector(t *testing.T) {
+	connector := newPinnedConnector()
+
+	db, cleanup, err := SetupConnector(connector, SystemPostgreSQL, WithDSN("fake://other"))
+	require.NoError(t, err)
+
+	t.Cleanup(func() {
+		_ = cleanup()
+		_ = db.Close()
+	})
+
+	_, err = db.ExecContext(context.Background(), "SELECT 1")
+	require.NoError(t, err)
+
+	assert.Positive(t, connector.connects.Load(), "connections must come from the supplied connector")
+	assert.Zero(t, connector.opens.Load(), "the generic driver must never reopen by DSN")
+}
+
+// The connector path preserves query guardrails and pool gauges; cleanup leaves the pool open.
+func TestSetupConnector_KeepsGuardrailsAndPoolGauges(t *testing.T) {
+	mp, reader, tp, spanExp := newHarness(t)
+
+	db, cleanup, err := SetupConnector(newPinnedConnector(), SystemPostgreSQL,
+		WithMeterProvider(mp),
+		WithTracerProvider(tp),
+		WithPoolRole(PoolRolePrimary),
+	)
+	require.NoError(t, err)
+
+	t.Cleanup(func() { _ = db.Close() })
+
+	ctx, parent := tp.Tracer("sqlobs-test").Start(context.Background(), "request")
+
+	func() {
+		rows, err := db.QueryContext(ctx, "SELECT secret_column FROM pix_keys")
+		require.NoError(t, err)
+
+		defer func() { require.NoError(t, rows.Close()) }()
+
+		require.NoError(t, rows.Err())
+	}()
+
+	parent.End()
+
+	points := collectDurationDataPoints(t, reader)
+	require.NotEmpty(t, points)
+
+	system, _ := attrString(points[0].Attributes, "db.system.name")
+	assert.Equal(t, "postgresql", system)
+
+	role, _ := attrString(points[0].Attributes, poolRoleAttrKey)
+	assert.Equal(t, string(PoolRolePrimary), role)
+
+	names := spanNames(spanExp)
+	require.Contains(t, names, string(otelsql.MethodConnQuery))
+	assert.NotContains(t, names, string(otelsql.MethodConnectorConnect))
+
+	for _, s := range spanExp.GetSpans() {
+		for _, kv := range s.Attributes {
+			assert.NotEqual(t, "db.query.text", string(kv.Key), "DisableQuery guardrail failed")
+			assert.NotContains(t, kv.Value.String(), "secret_column", "span leaked query text")
+		}
+	}
+
+	require.Contains(t, collectMetricNames(t, reader), connectionOpenMetric)
+
+	require.NoError(t, cleanup())
+	assert.NotContains(t, collectMetricNames(t, reader), connectionOpenMetric)
+
+	require.NoError(t, db.PingContext(context.Background()), "cleanup must not close the caller's pool")
+}
+
+// TestSetupConnector_NilConnector verifies nil-safety: an error, a usable no-op
+// cleanup, and no panic.
+func TestSetupConnector_NilConnector(t *testing.T) {
+	db, cleanup, err := SetupConnector(nil, SystemPostgreSQL)
+
+	require.ErrorIs(t, err, ErrNilConnector)
+	assert.Nil(t, db)
+	require.NotNil(t, cleanup, "cleanup must never be nil, even on error")
+	assert.NoError(t, cleanup())
+}
+
+// TestSetupConnector_GaugeFailureKeepsConnectorPool is ADR-008 on the connector
+// path: a refused gauge registration is informational, and the handle still
+// dials through the supplied connector rather than any fallback.
+func TestSetupConnector_GaugeFailureKeepsConnectorPool(t *testing.T) {
+	connector := newPinnedConnector()
+	view := sdkmetric.NewView(
+		sdkmetric.Instrument{Name: "db.sql.connection.max_open"},
+		sdkmetric.Stream{Aggregation: sdkmetric.AggregationSum{}},
+	)
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(sdkmetric.NewManualReader()), sdkmetric.WithView(view))
+
+	t.Cleanup(func() { require.NoError(t, mp.Shutdown(context.Background())) })
+
+	db, cleanup, err := SetupConnector(connector, SystemPostgreSQL, WithMeterProvider(mp))
+	require.Error(t, err)
+	require.NotNil(t, db)
+
+	t.Cleanup(func() { _ = db.Close() })
+
+	require.NotNil(t, cleanup, "cleanup must never be nil, even on error")
+	require.NoError(t, cleanup())
+
+	_, err = db.ExecContext(context.Background(), "SELECT 1")
+	require.NoError(t, err)
+
+	assert.Positive(t, connector.connects.Load())
+	assert.Zero(t, connector.opens.Load())
 }

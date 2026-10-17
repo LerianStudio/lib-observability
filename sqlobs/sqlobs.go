@@ -48,6 +48,10 @@ const poolRoleAttrKey = "db.sql.pool.role"
 // passes a nil *sql.DB.
 var ErrNilDB = errors.New("sqlobs: nil *sql.DB")
 
+// ErrNilConnector is returned by SetupConnector when the caller passes a nil
+// driver.Connector.
+var ErrNilConnector = errors.New("sqlobs: nil driver.Connector")
+
 // ErrDSNRequired is returned by Setup when it has no non-empty DSN to work with
 // — WithDSN omitted, or given an empty string. Instrumenting an existing *sql.DB
 // means re-opening its driver, and a *sql.DB does not expose the DSN it was

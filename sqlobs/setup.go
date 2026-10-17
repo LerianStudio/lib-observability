@@ -2,9 +2,12 @@ package sqlobs
 
 import (
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"sync"
+
+	"github.com/XSAM/otelsql"
 )
 
 // CleanupFunc releases the resources Setup registered against the meter — today
@@ -142,4 +145,19 @@ func SetupOpen(driverName, dsn string, system System, opts ...Option) (*sql.DB, 
 	cleanup, rerr := registerStats(db, system, opts...)
 
 	return db, cleanup, rerr
+}
+
+// SetupConnector instruments the supplied connector and registers pool gauges without reopening by DSN; WithDSN is ignored.
+// The caller owns and tunes the pool; cleanup releases only gauges. A gauge error leaves the connector-backed pool usable.
+// A nil connector returns a nil pool, no-op cleanup and ErrNilConnector.
+func SetupConnector(connector driver.Connector, system System, opts ...Option) (*sql.DB, CleanupFunc, error) {
+	if connector == nil {
+		return nil, noopCleanup, ErrNilConnector
+	}
+
+	db := otelsql.OpenDB(connector, newConfig(opts...).otelsqlOptions(system)...)
+
+	cleanup, err := registerStats(db, system, opts...)
+
+	return db, cleanup, err
 }

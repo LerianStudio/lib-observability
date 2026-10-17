@@ -272,11 +272,11 @@ defer db.Close()  // o handle retornado tem pool PRÓPRIO — fechá-lo é do ch
 db.SetMaxOpenConns(25) // tuning DEPOIS do Setup, no handle retornado
 ```
 
-**Na troca bem-sucedida** `Setup` **fecha o `rawDB`** (o handle retornado tem pool próprio — `sql.Open` é lazy, então nada foi discado). Fechar o handle retornado continua sendo do chamador: `cleanup()` só libera as gauges, não o pool. Com o DSN em mãos, `sqlobs.SetupOpen(driverName, dsn, system, opts...)` já abre instrumentado e dispensa o handle descartável.
+**Na troca bem-sucedida** `Setup` **fecha o `rawDB`** (o handle retornado tem pool próprio — `sql.Open` é lazy, então nada foi discado). Fechar o handle retornado continua sendo do chamador: `cleanup()` só libera as gauges, não o pool. Com o DSN em mãos, `sqlobs.SetupOpen(driverName, dsn, system, opts...)` já abre instrumentado e dispensa o handle descartável. Quando a configuração mora num `driver.Connector` (ex.: `stdlib.GetConnector` do pgx com `OnNotice`), use `sqlobs.SetupConnector(connector, system, opts...)`: toda conexão sai do `Connect` do connector, nunca de um reopen por DSN (`WithDSN` é ignorado), e um connector nil devolve handle nil e `sqlobs.ErrNilConnector`.
 
 **`WithDSN` é obrigatório** e agora é imposto: um `*sql.DB` não expõe o DSN com que foi aberto, então sem DSN (omitido ou vazio) o `Setup` não tem como recriar com segurança a configuração de conexão original — o substituto de DSN vazio pode falhar na primeira query ou conectar em defaults não intencionais do driver. Nesse caso `Setup` **recusa a troca** — devolve o `rawDB` intacto (ainda aberto e NÃO fechado), um `cleanup` no-op e `sqlobs.ErrDSNRequired`. Instrumentação nunca custa conectividade (ADR-008).
 
-Em erro o `cleanup` nunca é nil e o handle devolvido segue usável — a única exceção é `rawDB == nil`, que devolve `nil` e `sqlobs.ErrNilDB`, porque não havia handle para preservar.
+Em erro de registro das gauges, o `cleanup` nunca é nil e o handle devolvido segue usável. `Setup` com `rawDB == nil` e `SetupConnector` com connector nil devolvem handle nil, pois não há conexão para preservar.
 
 As seções abaixo mostram os passos que o `Setup` compõe (úteis p/ o caso do dbresolver, onde cada pool é instrumentado separadamente).
 
