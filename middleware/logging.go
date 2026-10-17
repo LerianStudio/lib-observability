@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,7 +17,6 @@ import (
 	constant "github.com/LerianStudio/lib-observability/v4/constants"
 	"github.com/LerianStudio/lib-observability/v4/grpcmiddleware"
 	obslog "github.com/LerianStudio/lib-observability/v4/log"
-	"github.com/LerianStudio/lib-observability/v4/redaction"
 	"github.com/LerianStudio/lib-observability/v4/tracing"
 	"github.com/gofiber/fiber/v3"
 	"github.com/valyala/fasthttp"
@@ -456,7 +454,6 @@ func writeAccessLine(c fiber.Ctx, mid *logMiddleware, logger obslog.Logger, info
 const (
 	maxProblemBodyBytes = 8 << 10
 	maxProblemValueLen  = 128
-	maxProblemInputLen  = 64
 	maxProblemErrors    = 10
 )
 
@@ -468,9 +465,8 @@ type problemBody struct {
 	Detail  string          `json:"detail"`
 	Message string          `json:"message"`
 	Errors  []struct {
-		Location string          `json:"location"`
-		Message  string          `json:"message"`
-		Value    json.RawMessage `json:"value"`
+		Location string `json:"location"`
+		Message  string `json:"message"`
 	} `json:"errors"`
 }
 
@@ -488,8 +484,8 @@ func problemFields(c fiber.Ctx, errorText string) []obslog.Field {
 		return nil
 	}
 
-	// A JSON-shaped body goes through the struct whatever its label, so the
-	// mask on a sensitive location cannot be bypassed through problem_text.
+	// A JSON-shaped body goes through the struct whatever its label, so an
+	// echoed errors[] value cannot reach the line through problem_text.
 	mediaType, _, _ := strings.Cut(string(response.Header.ContentType()), ";")
 	trimmed := bytes.TrimSpace(body)
 	jsonShaped := strings.HasSuffix(strings.ToLower(strings.TrimSpace(mediaType)), "json") ||
@@ -532,7 +528,7 @@ func problemFields(c fiber.Ctx, errorText string) []obslog.Field {
 	entries := make([]string, 0, len(kept))
 
 	for _, detail := range kept {
-		entries = append(entries, problemError(detail.Location, detail.Message, detail.Value))
+		entries = append(entries, problemError(detail.Location, detail.Message))
 	}
 
 	fields = append(fields, obslog.Any("problem_errors", entries))
@@ -544,29 +540,12 @@ func problemFields(c fiber.Ctx, errorText string) []obslog.Field {
 	return fields
 }
 
-// problemError renders one errors[] entry as "<location>: <message> value=<raw JSON>".
-func problemError(location, message string, value json.RawMessage) string {
-	segments := strings.FieldsFunc(location, func(r rune) bool { return r == '.' || r == '[' || r == ']' })
-	// Any segment naming a redacted field masks: body.holder.email, header.Authorization.
-	masked := slices.ContainsFunc(segments, func(segment string) bool { return redaction.IsSensitiveField(segment) })
+// problemError renders one errors[] entry as "<location>: <message>", never its
+// value: that is client input. The cut at ": " drops the input Huma quotes in a parse error.
+func problemError(location, message string) string {
+	message, _, _ = strings.Cut(message, ": ")
 
-	// Cut at ": " drops Huma's quoted parse error, which echoes the masked input.
-	if masked {
-		message, _, _ = strings.Cut(message, ": ")
-	}
-
-	entry := problemValue(location + ": " + message)
-
-	switch {
-	case len(value) == 0 || len(segments) < 2 || value[0] == '{' || value[0] == '[':
-		// Absent; a bare root (body, query) whose value is the raw request; or a
-		// container whose keys the mask cannot see.
-		return entry
-	case masked:
-		return entry + " value=[REDACTED]"
-	default:
-		return entry + " value=" + clip(problemValue(string(value)), maxProblemInputLen)
-	}
+	return problemValue(location + ": " + message)
 }
 
 // problemValue applies the error field's redaction and the line's sanitizing, then the cap.

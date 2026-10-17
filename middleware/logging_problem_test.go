@@ -20,7 +20,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// cpfLike is a CPF-shaped input a refusal body may echo; CPF is logged in clear.
+// cpfLike is a CPF-shaped input a refusal body may echo.
 const cpfLike = "12345678909"
 
 // libCommonsErrorResponse mirrors lib-commons ErrorResponse (commons/net/http),
@@ -80,13 +80,13 @@ func TestWithHTTPLoggingLogsProblemReasonOnRefusedRequests(t *testing.T) {
 		"problem_title":  "Unprocessable Entity",
 		"problem_detail": "validation failed",
 		"problem_errors": []string{
-			`body.cpf: expected length <= 11 value="` + cpfLike + `00"`,
-			`body.site: expected string to be RFC 3986 uri: parse "` + cpfLike + `%zz": invalid URL escape "%zz" value="` + cpfLike + `%zz"`,
+			"body.cpf: expected length <= 11",
+			"body.site: expected string to be RFC 3986 uri",
 		},
 	}
 	firstTen := make([]string, maxProblemErrors)
 	for i := range firstTen {
-		firstTen[i] = fmt.Sprintf(`body.f%d: expected number value="%s"`, i, cpfLike)
+		firstTen[i] = fmt.Sprintf("body.f%d: expected number", i)
 	}
 	hugeBody := `{"code":"X-0001","title":"Bad Request","detail":"` + strings.Repeat("x", 9<<10) + `"}`
 
@@ -97,7 +97,7 @@ func TestWithHTTPLoggingLogsProblemReasonOnRefusedRequests(t *testing.T) {
 		wantLevel int
 	}{
 		{
-			name:      "huma 422 logs location, whole message and value",
+			name:      "huma 422 logs location and message, never the input",
 			handler:   sendBody(http.StatusUnprocessableEntity, problemJSON, huma422),
 			want:      huma422Fields,
 			wantLevel: obslog.LevelWarn,
@@ -160,13 +160,13 @@ func TestWithHTTPLoggingLogsProblemReasonOnRefusedRequests(t *testing.T) {
 			wantLevel: obslog.LevelWarn,
 		},
 		{
-			name: "value of a sensitive location is masked, its parse error cut",
+			name: "sensitive location logs no value, its parse error cut",
 			handler: sendBody(http.StatusUnprocessableEntity, problemJSON, `{"errors":[`+
 				`{"location":"body.holder.email","message":"expected string to be RFC 5322 email: mail: no @ in joao.silva","value":"joao.silva"},`+
 				`{"location":"header.Authorization","message":"expected string","value":"Bearer eyJhbGciOi"}]}`),
 			want: map[string]any{"problem_errors": []string{
-				"body.holder.email: expected string to be RFC 5322 email value=[REDACTED]",
-				"header.Authorization: expected string value=[REDACTED]",
+				"body.holder.email: expected string to be RFC 5322 email",
+				"header.Authorization: expected string",
 			}},
 			wantLevel: obslog.LevelWarn,
 		},
@@ -192,14 +192,14 @@ func TestWithHTTPLoggingLogsProblemReasonOnRefusedRequests(t *testing.T) {
 			wantLevel: obslog.LevelWarn,
 		},
 		{
-			name: "value is capped at 64 bytes; numbers kept, containers never logged",
+			name: "no value is logged: string, number or container",
 			handler: sendBody(http.StatusUnprocessableEntity, problemJSON, `{"errors":[`+
 				`{"location":"body.ref","message":"expected length <= 10","value":"`+longDetail+`"},`+
-				`{"location":"body.amount","message":"expected number <= 100","value":250},`+
+				`{"location":"body.document","message":"expected string","value":`+cpfLike+`},`+
 				`{"location":"body","message":"expected required property cpf to be present","value":{"nome":"JOAO"}}]}`),
 			want: map[string]any{"problem_errors": []string{
-				`body.ref: expected length <= 10 value="` + longDetail[:63],
-				"body.amount: expected number <= 100 value=250",
+				"body.ref: expected length <= 10",
+				"body.document: expected string",
 				"body: expected required property cpf to be present",
 			}},
 			wantLevel: obslog.LevelWarn,
