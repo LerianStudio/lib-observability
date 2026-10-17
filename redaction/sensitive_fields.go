@@ -106,6 +106,8 @@ var defaultSensitiveFields = []string{
 	"agencia",
 	"conta",
 	"chave_pix",
+	"cpf",
+	"cnpj",
 }
 
 // clearFields are names a default entry matches by one token that carry no

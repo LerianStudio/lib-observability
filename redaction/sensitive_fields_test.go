@@ -198,8 +198,8 @@ func TestIsSensitiveFieldExtraMatchesPlural(t *testing.T) {
 }
 
 // TestIsSensitiveFieldDecidedList pins the product decision: request
-// identifiers (CPF, CNPJ, client_id, idempotency key, IP) log in clear;
-// names, phone, address, bank data and Pix keys are masked, Portuguese included.
+// identifiers (client_id, idempotency key, IP) log in clear; CPF, CNPJ, names,
+// phone, address, bank data and Pix keys are masked, Portuguese included.
 func TestIsSensitiveFieldDecidedList(t *testing.T) {
 	t.Parallel()
 
@@ -215,8 +215,6 @@ func TestIsSensitiveFieldDecidedList(t *testing.T) {
 		{field: "idempotency_key_digest", want: false},
 		{field: "ip_address", want: false},
 		{field: "ipAddress", want: false},
-		{field: "cpf", want: false},
-		{field: "cnpj", want: false},
 		{field: "matricula", want: false},
 		{field: "numero_contrato", want: false},
 		{field: "fund_tax_id", want: false},
@@ -246,6 +244,10 @@ func TestIsSensitiveFieldDecidedList(t *testing.T) {
 		{field: "agencia", want: true},
 		{field: "conta_digito", want: true},
 		{field: "chave_pix", want: true},
+		{field: "cpf", want: true},
+		{field: "cnpj", want: true},
+		{field: "cpfCnpj", want: true},
+		{field: "documentType", want: false},
 		{field: "authorization", want: true},
 		{field: "password", want: true},
 		{field: "senha", want: true},
