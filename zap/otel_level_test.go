@@ -5,15 +5,22 @@ package zap
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"errors"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	logpkg "github.com/LerianStudio/lib-observability/v4/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/attribute"
 	otellog "go.opentelemetry.io/otel/log"
 	"go.opentelemetry.io/otel/log/global"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
+	oteltrace "go.opentelemetry.io/otel/trace"
+	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
 
@@ -23,8 +30,11 @@ import (
 
 // recordingExporter keeps the body of every record the SDK exports.
 type recordingExporter struct {
-	mu     sync.Mutex
-	bodies []string
+	mu       sync.Mutex
+	bodies   []string
+	attrs    []string
+	raw      []string
+	traceIDs []string
 }
 
 func (e *recordingExporter) Export(_ context.Context, records []sdklog.Record) error {
@@ -33,6 +43,14 @@ func (e *recordingExporter) Export(_ context.Context, records []sdklog.Record) e
 
 	for _, r := range records {
 		e.bodies = append(e.bodies, r.Body().AsString())
+		e.traceIDs = append(e.traceIDs, r.TraceID().String())
+
+		r.WalkAttributes(func(kv attribute.KeyValue) bool {
+			e.attrs = append(e.attrs, string(kv.Key)+"="+kv.Value.Emit())
+			e.raw = append(e.raw, string(kv.Key)+"="+exportedText(kv.Value))
+
+			return true
+		})
 	}
 
 	return nil
@@ -46,6 +64,54 @@ func (e *recordingExporter) seen() []string {
 	defer e.mu.Unlock()
 
 	return append([]string(nil), e.bodies...)
+}
+
+func (e *recordingExporter) seenTraceIDs() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	return append([]string(nil), e.traceIDs...)
+}
+
+// seenRawAttrs is each exported attribute with byte values as their raw text,
+// which is what the collector receives on the wire: Emit and String render
+// bytes as base64, where no document pattern matches.
+func (e *recordingExporter) seenRawAttrs() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	return append([]string(nil), e.raw...)
+}
+
+// exportedText flattens v with every byte value as its raw text.
+func exportedText(v attribute.Value) string {
+	switch v.Type() {
+	case attribute.BYTESLICE:
+		return string(v.AsByteSlice())
+	case attribute.SLICE:
+		parts := make([]string, 0, len(v.AsSlice()))
+		for _, item := range v.AsSlice() {
+			parts = append(parts, exportedText(item))
+		}
+
+		return "[" + strings.Join(parts, " ") + "]"
+	case attribute.MAP:
+		parts := make([]string, 0, len(v.AsMap()))
+		for _, kv := range v.AsMap() {
+			parts = append(parts, string(kv.Key)+":"+exportedText(kv.Value))
+		}
+
+		return "{" + strings.Join(parts, " ") + "}"
+	default:
+		return v.String()
+	}
+}
+
+func (e *recordingExporter) seenAttrs() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	return append([]string(nil), e.attrs...)
 }
 
 // Services build the logger before installing the OTel SDK, while the global
@@ -99,4 +165,354 @@ func TestConfiguredLevelGatesTheOTelBridge(t *testing.T) {
 	assert.Equal(t, []string{"info at level", "debug after SetLevel"}, exporter.seen(),
 		"a runtime level change must reach the OTLP bridge")
 	assert.Contains(t, buf.String(), "debug after SetLevel")
+}
+
+// Config.ScrubDocuments must reach the OTLP bridge, not only the local sink:
+// the record body and its attributes leave the process too.
+func TestScrubDocumentsReachesTheOTelBridge(t *testing.T) {
+	prev := global.GetLoggerProvider()
+	t.Cleanup(func() { global.SetLoggerProvider(prev) })
+
+	exporter := &recordingExporter{}
+	provider := sdklog.NewLoggerProvider(sdklog.WithProcessor(sdklog.NewSimpleProcessor(exporter)))
+	global.SetLoggerProvider(provider)
+
+	var buf bytes.Buffer
+
+	logger, err := New(Config{
+		Environment: EnvironmentProduction, Level: "info", OTelLibraryName: "t", Output: &buf, ScrubDocuments: true,
+	})
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	logger.With(logpkg.String("payer", "529.982.247-25")).
+		Log(ctx, logpkg.LevelError, "payer 52998224725 rejected", logpkg.Err(errors.New("cnpj 12.345.678/0001-95")))
+	require.NoError(t, provider.ForceFlush(ctx))
+
+	assert.Equal(t, []string{"payer [REDACTED_DOCUMENT] rejected"}, exporter.seen())
+
+	attrs := strings.Join(exporter.seenAttrs(), " ")
+	assert.Contains(t, attrs, "payer=[REDACTED_DOCUMENT]")
+	assert.Contains(t, attrs, "error=cnpj [REDACTED_DOCUMENT]")
+	assert.NotContains(t, attrs, "529.982.247-25")
+	assert.NotContains(t, attrs, "12.345.678/0001-95")
+	assert.NotContains(t, buf.String(), "52998224725")
+}
+
+// hiddenDocHolder carries a document where encoding/json does not look (an
+// unexported field and a json:"-" one) but fmt's %+v does. The OTLP bridge
+// renders a reflected struct with %+v, so the scrub must judge that rendering
+// as well as the JSON one.
+type hiddenDocHolder struct {
+	Name   string
+	Tagged string `json:"-"`
+	secret string
+}
+
+type scrubCtxKey struct{}
+
+// A reflected value must be scrubbed on the OTLP bridge as the bridge renders
+// it, not only as the local JSON sink does, and a context field must stay the
+// bridge's emit context even when its rendering carries a document.
+func TestScrubDocumentsCoversTheBridgeRendering(t *testing.T) {
+	prev := global.GetLoggerProvider()
+	t.Cleanup(func() { global.SetLoggerProvider(prev) })
+
+	exporter := &recordingExporter{}
+	provider := sdklog.NewLoggerProvider(sdklog.WithProcessor(sdklog.NewSimpleProcessor(exporter)))
+	global.SetLoggerProvider(provider)
+
+	var buf bytes.Buffer
+
+	logger, err := New(Config{
+		Environment: EnvironmentProduction, Level: "info", OTelLibraryName: "t", Output: &buf,
+		ScrubDocuments: true, DisableSampling: true,
+	})
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	unexported := hiddenDocHolder{Name: "x", secret: "529.982.247-25"}
+	tagged := hiddenDocHolder{Name: "x", Tagged: "52998224725"}
+
+	logger.Log(ctx, logpkg.LevelInfo, "unexported", logpkg.Any("customer", unexported))
+	logger.Log(ctx, logpkg.LevelInfo, "tagged", logpkg.Any("tagged", tagged))
+	logger.Log(ctx, logpkg.LevelInfo, "pointer", logpkg.Any("ptr", &tagged))
+	logger.Log(ctx, logpkg.LevelInfo, "slice", logpkg.Any("list", []*hiddenDocHolder{&unexported}))
+	logger.Log(ctx, logpkg.LevelInfo, "map", logpkg.Any("byName", map[string]hiddenDocHolder{"a": tagged}))
+
+	traceID := oteltrace.TraceID{0x4b, 0xf9, 0x2f, 0x35, 0x77, 0xb3, 0x4d, 0xa6, 0xa3, 0xce, 0x92, 0x9d, 0x0e, 0x0e, 0x47, 0x36}
+	spanCtx := oteltrace.ContextWithSpanContext(ctx, oteltrace.NewSpanContext(oteltrace.SpanContextConfig{
+		TraceID: traceID, SpanID: oteltrace.SpanID{1, 2, 3, 4, 5, 6, 7, 8}, TraceFlags: oteltrace.FlagsSampled,
+	}))
+	docCtx := context.WithValue(spanCtx, scrubCtxKey{}, "12.345.678/0001-95")
+	logger.Info("with context", zap.Any("ctx", docCtx))
+
+	require.NoError(t, provider.ForceFlush(ctx))
+
+	attrs := strings.Join(exporter.seenAttrs(), " ")
+	for _, doc := range []string{"529.982.247-25", "52998224725", "12.345.678/0001-95"} {
+		assert.NotContains(t, attrs, doc, "the bridge exported a document")
+		assert.NotContains(t, buf.String(), doc, "the local sink wrote a document")
+	}
+
+	traceIDs := exporter.seenTraceIDs()
+	require.NotEmpty(t, traceIDs)
+	assert.Equal(t, traceID.String(), traceIDs[len(traceIDs)-1],
+		"a context field must remain the bridge's emit context")
+}
+
+// A document carried as an OpenTelemetry attribute value, or as raw bytes,
+// reaches the bridge unchanged (otelzap forwards an attribute.Value as is and
+// a byte field as bytes), so it must be judged by its text, not by the base64
+// its String and JSON forms show, at the top level and nested.
+func TestScrubDocumentsCoversAttributeValuesAndBytes(t *testing.T) {
+	prev := global.GetLoggerProvider()
+	t.Cleanup(func() { global.SetLoggerProvider(prev) })
+
+	exporter := &recordingExporter{}
+	provider := sdklog.NewLoggerProvider(sdklog.WithProcessor(sdklog.NewSimpleProcessor(exporter)))
+	global.SetLoggerProvider(provider)
+
+	var buf bytes.Buffer
+
+	logger, err := New(Config{
+		Environment: EnvironmentProduction, Level: "info", OTelLibraryName: "t", Output: &buf,
+		ScrubDocuments: true, DisableSampling: true,
+	})
+	require.NoError(t, err)
+
+	const cpf = "529.982.247-25"
+
+	cases := map[string]zap.Field{
+		"attribute bytes": zap.Any("doc", attribute.ByteSliceValue([]byte(cpf))),
+		"attribute bytes pointer": zap.Any("doc", func() *attribute.Value {
+			v := attribute.ByteSliceValue([]byte(cpf))
+
+			return &v
+		}()),
+		"attribute string":       zap.Any("doc", attribute.StringValue(cpf)),
+		"attribute string slice": zap.Any("doc", attribute.StringSliceValue([]string{"a", cpf})),
+		"attribute slice":        zap.Any("doc", attribute.SliceValue(attribute.IntValue(1), attribute.ByteSliceValue([]byte(cpf)))),
+		"attribute map":          zap.Any("doc", attribute.MapValue(attribute.ByteSlice("raw", []byte(cpf)), attribute.String("s", "x"))),
+		"attribute map key":      zap.Any("doc", attribute.MapValue(attribute.Int(cpf, 1))),
+		"attribute mixed map": zap.Any("doc", attribute.MapValue(
+			attribute.String("s", "52998224725"), attribute.ByteSlice("raw", []byte(cpf)))),
+		"attribute in a map":   zap.Any("doc", map[string]attribute.Value{"k": attribute.ByteSliceValue([]byte(cpf))}),
+		"attribute in a slice": zap.Any("doc", []attribute.Value{attribute.ByteSliceValue([]byte(cpf))}),
+		"key values":           zap.Any("doc", []attribute.KeyValue{attribute.ByteSlice("raw", []byte(cpf))}),
+		"binary field":         zap.Binary("doc", []byte(cpf)),
+		"bytes via log.Any":    zap.Any("doc", []byte("payer "+cpf)),
+	}
+
+	encoded := base64.StdEncoding.EncodeToString([]byte(cpf))
+
+	for name, field := range cases {
+		t.Run(name, func(t *testing.T) {
+			before := len(exporter.seenRawAttrs())
+			buf.Reset()
+
+			logger.Info(name, field)
+			require.NoError(t, provider.ForceFlush(context.Background()))
+
+			raw := exporter.seenRawAttrs()
+			require.Greater(t, len(raw), before, "the entry must still reach the bridge")
+
+			exported := strings.Join(raw[before:], " ")
+			for _, leak := range []string{cpf, "52998224725", encoded} {
+				assert.NotContains(t, exported, leak, "the bridge exported a document")
+				assert.NotContains(t, buf.String(), leak, "the local sink wrote a document")
+			}
+
+			assert.Contains(t, exported, "[REDACTED_DOCUMENT]")
+		})
+	}
+}
+
+// flipStringer renders safe text on its first call and a document afterwards.
+type flipStringer struct{ calls atomic.Int32 }
+
+func (s *flipStringer) String() string {
+	if s.calls.Add(1) == 1 {
+		return "safe"
+	}
+
+	return "529.982.247-25"
+}
+
+// The sinks must write the rendering the scrub judged, not a second one: a
+// Stringer is asked once, and what it said then is what is written.
+func TestScrubDocumentsWritesTheRenderingItJudged(t *testing.T) {
+	prev := global.GetLoggerProvider()
+	t.Cleanup(func() { global.SetLoggerProvider(prev) })
+
+	exporter := &recordingExporter{}
+	provider := sdklog.NewLoggerProvider(sdklog.WithProcessor(sdklog.NewSimpleProcessor(exporter)))
+	global.SetLoggerProvider(provider)
+
+	var buf bytes.Buffer
+
+	logger, err := New(Config{
+		Environment: EnvironmentProduction, Level: "info", OTelLibraryName: "t", Output: &buf,
+		ScrubDocuments: true, DisableSampling: true,
+	})
+	require.NoError(t, err)
+
+	logger.Info("flip", zap.Stringer("s", &flipStringer{}))
+	require.NoError(t, provider.ForceFlush(context.Background()))
+
+	exported := strings.Join(exporter.seenRawAttrs(), " ")
+	assert.NotContains(t, exported, "529.982.247-25", "the bridge exported a document")
+	assert.NotContains(t, buf.String(), "529.982.247-25", "the local sink wrote a document")
+	assert.Contains(t, exported, "s=safe")
+	assert.Contains(t, buf.String(), `"s":"safe"`)
+}
+
+// A value nested past the walk's depth bound is not inspected, so it must not
+// be forwarded either: the field fails closed to the placeholder.
+func TestScrubDocumentsFailsClosedPastTheWalkDepth(t *testing.T) {
+	prev := global.GetLoggerProvider()
+	t.Cleanup(func() { global.SetLoggerProvider(prev) })
+
+	exporter := &recordingExporter{}
+	provider := sdklog.NewLoggerProvider(sdklog.WithProcessor(sdklog.NewSimpleProcessor(exporter)))
+	global.SetLoggerProvider(provider)
+
+	var buf bytes.Buffer
+
+	logger, err := New(Config{
+		Environment: EnvironmentProduction, Level: "info", OTelLibraryName: "t", Output: &buf,
+		ScrubDocuments: true, DisableSampling: true,
+	})
+	require.NoError(t, err)
+
+	const cpf = "529.982.247-25"
+
+	nest := func(leaf any) any {
+		v := leaf
+		for range 2 * maxBridgeDepth {
+			v = []any{v}
+		}
+
+		return v
+	}
+
+	cases := map[string]any{
+		"attribute bytes": nest(attribute.ByteSliceValue([]byte(cpf))),
+		"string":          nest(cpf),
+	}
+
+	encoded := base64.StdEncoding.EncodeToString([]byte(cpf))
+
+	for name, value := range cases {
+		t.Run(name, func(t *testing.T) {
+			before := len(exporter.seenRawAttrs())
+			buf.Reset()
+
+			logger.Info(name, zap.Any("deep", value))
+			require.NoError(t, provider.ForceFlush(context.Background()))
+
+			raw := exporter.seenRawAttrs()
+			require.Greater(t, len(raw), before, "the entry must still reach the bridge")
+
+			exported := strings.Join(raw[before:], " ")
+			for _, leak := range []string{cpf, encoded} {
+				assert.NotContains(t, exported, leak, "the bridge exported a document")
+				assert.NotContains(t, buf.String(), leak, "the local sink wrote a document")
+			}
+
+			assert.Contains(t, exported, "deep=[REDACTED_DOCUMENT]")
+		})
+	}
+}
+
+// docKeyObject writes a document as a key rather than as a value.
+type docKeyObject struct{}
+
+func (docKeyObject) MarshalLogObject(enc zapcore.ObjectEncoder) error {
+	enc.AddString("529.982.247-25", "v")
+
+	return nil
+}
+
+// A document written as a key, of the field or of an entry an inline object
+// adds, must be scrubbed like one written as a value.
+func TestScrubDocumentsCoversKeys(t *testing.T) {
+	prev := global.GetLoggerProvider()
+	t.Cleanup(func() { global.SetLoggerProvider(prev) })
+
+	exporter := &recordingExporter{}
+	provider := sdklog.NewLoggerProvider(sdklog.WithProcessor(sdklog.NewSimpleProcessor(exporter)))
+	global.SetLoggerProvider(provider)
+
+	var buf bytes.Buffer
+
+	logger, err := New(Config{
+		Environment: EnvironmentProduction, Level: "info", OTelLibraryName: "t", Output: &buf,
+		ScrubDocuments: true, DisableSampling: true,
+	})
+	require.NoError(t, err)
+
+	cases := map[string]zap.Field{
+		"inline object key": zap.Inline(docKeyObject{}),
+		"nested object key": zap.Object("obj", docKeyObject{}),
+		"string field key":  zap.String("529.982.247-25", "v"),
+		"reflected key":     zap.Any("529.982.247-25", docHolder{Note: "ok"}),
+	}
+
+	for name, field := range cases {
+		t.Run(name, func(t *testing.T) {
+			before := len(exporter.seenRawAttrs())
+			buf.Reset()
+
+			logger.Info(name, field)
+			require.NoError(t, provider.ForceFlush(context.Background()))
+
+			raw := exporter.seenRawAttrs()
+			require.Greater(t, len(raw), before, "the entry must still reach the bridge")
+
+			exported := strings.Join(raw[before:], " ")
+			assert.NotContains(t, exported, "529.982.247-25", "the bridge exported a document")
+			assert.NotContains(t, buf.String(), "529.982.247-25", "the local sink wrote a document")
+			assert.Contains(t, exported, "[REDACTED_DOCUMENT]")
+		})
+	}
+}
+
+// An exempt key keeps its value on the OTLP bridge as on the local sink,
+// whether it was logged with the entry or carried by With; the message and a
+// non-exempt key holding the same value are still scrubbed on both.
+func TestScrubDocumentsExemptKeysReachTheOTelBridge(t *testing.T) {
+	prev := global.GetLoggerProvider()
+	t.Cleanup(func() { global.SetLoggerProvider(prev) })
+
+	exporter := &recordingExporter{}
+	provider := sdklog.NewLoggerProvider(sdklog.WithProcessor(sdklog.NewSimpleProcessor(exporter)))
+	global.SetLoggerProvider(provider)
+
+	var buf bytes.Buffer
+
+	logger, err := New(Config{
+		Environment: EnvironmentProduction, Level: "info", OTelLibraryName: "t", Output: &buf,
+		ScrubDocuments: true, ScrubDocumentsExemptKeys: []string{"NumCtrlIF", "numctrlpart"}, DisableSampling: true,
+	})
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	logger.With(logpkg.String("NumCtrlPart", "52998224725")).
+		Log(ctx, logpkg.LevelInfo, "ctrl 12ABC34501DE35",
+			logpkg.String("NumCtrlIF", "12ABC34501DE35"), logpkg.String("note", "12ABC34501DE35"))
+	require.NoError(t, provider.ForceFlush(ctx))
+
+	assert.Equal(t, []string{"ctrl [REDACTED_DOCUMENT]"}, exporter.seen())
+
+	attrs := strings.Join(exporter.seenAttrs(), " ")
+	assert.Contains(t, attrs, "NumCtrlIF=12ABC34501DE35")
+	assert.Contains(t, attrs, "NumCtrlPart=52998224725")
+	assert.Contains(t, attrs, "note=[REDACTED_DOCUMENT]")
+
+	local := buf.String()
+	assert.Contains(t, local, `"NumCtrlIF":"12ABC34501DE35"`)
+	assert.Contains(t, local, `"NumCtrlPart":"52998224725"`)
+	assert.Contains(t, local, `"note":"[REDACTED_DOCUMENT]"`)
+	assert.NotContains(t, local, "ctrl 12ABC34501DE35")
 }

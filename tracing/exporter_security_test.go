@@ -132,6 +132,9 @@ func TestNormalizeEndpointEnvVars_SchemeFollowsSecurityMode(t *testing.T) {
 		{name: "bare value, insecure exporter", value: "collector:4317", insecure: true, want: "http://collector:4317"},
 		{name: "http scheme kept", value: "http://collector:4317", want: "http://collector:4317"},
 		{name: "https scheme kept", value: "https://collector:4317", insecure: true, want: "https://collector:4317"},
+		{name: "uppercase https scheme kept", value: "HTTPS://collector:4317", want: "HTTPS://collector:4317"},
+		{name: "uppercase http scheme kept", value: "HTTP://collector:4317", insecure: true, want: "HTTP://collector:4317"},
+		{name: "mixed-case https scheme kept", value: "Https://collector:4317", insecure: true, want: "Https://collector:4317"},
 	}
 
 	for _, testCase := range tests {

@@ -11,4 +11,25 @@
 // turns off the production profile's 100:100 sampler, which otherwise drops
 // every repeat of a message past the 100th inside a second - right for a service
 // under load, wrong for a diagnostic log somebody reads afterwards.
+//
+// Config.ScrubDocuments (off by default) replaces every CPF/CNPJ-shaped span in
+// entry messages, field keys and string-rendered field values with
+// redaction.DocumentPlaceholder, on the local sink and the OTLP bridge alike,
+// whether the entry comes through Log, the zap-typed helpers, With or Raw(). A
+// structured field is judged as each sink renders it: the local JSON, and the
+// bridge's %+v, which also prints unexported and json:"-" struct fields. Raw
+// bytes and OpenTelemetry attribute values, which the bridge exports as they
+// are, are judged by the text they carry, not by their base64 form. A field
+// key ending in cpf or cnpj is read as its value's label
+// (redaction.ScrubDocumentsUnder), so cnpj=12abc34501de35 logged as a field is
+// scrubbed like the same text in a message. It is defence in depth, not a licence to format documents into log lines. The
+// stdlib log.GoLogger fallback does not scrub content; call
+// redaction.ScrubDocuments yourself on text you hand it.
+//
+// Config.ScrubDocumentsExemptKeys lets a consumer keep protocol identifiers
+// whose shape is also a CPF's or a CNPJ's (a NumCtrlIF, a NumCtrlPart) under
+// the keys it lists: a string, byte-string, binary or Stringer field whose key
+// equals a listed one, ignoring case, keeps its value. The message, error
+// fields, structured fields and the key itself stay scrubbed, and name-based
+// masking of sensitive fields is never undone.
 package zap

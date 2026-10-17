@@ -34,4 +34,18 @@
 // come from the binary, not the environment: a service sets them at link time
 // (-ldflags "-X main.version=... -X main.revision=...") and passes them to
 // NewTelemetry explicitly.
+//
+// # Document scrubbing
+//
+// NewTelemetryWithOptions(cfg, WithDocumentScrubbing()) runs every exported
+// span through redaction.ScrubDocuments: name, status description, string
+// attributes, event names and attributes (exception.message included) and link
+// attributes. An attribute key ending in cpf or cnpj is read as its value's
+// label (redaction.ScrubDocumentsUnder), so a lowercase alphanumeric CNPJ
+// under cnpj or payerCnpj is scrubbed too. It is off by default, runs at export so it catches text from any
+// source, and is defence in depth, not a licence to format CPF or CNPJ into
+// span text. WithDocumentScrubExemptKeys keeps protocol identifiers whose
+// shape is also a document's (a NumCtrlIF, a NumCtrlPart) under the attribute
+// keys it lists, matched whole and ignoring case; span names, status
+// descriptions, event names and exception.* attributes stay scrubbed.
 package tracing
